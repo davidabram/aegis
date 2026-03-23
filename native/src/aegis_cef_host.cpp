@@ -499,10 +499,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       throw std::runtime_error("install runtime payload must be a string");
     }
     runtime_script_ = payload->GetString().ToString();
-    EnsurePageReady();
-    if (!runtime_script_.empty()) {
-      InvokeRenderer(aegis::kOpInstallRuntime, runtime_script_);
-    }
+    EnsureRuntimeInstalled();
     return {};
   }
 
@@ -522,6 +519,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
   }
 
   std::vector<std::uint8_t> SendBatch(const std::vector<std::uint8_t>& request) override {
+    EnsureRuntimeInstalled();
     auto payload =
         RequireDictionary(DecodeEnvelope(MessageKind::SendBatch, request),
                           "batch request must be a dictionary");
@@ -532,7 +530,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
 
   std::vector<std::uint8_t> SnapshotDom(const std::vector<std::uint8_t>& request) override {
     static_cast<void>(request);
-    EnsurePageReady();
+    EnsureRuntimeInstalled();
     return EncodeJsonEnvelope(MessageKind::SnapshotDom,
                               InvokeRenderer(aegis::kOpSnapshotDom, "{}"));
   }
@@ -544,14 +542,14 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
 
     ReplaceNetworkOverrides(payload);
     ReplaceCookies(payload);
-    EnsurePageReady();
+    EnsureRuntimeInstalled();
     InvokeRenderer(aegis::kOpInjectStorage, WriteJson(payload));
     return {};
   }
 
   std::vector<std::uint8_t> SnapshotSession(const std::vector<std::uint8_t>& request) override {
     static_cast<void>(request);
-    EnsurePageReady();
+    EnsureRuntimeInstalled();
 
     auto storage = RequireDictionary(
         ParseJsonValue(InvokeRenderer(aegis::kOpSnapshotStorage, "{}"),
@@ -564,7 +562,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
 
   std::vector<std::uint8_t> DrainEvents(const std::vector<std::uint8_t>& request) override {
     static_cast<void>(request);
-    EnsurePageReady();
+    EnsureRuntimeInstalled();
 
     const auto renderer_response = InvokeRenderer(aegis::kOpDrainEvents, "{}");
     AppendDebugLog("host: drain_events renderer_response bytes=" +
@@ -608,8 +606,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
         DecodeEnvelope(MessageKind::Navigate, request), "navigate request must be a dictionary");
     const auto target_url = payload->GetString("url").ToString();
     NavigateTo(target_url);
-    EnsurePageReady();
-    InstallRuntimeIfPresent();
+    EnsureRuntimeInstalled();
 
     auto response = CefDictionaryValue::Create();
     response->SetString("url", CurrentUrl());
@@ -635,6 +632,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       request_context_ = browser->GetHost()->GetRequestContext();
       page_ready_ = false;
       renderer_ready_ = false;
+      runtime_installed_ = false;
       if (auto frame = browser->GetMainFrame(); frame.get()) {
         current_url_ = frame->GetURL().ToString();
       }
@@ -656,6 +654,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
     std::lock_guard lock(mutex_);
     page_ready_ = false;
     renderer_ready_ = false;
+    runtime_installed_ = false;
   }
 
   void OnLoadingStateChange(CefRefPtr<CefBrowser> browser, bool is_loading) override {
@@ -719,6 +718,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       client_ = nullptr;
       page_ready_ = false;
       renderer_ready_ = false;
+      runtime_installed_ = false;
       browser_closed_ = true;
       cv_.notify_all();
     }
@@ -1112,10 +1112,22 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
     });
   }
 
-  void InstallRuntimeIfPresent() {
-    if (!runtime_script_.empty()) {
-      InvokeRenderer(aegis::kOpInstallRuntime, runtime_script_);
+  void EnsureRuntimeInstalled() {
+    EnsurePageReady();
+
+    bool needs_install = false;
+    {
+      std::lock_guard lock(mutex_);
+      needs_install = !runtime_script_.empty() && !runtime_installed_;
     }
+    if (!needs_install) {
+      return;
+    }
+
+    InvokeRenderer(aegis::kOpInstallRuntime, runtime_script_);
+
+    std::lock_guard lock(mutex_);
+    runtime_installed_ = true;
   }
 
   std::string InvokeRenderer(const std::string& operation, const std::string& body) {
@@ -1288,6 +1300,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
   bool startup_complete_ = false;
   bool page_ready_ = false;
   bool renderer_ready_ = false;
+  bool runtime_installed_ = false;
   bool browser_closed_ = false;
   std::string startup_error_;
   std::string current_url_ = "about:blank";
