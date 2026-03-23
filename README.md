@@ -25,6 +25,21 @@ Core capabilities:
 - expose the runtime over a local API server
 - launch a native standalone macOS browser shell
 
+## Agent Guide
+
+For the practical control surface agents should use, see:
+
+- [docs/agent-control.md](/Users/deepsaint/Desktop/aegis/docs/agent-control.md)
+
+That guide covers:
+
+- CLI control
+- HTTP API routes
+- command payloads
+- session and event semantics
+- trace recording and replay
+- recommended agent control flow
+
 ## Repository Layout
 
 - `src/`: Rust runtime, CLI, API server, transport bridge, trace system, session handling
