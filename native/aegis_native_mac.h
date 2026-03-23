@@ -8,6 +8,7 @@
 
 std::string AegisStandaloneRootCachePath();
 std::string AegisStandaloneCachePath();
+void AegisInitializeBrowserHostApplication();
 CefWindowHandle AegisCreateBrowserHostView(const std::string& title,
                                            int width,
                                            int height);
@@ -19,5 +20,6 @@ void AegisSetBrowserHostNavigationState(bool can_go_back,
                                         bool is_loading);
 void AegisAttachBrowserToHostWindow(CefRefPtr<CefBrowser> browser);
 void AegisCloseBrowserHostWindow();
+void AegisPumpBrowserHostWindow();
 
 #endif  // AEGIS_NATIVE_AEGIS_NATIVE_MAC_H_

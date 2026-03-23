@@ -30,10 +30,25 @@ impl DomTree {
     pub fn apply_mutations(&mut self, mutations: &[DomMutation]) {
         for mutation in mutations {
             match mutation {
-                DomMutation::Upsert(node) => {
-                    self.nodes.insert(node.id, node.clone());
+                DomMutation::Upsert {
+                    id,
+                    tag,
+                    attrs,
+                    text,
+                    children,
+                } => {
+                    self.nodes.insert(
+                        *id,
+                        DomNode {
+                            id: *id,
+                            tag: tag.clone(),
+                            attrs: attrs.clone(),
+                            text: text.clone(),
+                            children: children.clone(),
+                        },
+                    );
                 }
-                DomMutation::Remove(id) => {
+                DomMutation::Remove { id } => {
                     self.nodes.remove(id);
                     for parent in self.nodes.values_mut() {
                         parent.children.retain(|child| child != id);

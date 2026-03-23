@@ -6,8 +6,19 @@ use crate::dom::node::{DomNode, DomSnapshot};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DomMutation {
-    Upsert(DomNode),
-    Remove(NodeId),
+    Upsert {
+        id: NodeId,
+        tag: String,
+        #[serde(default)]
+        attrs: std::collections::HashMap<String, String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+        #[serde(default)]
+        children: Vec<NodeId>,
+    },
+    Remove {
+        id: NodeId,
+    },
     SetText {
         id: NodeId,
         text: Option<String>,
@@ -39,10 +50,10 @@ pub fn diff_snapshots(previous: &DomSnapshot, next: &DomSnapshot) -> Vec<DomMuta
 
     for (&id, next_node) in &next_nodes {
         match previous_nodes.remove(&id) {
-            None => changes.push(DomMutation::Upsert((*next_node).clone())),
+            None => changes.push(upsert_mutation(next_node)),
             Some(previous_node) => {
                 if previous_node.tag != next_node.tag {
-                    changes.push(DomMutation::Upsert((*next_node).clone()));
+                    changes.push(upsert_mutation(next_node));
                     continue;
                 }
 
@@ -84,8 +95,18 @@ pub fn diff_snapshots(previous: &DomSnapshot, next: &DomSnapshot) -> Vec<DomMuta
     }
 
     for id in previous_nodes.into_keys() {
-        changes.push(DomMutation::Remove(id));
+        changes.push(DomMutation::Remove { id });
     }
 
     changes
+}
+
+fn upsert_mutation(node: &DomNode) -> DomMutation {
+    DomMutation::Upsert {
+        id: node.id,
+        tag: node.tag.clone(),
+        attrs: node.attrs.clone(),
+        text: node.text.clone(),
+        children: node.children.clone(),
+    }
 }

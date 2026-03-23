@@ -24,6 +24,7 @@ set(AEGIS_NATIVE_SOURCES
   aegis_app.cc
   aegis_client.h
   aegis_client.cc
+  aegis_browser_host_mac.mm
   aegis_native_mac.mm
   src/aegis_protocol.cpp
   src/aegis_cef_host.cpp
@@ -77,6 +78,7 @@ set_target_properties(${AEGIS_NATIVE_TARGET} PROPERTIES
 add_library(${AEGIS_SHARED_SUPPORT_TARGET} STATIC
   aegis_app.cc
   aegis_client.cc
+  aegis_browser_host_mac.mm
 )
 target_compile_features(${AEGIS_SHARED_SUPPORT_TARGET} PRIVATE cxx_std_20)
 target_include_directories(${AEGIS_SHARED_SUPPORT_TARGET} PRIVATE
@@ -88,6 +90,7 @@ target_include_directories(${AEGIS_SHARED_SUPPORT_TARGET} PRIVATE
 target_link_libraries(${AEGIS_SHARED_SUPPORT_TARGET} PRIVATE
   libcef_dll_wrapper
   ${CEF_STANDARD_LIBS}
+  "-framework QuartzCore"
 )
 
 add_library(${AEGIS_HOST_LIBRARY_TARGET} SHARED ${AEGIS_HOST_LIBRARY_SOURCES})
