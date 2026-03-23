@@ -1,0 +1,446 @@
+#include "aegis_app.h"
+
+#include <cstdlib>
+#include <fstream>
+#include <string>
+
+#include "aegis_client.h"
+#include "aegis_messages.h"
+#if defined(AEGIS_STANDALONE_APP)
+#include "aegis_native_mac.h"
+#endif
+#include "include/cef_browser.h"
+#include "include/cef_command_line.h"
+#include "include/cef_process_message.h"
+#include "include/cef_v8.h"
+#include "include/wrapper/cef_helpers.h"
+
+namespace {
+
+void AppendDebugLog(const std::string& message) {
+  std::string path;
+  if (const char* env_path = std::getenv("AEGIS_DEBUG_LOG");
+      env_path != nullptr && *env_path != '\0') {
+    path = env_path;
+  } else if (auto command_line = CefCommandLine::GetGlobalCommandLine(); command_line.get()) {
+    path = command_line->GetSwitchValue("aegis-debug-log").ToString();
+  }
+  if (path.empty()) {
+    return;
+  }
+  std::ofstream output(path, std::ios::app);
+  if (!output.is_open()) {
+    return;
+  }
+  output << message << '\n';
+}
+
+bool IsHeadless(CefRefPtr<CefCommandLine> command_line) {
+  return command_line->HasSwitch("headless") ||
+         command_line->GetSwitchValue("mode") == "headless";
+}
+
+#if defined(AEGIS_STANDALONE_APP)
+std::string RequestedStartupUrl(CefRefPtr<CefCommandLine> command_line) {
+  return command_line->GetSwitchValue("url").ToString();
+}
+#endif
+
+std::string QuoteForJavaScript(const std::string& input) {
+  std::string out;
+  out.reserve(input.size() + 8);
+  out.push_back('"');
+  for (const char ch : input) {
+    switch (ch) {
+      case '\\':
+        out += "\\\\";
+        break;
+      case '"':
+        out += "\\\"";
+        break;
+      case '\n':
+        out += "\\n";
+        break;
+      case '\r':
+        out += "\\r";
+        break;
+      case '\t':
+        out += "\\t";
+        break;
+      default:
+        out.push_back(ch);
+        break;
+    }
+  }
+  out.push_back('"');
+  return out;
+}
+
+bool EvalToString(CefRefPtr<CefFrame> frame,
+                  const std::string& code,
+                  std::string* value,
+                  std::string* error) {
+  auto context = frame->GetV8Context();
+  if (!context.get()) {
+    *error = "v8 context unavailable";
+    return false;
+  }
+  if (!context->Enter()) {
+    *error = "failed to enter v8 context";
+    return false;
+  }
+
+  CefRefPtr<CefV8Value> result;
+  CefRefPtr<CefV8Exception> exception;
+  const bool ok = context->Eval(code, frame->GetURL(), 0, result, exception);
+  context->Exit();
+
+  if (!ok) {
+    *error = exception.get() ? exception->GetMessage().ToString()
+                             : std::string("javascript evaluation failed");
+    return false;
+  }
+
+  if (!result.get()) {
+    value->clear();
+    return true;
+  }
+  if (result->IsString()) {
+    *value = result->GetStringValue().ToString();
+    return true;
+  }
+  if (result->IsBool()) {
+    *value = result->GetBoolValue() ? "true" : "false";
+    return true;
+  }
+  if (result->IsInt() || result->IsUInt()) {
+    *value = std::to_string(result->GetIntValue());
+    return true;
+  }
+  if (result->IsDouble()) {
+    *value = std::to_string(result->GetDoubleValue());
+    return true;
+  }
+  value->clear();
+  return true;
+}
+
+void SendRendererReply(CefRefPtr<CefFrame> frame,
+                       int request_id,
+                       bool ok,
+                       const std::string& body) {
+  auto reply = CefProcessMessage::Create(aegis::kAegisResponseMessage);
+  auto args = reply->GetArgumentList();
+  args->SetInt(0, request_id);
+  args->SetBool(1, ok);
+  args->SetString(2, body);
+  frame->SendProcessMessage(PID_BROWSER, reply);
+}
+
+bool DispatchRendererOperation(const std::string& op,
+                               const std::string& body,
+                               CefRefPtr<CefFrame> frame,
+                               std::string* response,
+                               std::string* error) {
+  if (op == aegis::kOpInstallRuntime) {
+    if (!EvalToString(frame, body, response, error)) {
+      return false;
+    }
+    *response = "{}";
+    return true;
+  }
+
+  if (op == aegis::kOpEvalJs) {
+    return EvalToString(frame, body, response, error);
+  }
+
+  if (op == aegis::kOpSnapshotDom) {
+    return EvalToString(frame,
+                        "JSON.stringify(window.__aegis ? window.__aegis.snapshot() : {nodes:[]})",
+                        response, error);
+  }
+
+  if (op == aegis::kOpDrainEvents) {
+    return EvalToString(
+        frame,
+        "JSON.stringify({events: window.__aegis ? window.__aegis.drainEvents() : []})",
+        response, error);
+  }
+
+  if (op == aegis::kOpSnapshotStorage) {
+    return EvalToString(
+        frame,
+        R"(JSON.stringify({
+          cookies: [],
+          local_storage: Object.fromEntries(Object.entries(localStorage)),
+          session_storage: Object.fromEntries(Object.entries(sessionStorage)),
+          network_overrides: []
+        }))",
+        response, error);
+  }
+
+  if (op == aegis::kOpInjectStorage) {
+    const auto quoted = QuoteForJavaScript(body);
+    return EvalToString(
+        frame,
+        "(() => { const s = JSON.parse(" + quoted +
+            "); if (s.local_storage) { for (const [k,v] of Object.entries(s.local_storage)) localStorage.setItem(k, v); }"
+            " if (s.session_storage) { for (const [k,v] of Object.entries(s.session_storage)) sessionStorage.setItem(k, v); }"
+            " return '{}'; })()",
+        response, error);
+  }
+
+  if (op == aegis::kOpSendBatch) {
+    const auto quoted = QuoteForJavaScript(body);
+    return EvalToString(
+        frame,
+        "(() => { const req = JSON.parse(" + quoted +
+            "); const commands = req.commands || [];"
+            " const results = window.__aegis ? window.__aegis.exec(commands) : [];"
+            " const snapshot = window.__aegis ? window.__aegis.snapshot() : {nodes:[]};"
+            " const events = window.__aegis ? window.__aegis.drainEvents() : [];"
+            " return JSON.stringify({batch_id: req.batch_id || 0, results, snapshot, events}); })()",
+        response, error);
+  }
+
+  *error = "unsupported renderer operation";
+  return false;
+}
+
+}  // namespace
+
+AegisApp::AegisApp(bool launch_browser_on_context_initialized,
+                   std::string startup_url)
+    : launch_browser_on_context_initialized_(launch_browser_on_context_initialized),
+      startup_url_(startup_url.empty() ? "https://example.com" : std::move(startup_url)),
+      pending_startup_url_(startup_url_) {}
+
+void AegisApp::OnBeforeCommandLineProcessing(
+    const CefString& process_type,
+    CefRefPtr<CefCommandLine> command_line) {
+  if (const char* debug_log = std::getenv("AEGIS_DEBUG_LOG");
+      debug_log != nullptr && *debug_log != '\0' &&
+      !command_line->HasSwitch("aegis-debug-log")) {
+    command_line->AppendSwitchWithValue("aegis-debug-log", debug_log);
+  }
+
+  if (!process_type.empty()) {
+    return;
+  }
+
+  command_line->AppendSwitch("deny-permission-prompts");
+  command_line->AppendSwitch("disable-notifications");
+  command_line->AppendSwitch("disable-background-networking");
+  command_line->AppendSwitch("disable-geolocation");
+  command_line->AppendSwitch("disable-search-geolocation-disclosure");
+  command_line->AppendSwitch("no-default-browser-check");
+  command_line->AppendSwitch("no-first-run");
+  command_line->AppendSwitchWithValue("disable-features",
+                                      "LocationProviderManager,NewMacNotificationAPI");
+
+#if defined(OS_MAC)
+  command_line->AppendSwitch("use-mock-keychain");
+#endif
+
+  if (IsHeadless(command_line)) {
+    command_line->AppendSwitch("disable-gpu");
+    command_line->AppendSwitch("disable-gpu-compositing");
+  }
+}
+
+void AegisApp::OnBeforeChildProcessLaunch(
+    CefRefPtr<CefCommandLine> command_line) {
+  if (const char* debug_log = std::getenv("AEGIS_DEBUG_LOG");
+      debug_log != nullptr && *debug_log != '\0' &&
+      !command_line->HasSwitch("aegis-debug-log")) {
+    command_line->AppendSwitchWithValue("aegis-debug-log", debug_log);
+  }
+}
+
+bool AegisApp::OnAlreadyRunningAppRelaunch(
+    CefRefPtr<CefCommandLine> command_line,
+    const CefString&) {
+  CEF_REQUIRE_UI_THREAD();
+#if !defined(AEGIS_STANDALONE_APP)
+  (void)command_line;
+  return false;
+#else
+  pending_startup_url_ = RequestedStartupUrl(command_line);
+  if (pending_startup_url_.empty()) {
+    pending_startup_url_ = startup_url_;
+  }
+  AppendDebugLog("app: on_already_running_app_relaunch url=" + pending_startup_url_);
+
+  if (primary_browser_) {
+    AegisShowBrowserHostWindow();
+    if (!pending_startup_url_.empty()) {
+      primary_browser_->GetMainFrame()->LoadURL(pending_startup_url_);
+    }
+    return true;
+  }
+
+  if (launch_browser_on_context_initialized_) {
+    CreateHeadfulBrowser(pending_startup_url_.empty() ? startup_url_
+                                                      : pending_startup_url_);
+    return true;
+  }
+
+  return false;
+#endif
+}
+
+void AegisApp::OnScheduleMessagePumpWork(int64_t) {}
+
+void AegisApp::CreateHeadfulBrowser(const std::string& url) {
+#if !defined(AEGIS_STANDALONE_APP)
+  (void)url;
+#else
+  CefBrowserSettings settings;
+  settings.windowless_frame_rate = 30;
+
+  CefRefPtr<AegisClient> client(new AegisClient(false, this));
+  CefWindowInfo window_info;
+  window_info.SetAsChild(AegisCreateBrowserHostView("Aegis", 1280, 800),
+                         CefRect(0, 0, 1280, 800));
+  window_info.runtime_style = CEF_RUNTIME_STYLE_ALLOY;
+
+  if (!CefBrowserHost::CreateBrowser(window_info, client, url, settings, nullptr,
+                                     nullptr)) {
+    AppendDebugLog("app: failed to create headful browser");
+  }
+#endif
+}
+
+void AegisApp::OnContextInitialized() {
+  CEF_REQUIRE_UI_THREAD();
+  AppendDebugLog("app: on_context_initialized");
+  if (!launch_browser_on_context_initialized_) {
+    return;
+  }
+
+  auto command_line = CefCommandLine::GetGlobalCommandLine();
+  const bool headless = IsHeadless(command_line);
+  const auto url =
+      pending_startup_url_.empty() ? startup_url_ : pending_startup_url_;
+  AppendDebugLog("app: on_context_initialized url=" + url);
+
+  CefBrowserSettings settings;
+  settings.windowless_frame_rate = 30;
+
+  CefRefPtr<AegisClient> client(new AegisClient(headless, this));
+
+  if (headless) {
+    CefWindowInfo window_info;
+    window_info.SetAsWindowless(kNullWindowHandle);
+    CefBrowserHost::CreateBrowser(window_info, client, url, settings, nullptr,
+                                  nullptr);
+    return;
+  }
+  CreateHeadfulBrowser(url);
+}
+
+void AegisApp::OnContextCreated(CefRefPtr<CefBrowser>,
+                                CefRefPtr<CefFrame> frame,
+                                CefRefPtr<CefV8Context>) {
+  CEF_REQUIRE_RENDERER_THREAD();
+  AppendDebugLog("app: on_context_created");
+  if (!frame.get()) {
+    return;
+  }
+
+  auto message = CefProcessMessage::Create(aegis::kAegisLifecycleMessage);
+  auto args = message->GetArgumentList();
+  args->SetString(0, aegis::kLifecycleContextReady);
+  args->SetString(1, frame->GetURL());
+  frame->SendProcessMessage(PID_BROWSER, message);
+}
+
+bool AegisApp::OnProcessMessageReceived(CefRefPtr<CefBrowser>,
+                                        CefRefPtr<CefFrame> frame,
+                                        CefProcessId source_process,
+                                        CefRefPtr<CefProcessMessage> message) {
+  CEF_REQUIRE_RENDERER_THREAD();
+  AppendDebugLog("app: on_process_message_received renderer");
+  if (source_process != PID_BROWSER || !message.get() ||
+      message->GetName() != aegis::kAegisRequestMessage) {
+    return false;
+  }
+
+  auto args = message->GetArgumentList();
+  const int request_id = args->GetInt(0);
+  const auto op = args->GetString(1).ToString();
+  const auto body = args->GetString(2).ToString();
+
+  std::string response;
+  std::string error;
+  if (DispatchRendererOperation(op, body, frame, &response, &error)) {
+    SendRendererReply(frame, request_id, true, response);
+  } else {
+    SendRendererReply(frame, request_id, false, error);
+  }
+  return true;
+}
+
+void AegisApp::OnPrimaryBrowserCreated(CefRefPtr<CefBrowser> browser) {
+  CEF_REQUIRE_UI_THREAD();
+  if (!primary_browser_) {
+    primary_browser_ = browser;
+  }
+#if defined(AEGIS_STANDALONE_APP)
+  if (browser) {
+    AegisSetBrowserHostAddress(browser->GetMainFrame()->GetURL().ToString());
+    AegisSetBrowserHostNavigationState(browser->CanGoBack(), browser->CanGoForward(),
+                                       browser->IsLoading());
+    AegisAttachBrowserToHostWindow(browser);
+    AegisShowBrowserHostWindow();
+  }
+#endif
+}
+
+void AegisApp::OnLoadingStateChange(CefRefPtr<CefBrowser> browser, bool is_loading) {
+  CEF_REQUIRE_UI_THREAD();
+#if defined(AEGIS_STANDALONE_APP)
+  if (browser) {
+    AegisSetBrowserHostNavigationState(browser->CanGoBack(), browser->CanGoForward(),
+                                       is_loading);
+  }
+#else
+  (void)browser;
+  (void)is_loading;
+#endif
+}
+
+void AegisApp::OnAddressChange(CefRefPtr<CefBrowser>,
+                               CefRefPtr<CefFrame> frame,
+                               const CefString& url) {
+  CEF_REQUIRE_UI_THREAD();
+#if defined(AEGIS_STANDALONE_APP)
+  if (frame && frame->IsMain()) {
+    AegisSetBrowserHostAddress(url.ToString());
+  }
+#else
+  (void)frame;
+  (void)url;
+#endif
+}
+
+void AegisApp::OnTitleChange(CefRefPtr<CefBrowser>,
+                             const CefString& title) {
+  CEF_REQUIRE_UI_THREAD();
+#if defined(AEGIS_STANDALONE_APP)
+  AegisSetBrowserHostTitle(title.ToString());
+#else
+  (void)title;
+#endif
+}
+
+void AegisApp::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
+  CEF_REQUIRE_UI_THREAD();
+  if (primary_browser_ && browser &&
+      primary_browser_->GetIdentifier() == browser->GetIdentifier()) {
+    primary_browser_ = nullptr;
+#if defined(AEGIS_STANDALONE_APP)
+    AegisCloseBrowserHostWindow();
+#endif
+  }
+}

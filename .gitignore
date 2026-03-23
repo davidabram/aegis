@@ -1,0 +1,22 @@
+# macOS
+.DS_Store
+
+# Rust / Cargo
+/target/
+
+# Native macOS / local builds
+/native/build/
+/native/build-xcode/
+
+# Fozzy local artifacts
+/.fozzy/
+
+# Vendored native SDK payloads kept local
+/third_party/cef/
+
+# Editor / local tooling
+/.idea/
+/.vscode/
+
+# Logs
+*.log

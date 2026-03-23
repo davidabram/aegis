@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "name": "aegis-core",
+  "steps": [
+    {
+      "name": "cargo-test",
+      "type": "proc_spawn",
+      "cmd": "cargo",
+      "args": [
+        "test"
+      ],
+      "expect_exit": 0
+    }
+  ]
+}

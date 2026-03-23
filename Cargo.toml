@@ -1,0 +1,24 @@
+[package]
+name = "aegis"
+version = "0.1.0"
+edition = "2024"
+
+[lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unwrap_used = "deny"
+
+[dependencies]
+axum = { version = "0.8", features = ["json"] }
+bincode = { version = "2.0.1", features = ["serde"] }
+clap = { version = "4.5", features = ["derive"] }
+libloading = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.48", features = ["macros", "rt-multi-thread", "sync", "net"] }
+thiserror = "2.0"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"
