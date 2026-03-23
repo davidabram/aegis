@@ -26,15 +26,6 @@ pub struct LoadedHost {
 
 impl LoadedHost {
     pub fn open(path: impl AsRef<Path>, config: &BrowserConfig) -> Result<Self, AegisError> {
-        #[cfg(target_os = "macos")]
-        {
-            let _ = path.as_ref();
-            let _bridge = CefBridge::new_native_app(".", config.clone())?;
-            return Err(AegisError::Bridge(
-                "loaded host is unavailable on macOS app transport".into(),
-            ));
-        }
-
         let library = unsafe { Library::new(path.as_ref()) }
             .map_err(|error| AegisError::Bridge(error.to_string()))?;
 
@@ -91,33 +82,6 @@ pub struct LoadedAegisClient {
 
 impl LoadedAegisClient {
     pub fn connect(path: impl AsRef<Path>, config: BrowserConfig) -> Result<Self, AegisError> {
-        #[cfg(target_os = "macos")]
-        {
-            let _ = path.as_ref();
-            let bridge = CefBridge::new_native_app(".", config.clone())?;
-            let client = AegisClient::connect(bridge, config)?;
-            return Ok(Self {
-                _host: LoadedHost {
-                    _library: unsafe { Library::new("/usr/lib/libSystem.B.dylib") }
-                        .map_err(|error| AegisError::Bridge(error.to_string()))?,
-                    handle: std::ptr::null_mut(),
-                    destroy: dummy_destroy,
-                    table: HostFunctionTable {
-                        install_runtime: dummy_api,
-                        eval_js: dummy_api,
-                        send_batch: dummy_api,
-                        snapshot_dom: dummy_api,
-                        inject_session: dummy_api,
-                        snapshot_session: dummy_api,
-                        drain_events: dummy_api,
-                        navigate: dummy_api,
-                        free_buffer: dummy_free,
-                    },
-                },
-                client,
-            });
-        }
-
         let host = LoadedHost::open(path, &config)?;
         let bridge = host.bridge()?;
         let client = AegisClient::connect(bridge, config)?;
@@ -162,18 +126,6 @@ impl LoadedAegisClient {
         self.client.browser_config()
     }
 }
-
-unsafe extern "C" fn dummy_api(
-    _: HostHandle,
-    _: *const u8,
-    _: usize,
-    _: *mut crate::transport::bridge::HostBuffer,
-) -> crate::transport::bridge::HostStatus {
-    crate::transport::bridge::HostStatus::Error
-}
-
-unsafe extern "C" fn dummy_free(_: HostHandle, _: crate::transport::bridge::HostBuffer) {}
-unsafe extern "C" fn dummy_destroy(_: HostHandle) {}
 
 impl Deref for LoadedAegisClient {
     type Target = AegisClient;

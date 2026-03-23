@@ -3,6 +3,7 @@
 #include <dlfcn.h>
 
 #include <chrono>
+#include <cctype>
 #include <condition_variable>
 #include <cstdint>
 #include <exception>
@@ -87,7 +88,7 @@ CefRefPtr<CefDictionaryValue> RequireDictionary(CefRefPtr<CefValue> value,
   if (!value.get() || value->GetType() != VTYPE_DICTIONARY) {
     throw std::runtime_error(message);
   }
-  return value->GetDictionary();
+  return value->GetDictionary()->Copy(false);
 }
 
 CefRefPtr<CefValue> ParseJsonValue(const std::string& json, const char* message) {
@@ -115,6 +116,22 @@ std::filesystem::path LibraryDirectory() {
     throw std::runtime_error("failed to resolve host library path");
   }
   return std::filesystem::path(info.dli_fname).parent_path();
+}
+
+std::filesystem::path HostSupportDir() {
+  const char* home = std::getenv("HOME");
+  if (home == nullptr || *home == '\0') {
+    throw std::runtime_error("HOME is not set");
+  }
+  return std::filesystem::path(home) / "Library" / "Application Support" / "aegis_native";
+}
+
+std::filesystem::path HostRootCacheDir() {
+  return HostSupportDir() / "agent-runtime";
+}
+
+std::filesystem::path HostDefaultProfileDir() {
+  return HostRootCacheDir() / "default-profile";
 }
 
 std::filesystem::path DetectAppBundle(const std::filesystem::path& anchor) {
@@ -187,21 +204,125 @@ BrowserOptions ParseBrowserOptions(const std::vector<std::uint8_t>& bytes) {
   }
 
   const auto json = std::string(bytes.begin(), bytes.end());
-  auto parsed = ParseJsonValue(json, "browser config is not valid json");
-  auto dict = RequireDictionary(parsed, "browser config must be a dictionary");
 
-  if (dict->HasKey("mode") && dict->GetType("mode") == VTYPE_STRING) {
-    options.headless = dict->GetString("mode").ToString() != "headful";
-  }
-  if (dict->HasKey("start_url") && dict->GetType("start_url") == VTYPE_STRING) {
-    const auto start_url = dict->GetString("start_url").ToString();
-    if (!start_url.empty()) {
-      options.start_url = start_url;
+  auto skip_whitespace = [&](std::size_t* index) {
+    while (*index < json.size() &&
+           std::isspace(static_cast<unsigned char>(json[*index])) != 0) {
+      ++(*index);
     }
+  };
+
+  std::function<std::string(std::size_t*)> parse_string = [&](std::size_t* index) {
+    if (*index >= json.size() || json[*index] != '"') {
+      throw std::runtime_error("browser config is not valid json");
+    }
+    ++(*index);
+    std::string value;
+    while (*index < json.size()) {
+      const char ch = json[*index];
+      ++(*index);
+      if (ch == '"') {
+        return value;
+      }
+      if (ch != '\\') {
+        value.push_back(ch);
+        continue;
+      }
+      if (*index >= json.size()) {
+        throw std::runtime_error("browser config is not valid json");
+      }
+      const char escaped = json[*index];
+      ++(*index);
+      switch (escaped) {
+        case '"':
+        case '\\':
+        case '/':
+          value.push_back(escaped);
+          break;
+        case 'b':
+          value.push_back('\b');
+          break;
+        case 'f':
+          value.push_back('\f');
+          break;
+        case 'n':
+          value.push_back('\n');
+          break;
+        case 'r':
+          value.push_back('\r');
+          break;
+        case 't':
+          value.push_back('\t');
+          break;
+        case 'u':
+          throw std::runtime_error("unicode escapes are not supported in browser config");
+        default:
+          throw std::runtime_error("browser config is not valid json");
+      }
+    }
+    throw std::runtime_error("browser config is not valid json");
+  };
+
+  std::size_t index = 0;
+  skip_whitespace(&index);
+  if (index >= json.size() || json[index] != '{') {
+    throw std::runtime_error("browser config must be a dictionary");
   }
-  if (dict->HasKey("user_data_dir") && dict->GetType("user_data_dir") == VTYPE_STRING) {
-    options.user_data_dir = dict->GetString("user_data_dir").ToString();
+  ++index;
+
+  while (true) {
+    skip_whitespace(&index);
+    if (index >= json.size()) {
+      throw std::runtime_error("browser config is not valid json");
+    }
+    if (json[index] == '}') {
+      ++index;
+      break;
+    }
+
+    const auto key = parse_string(&index);
+    skip_whitespace(&index);
+    if (index >= json.size() || json[index] != ':') {
+      throw std::runtime_error("browser config is not valid json");
+    }
+    ++index;
+    skip_whitespace(&index);
+    if (index >= json.size()) {
+      throw std::runtime_error("browser config is not valid json");
+    }
+
+    if (json[index] == '"') {
+      const auto value = parse_string(&index);
+      if (key == "mode") {
+        options.headless = value != "headful";
+      } else if (key == "start_url") {
+        if (!value.empty()) {
+          options.start_url = value;
+        }
+      } else if (key == "user_data_dir") {
+        options.user_data_dir = value;
+      }
+    } else if (json.compare(index, 4, "null") == 0) {
+      index += 4;
+    } else {
+      throw std::runtime_error("browser config contains unsupported value type");
+    }
+
+    skip_whitespace(&index);
+    if (index >= json.size()) {
+      throw std::runtime_error("browser config is not valid json");
+    }
+    if (json[index] == ',') {
+      ++index;
+      continue;
+    }
+    if (json[index] == '}') {
+      ++index;
+      break;
+    }
+    throw std::runtime_error("browser config is not valid json");
   }
+
   return options;
 }
 
@@ -444,19 +565,41 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
     static_cast<void>(request);
     EnsurePageReady();
 
+    const auto renderer_response = InvokeRenderer(aegis::kOpDrainEvents, "{}");
+    AppendDebugLog("host: drain_events renderer_response bytes=" +
+                   std::to_string(renderer_response.size()));
     auto response = RequireDictionary(
-        ParseJsonValue(InvokeRenderer(aegis::kOpDrainEvents, "{}"),
+        ParseJsonValue(renderer_response,
                        "drain events response is not valid json"),
         "drain events response must be a dictionary");
-    auto events = response->HasKey("events") ? response->GetList("events") : CefListValue::Create();
+    AppendDebugLog("host: drain_events parsed_response");
+    auto existing_events =
+        response->HasKey("events") ? response->GetList("events") : CefListValue::Create();
+    AppendDebugLog("host: drain_events existing_events=" +
+                   std::to_string(existing_events ? existing_events->GetSize() : 0));
+    auto events = CefListValue::Create();
+    if (existing_events.get()) {
+      for (size_t index = 0; index < existing_events->GetSize(); ++index) {
+        auto value = existing_events->GetValue(static_cast<int>(index));
+        if (value.get()) {
+          events->SetValue(static_cast<int>(index), value->Copy());
+        }
+      }
+    }
 
     auto local_events = DrainLocalEvents();
+    AppendDebugLog("host: drain_events local_events=" + std::to_string(local_events.size()));
     auto index = static_cast<int>(events->GetSize());
     for (auto& json : local_events) {
+      AppendDebugLog("host: drain_events merge_local_event bytes=" +
+                     std::to_string(json.size()));
       events->SetValue(index++, ParseJsonValue(json, "local event is not valid json"));
     }
     response->SetList("events", events);
-    return EncodeEnvelope(MessageKind::DrainEvents, response);
+    AppendDebugLog("host: drain_events encode_response");
+    auto encoded = EncodeEnvelope(MessageKind::DrainEvents, response);
+    AppendDebugLog("host: drain_events encoded");
+    return encoded;
   }
 
   std::vector<std::uint8_t> Navigate(const std::vector<std::uint8_t>& request) override {
@@ -477,7 +620,10 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
     auto events = CefListValue::Create();
     events->SetValue(0, NavigationEvent(CurrentUrl()));
     response->SetList("events", events);
-    return EncodeEnvelope(MessageKind::Navigate, response);
+    AppendDebugLog("host: navigate encode_response");
+    auto encoded = EncodeEnvelope(MessageKind::Navigate, response);
+    AppendDebugLog("host: navigate encoded");
+    return encoded;
   }
 
   void OnPrimaryBrowserCreated(CefRefPtr<CefBrowser> browser) override {
@@ -536,6 +682,8 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
     std::lock_guard lock(mutex_);
     if (browser_.get() && browser->IsSame(browser_)) {
       browser_ = nullptr;
+      request_context_ = nullptr;
+      client_ = nullptr;
       page_ready_ = false;
       renderer_ready_ = false;
       browser_closed_ = true;
@@ -698,11 +846,14 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       settings.command_line_args_disabled = false;
       settings.log_severity = LOGSEVERITY_DISABLE;
 
-      if (!options_.user_data_dir.empty()) {
-        std::filesystem::create_directories(options_.user_data_dir);
-        CefString(&settings.cache_path) = options_.user_data_dir;
-        CefString(&settings.root_cache_path) = options_.user_data_dir;
-      }
+      const auto cache_path = options_.user_data_dir.empty()
+                                  ? HostDefaultProfileDir()
+                                  : std::filesystem::path(options_.user_data_dir);
+      const auto root_cache_path = HostRootCacheDir();
+      std::filesystem::create_directories(cache_path);
+      std::filesystem::create_directories(root_cache_path);
+      CefString(&settings.cache_path) = cache_path.string();
+      CefString(&settings.root_cache_path) = root_cache_path.string();
 
       CefString(&settings.browser_subprocess_path) = paths_.helper_executable.string();
       CefString(&settings.framework_dir_path) = paths_.framework_dir.string();
@@ -785,14 +936,14 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       CEF_REQUIRE_UI_THREAD();
       AppendDebugLog("host: create_browser_on_ui_thread");
 
-      if (options_.user_data_dir.empty()) {
-        request_context_ = CefRequestContext::GetGlobalContext();
-      } else {
-        CefRequestContextSettings request_context_settings;
-        CefString(&request_context_settings.cache_path) = options_.user_data_dir;
-        request_context_settings.persist_session_cookies = 1;
-        request_context_ = CefRequestContext::CreateContext(request_context_settings, nullptr);
-      }
+      const auto cache_path = options_.user_data_dir.empty()
+                                  ? HostDefaultProfileDir()
+                                  : std::filesystem::path(options_.user_data_dir);
+      std::filesystem::create_directories(cache_path);
+      CefRequestContextSettings request_context_settings;
+      CefString(&request_context_settings.cache_path) = cache_path.string();
+      request_context_settings.persist_session_cookies = 1;
+      request_context_ = CefRequestContext::CreateContext(request_context_settings, nullptr);
       if (!request_context_.get()) {
         throw std::runtime_error("failed to create request context");
       }
@@ -810,7 +961,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
         window_info.SetAsWindowless(kNullWindowHandle);
         window_info.runtime_style = CEF_RUNTIME_STYLE_ALLOY;
         if (!CefBrowserHost::CreateBrowser(window_info, client_, initial_url, settings, nullptr,
-                                           nullptr)) {
+                                           request_context_)) {
           throw std::runtime_error("failed to create headless browser");
         }
         AppendDebugLog("host: create headless browser requested");
@@ -822,7 +973,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       window_info.hidden = false;
       window_info.runtime_style = CEF_RUNTIME_STYLE_ALLOY;
       if (!CefBrowserHost::CreateBrowser(window_info, client_, initial_url, settings, nullptr,
-                                         nullptr)) {
+                                         request_context_)) {
         throw std::runtime_error("failed to create headful browser");
       }
       AppendDebugLog("host: create headful browser requested");
@@ -901,7 +1052,15 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
   void NavigateTo(const std::string& url) {
     {
       std::lock_guard lock(mutex_);
+      if (browser_.get() != nullptr && page_ready_ && current_url_ == url) {
+        AppendDebugLog("host: navigate_to skipped_same_url");
+        return;
+      }
+    }
+    {
+      std::lock_guard lock(mutex_);
       page_ready_ = false;
+      renderer_ready_ = false;
     }
     RunOnUiThreadSync([this, url]() {
       CEF_REQUIRE_UI_THREAD();

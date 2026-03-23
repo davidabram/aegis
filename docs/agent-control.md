@@ -2,6 +2,12 @@
 
 This is the practical control surface for agents.
 
+The production rule is simple:
+
+- run one persistent `serve` process
+- control that runtime over the HTTP API
+- use `headless` or `headful` as modes of that same runtime
+
 ## Mental Model
 
 Aegis exposes one browser runtime behind one control plane.
@@ -15,10 +21,11 @@ The agent loop is:
 5. persist or restore session state
 6. optionally enable trace recording for replay
 
-The runtime can run:
+The runtime exposes one production control plane:
 
-- via CLI commands
-- via the local HTTP API
+- the local HTTP API backed by a persistent `serve` process
+
+One-shot CLI runtime commands exist, but the production automation path is `serve`.
 
 ## Runtime Modes
 
@@ -51,16 +58,9 @@ cargo run -- \
   serve --addr 127.0.0.1:7878
 ```
 
-Direct CLI navigation:
-
-```bash
-cargo run -- \
-  --host-lib ./native/build-xcode/Debug/libaegis_host.dylib \
-  --mode headful \
-  navigate https://www.google.com
-```
-
 ## CLI Commands
+
+For production agent orchestration, prefer the HTTP API below. The CLI commands are useful for local diagnostics and focused one-shot checks.
 
 ### Navigate
 

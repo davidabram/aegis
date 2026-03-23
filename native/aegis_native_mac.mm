@@ -259,7 +259,10 @@ static NSColor* AegisLockIcon(void)          { return AegisColor(0.0, 0.0, 0.0, 
 @implementation AegisAddressContainer {
   NSTrackingArea* _trackingArea;
   BOOL _hovered;
+  BOOL _focused;
 }
+
+@synthesize focused = _focused;
 
 - (instancetype)initWithFrame:(NSRect)frame {
   self = [super initWithFrame:frame];
@@ -339,7 +342,11 @@ static NSColor* AegisLockIcon(void)          { return AegisColor(0.0, 0.0, 0.0, 
 @property (nonatomic, assign) AegisAddressContainer* addressContainer;
 @end
 
-@implementation AegisAddressField
+@implementation AegisAddressField {
+  AegisAddressContainer* _addressContainer;
+}
+
+@synthesize addressContainer = _addressContainer;
 
 - (BOOL)becomeFirstResponder {
   BOOL result = [super becomeFirstResponder];

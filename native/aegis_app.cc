@@ -238,10 +238,6 @@ void AegisApp::OnBeforeCommandLineProcessing(
   command_line->AppendSwitchWithValue("disable-features",
                                       "LocationProviderManager,NewMacNotificationAPI");
 
-#if defined(OS_MAC)
-  command_line->AppendSwitch("use-mock-keychain");
-#endif
-
   if (IsHeadless(command_line)) {
     command_line->AppendSwitch("disable-gpu");
     command_line->AppendSwitch("disable-gpu-compositing");

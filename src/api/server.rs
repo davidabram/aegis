@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::mpsc;
 use std::thread;
 
 use axum::extract::{Query, State};
@@ -8,8 +9,7 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
-use tokio::net::TcpListener;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 
 use crate::browser::BrowserConfig;
 use crate::commands::command::Command;
@@ -60,19 +60,13 @@ pub struct ApiErrorBody {
 enum ApiCommand {
     InjectSession(SessionState, oneshot::Sender<Result<(), AegisError>>),
     SnapshotSession(oneshot::Sender<Result<SessionState, AegisError>>),
-    Navigate(
-        String,
-        oneshot::Sender<Result<Vec<SequencedEvent>, AegisError>>,
-    ),
+    Navigate(String, oneshot::Sender<Result<Vec<SequencedEvent>, AegisError>>),
     Execute(
         Vec<Command>,
         oneshot::Sender<Result<ExecutionReport, AegisError>>,
     ),
     SnapshotDom(oneshot::Sender<Result<DomSnapshot, AegisError>>),
-    Events(
-        u64,
-        oneshot::Sender<Result<Vec<SequencedEvent>, AegisError>>,
-    ),
+    Events(u64, oneshot::Sender<Result<Vec<SequencedEvent>, AegisError>>),
     EnableTrace(PathBuf, oneshot::Sender<Result<(), AegisError>>),
     BrowserConfig(oneshot::Sender<BrowserConfig>),
 }
@@ -82,102 +76,81 @@ pub async fn serve(
     host_library: PathBuf,
     browser_config: BrowserConfig,
 ) -> Result<(), AegisError> {
+    let mut client = LoadedAegisClient::connect(host_library.clone(), browser_config.clone())?;
+    let (tx, rx) = mpsc::channel::<ApiCommand>();
     let state = ApiState {
-        tx: spawn_control_plane(host_library.clone(), browser_config),
+        tx,
         host_library,
     };
-
-    let app = router(state);
-    let listener = TcpListener::bind(addr)
-        .await
-        .map_err(|error| AegisError::Bridge(error.to_string()))?;
-    axum::serve(listener, app)
-        .await
-        .map_err(|error| AegisError::Bridge(error.to_string()))
-}
-
-fn spawn_control_plane(
-    host_library: PathBuf,
-    browser_config: BrowserConfig,
-) -> mpsc::Sender<ApiCommand> {
-    let (tx, mut rx) = mpsc::channel(64);
+    let (startup_tx, startup_rx) = mpsc::channel::<Result<(), String>>();
 
     thread::spawn(move || {
-        let config = browser_config;
-        let mut client = match LoadedAegisClient::connect(host_library, config.clone()) {
-            Ok(client) => client,
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
             Err(error) => {
-                while let Some(command) = rx.blocking_recv() {
-                    send_startup_error(command, &error);
-                }
+                let _ = startup_tx.send(Err(error.to_string()));
                 return;
             }
         };
 
-        while let Some(command) = rx.blocking_recv() {
-            match command {
-                ApiCommand::InjectSession(session, reply) => {
-                    let _ = reply.send(client.inject_session(session));
+        runtime.block_on(async move {
+            let listener = match tokio::net::TcpListener::bind(addr).await {
+                Ok(listener) => {
+                    let _ = startup_tx.send(Ok(()));
+                    listener
                 }
-                ApiCommand::SnapshotSession(reply) => {
-                    let _ = reply.send(client.snapshot_session());
+                Err(error) => {
+                    let _ = startup_tx.send(Err(error.to_string()));
+                    return;
                 }
-                ApiCommand::Navigate(url, reply) => {
-                    let _ = reply.send(client.navigate(url));
-                }
-                ApiCommand::Execute(commands, reply) => {
-                    let _ = reply.send(client.execute(&commands));
-                }
-                ApiCommand::SnapshotDom(reply) => {
-                    let _ = reply.send(Ok(client.snapshot_dom()));
-                }
-                ApiCommand::Events(since, reply) => {
-                    let _ = reply.send(Ok(client.events_since(since)));
-                }
-                ApiCommand::EnableTrace(path, reply) => {
-                    client.enable_trace_recording(path);
-                    let _ = reply.send(Ok(()));
-                }
-                ApiCommand::BrowserConfig(reply) => {
-                    let _ = reply.send(config.clone());
-                }
-            }
-        }
+            };
+
+            let app = router(state);
+            let _ = axum::serve(listener, app).await;
+        });
     });
 
-    tx
-}
-
-fn send_startup_error(command: ApiCommand, error: &AegisError) {
-    let error = clone_error(error);
-    match command {
-        ApiCommand::InjectSession(_, reply) => {
-            let _ = reply.send(Err(error));
-        }
-        ApiCommand::SnapshotSession(reply) => {
-            let _ = reply.send(Err(error));
-        }
-        ApiCommand::Navigate(_, reply) => {
-            let _ = reply.send(Err(error));
-        }
-        ApiCommand::Execute(_, reply) => {
-            let _ = reply.send(Err(error));
-        }
-        ApiCommand::SnapshotDom(reply) => {
-            let _ = reply.send(Err(error));
-        }
-        ApiCommand::Events(_, reply) => {
-            let _ = reply.send(Err(error));
-        }
-        ApiCommand::EnableTrace(_, reply) => {
-            let _ = reply.send(Err(error));
-        }
-        ApiCommand::BrowserConfig(_) => {}
+    match startup_rx.recv() {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => return Err(AegisError::Bridge(error)),
+        Err(error) => return Err(AegisError::Bridge(error.to_string())),
     }
-}
 
-fn clone_error(error: &AegisError) -> AegisError {
-    AegisError::Bridge(error.to_string())
+    while let Ok(command) = rx.recv() {
+        match command {
+            ApiCommand::InjectSession(session, reply) => {
+                let _ = reply.send(client.inject_session(session));
+            }
+            ApiCommand::SnapshotSession(reply) => {
+                let _ = reply.send(client.snapshot_session());
+            }
+            ApiCommand::Navigate(url, reply) => {
+                let result = client.navigate(url);
+                let _ = reply.send(result);
+            }
+            ApiCommand::Execute(commands, reply) => {
+                let _ = reply.send(client.execute(&commands));
+            }
+            ApiCommand::SnapshotDom(reply) => {
+                let _ = reply.send(Ok(client.snapshot_dom()));
+            }
+            ApiCommand::Events(since, reply) => {
+                let _ = reply.send(Ok(client.events_since(since)));
+            }
+            ApiCommand::EnableTrace(path, reply) => {
+                client.enable_trace_recording(path);
+                let _ = reply.send(Ok(()));
+            }
+            ApiCommand::BrowserConfig(reply) => {
+                let _ = reply.send(browser_config.clone());
+            }
+        }
+    }
+
+    Ok(())
 }
 
 pub fn router(state: ApiState) -> Router {
@@ -208,7 +181,6 @@ async fn runtime_info(State(state): State<ApiState>) -> Result<Json<RuntimeInfo>
     state
         .tx
         .send(ApiCommand::BrowserConfig(reply_tx))
-        .await
         .map_err(channel_error)?;
     let browser = reply_rx.await.map_err(reply_error_config)?;
     Ok(Json(RuntimeInfo {
@@ -225,7 +197,6 @@ async fn inject_session(
     state
         .tx
         .send(ApiCommand::InjectSession(body, reply_tx))
-        .await
         .map_err(channel_error)?;
     reply_rx.await.map_err(reply_error)??;
     Ok(StatusCode::NO_CONTENT)
@@ -236,7 +207,6 @@ async fn snapshot_session(State(state): State<ApiState>) -> Result<Json<SessionS
     state
         .tx
         .send(ApiCommand::SnapshotSession(reply_tx))
-        .await
         .map_err(channel_error)?;
     Ok(Json(reply_rx.await.map_err(reply_error)??))
 }
@@ -249,7 +219,6 @@ async fn navigate(
     state
         .tx
         .send(ApiCommand::Navigate(body.url, reply_tx))
-        .await
         .map_err(channel_error)?;
     Ok(Json(reply_rx.await.map_err(reply_error)??))
 }
@@ -262,7 +231,6 @@ async fn execute(
     state
         .tx
         .send(ApiCommand::Execute(body.commands, reply_tx))
-        .await
         .map_err(channel_error)?;
     Ok(Json(reply_rx.await.map_err(reply_error)??))
 }
@@ -272,7 +240,6 @@ async fn snapshot_dom(State(state): State<ApiState>) -> Result<Json<DomSnapshot>
     state
         .tx
         .send(ApiCommand::SnapshotDom(reply_tx))
-        .await
         .map_err(channel_error)?;
     Ok(Json(reply_rx.await.map_err(reply_error)??))
 }
@@ -285,7 +252,6 @@ async fn events(
     state
         .tx
         .send(ApiCommand::Events(query.since, reply_tx))
-        .await
         .map_err(channel_error)?;
     Ok(Json(reply_rx.await.map_err(reply_error)??))
 }
@@ -298,13 +264,12 @@ async fn enable_trace(
     state
         .tx
         .send(ApiCommand::EnableTrace(body.path, reply_tx))
-        .await
         .map_err(channel_error)?;
     reply_rx.await.map_err(reply_error)??;
     Ok(StatusCode::NO_CONTENT)
 }
 
-fn channel_error(error: mpsc::error::SendError<ApiCommand>) -> ApiError {
+fn channel_error(error: mpsc::SendError<ApiCommand>) -> ApiError {
     ApiError(AegisError::Bridge(error.to_string()))
 }
 

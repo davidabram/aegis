@@ -71,6 +71,7 @@ set_target_properties(${AEGIS_NATIVE_TARGET} PROPERTIES
   MACOSX_BUNDLE_INFO_PLIST ${CMAKE_CURRENT_SOURCE_DIR}/mac/Info.plist.in
   CLANG_ENABLE_OBJC_ARC YES
   XCODE_ATTRIBUTE_GCC_ENABLE_CPP_EXCEPTIONS YES
+  XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "com.ariacomputecompany.aegis"
 )
 
 add_library(${AEGIS_SHARED_SUPPORT_TARGET} STATIC
@@ -140,6 +141,7 @@ foreach(_suffix_list ${CEF_HELPER_APP_SUFFIXES})
     MACOSX_BUNDLE_INFO_PLIST ${_helper_info_plist}
     OUTPUT_NAME ${_helper_output_name}
     CLANG_ENABLE_OBJC_ARC YES
+    XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "com.ariacomputecompany.aegis.helper${_plist_suffix}"
   )
 
   add_dependencies(${AEGIS_NATIVE_TARGET} "${_helper_target}")

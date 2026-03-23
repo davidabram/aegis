@@ -105,7 +105,7 @@ CefRefPtr<CefDictionaryValue> RequireDictionary(CefRefPtr<CefValue> value,
     detail += ")";
     throw ProtocolError(detail);
   }
-  return value->GetDictionary();
+  return value->GetDictionary()->Copy(false);
 }
 
 }  // namespace
@@ -147,7 +147,7 @@ CefRefPtr<CefValue> DecodeEnvelope(MessageKind expected_kind,
   if (!payload.get()) {
     throw ProtocolError("protocol payload is missing");
   }
-  return payload;
+  return payload->Copy();
 }
 
 std::vector<std::uint8_t> EncodeEnvelope(MessageKind kind,

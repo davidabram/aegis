@@ -2,13 +2,19 @@
 
 Aegis is an automated agent browser engine for deterministic, host-backed web execution.
 
+The production automation path is one persistent runtime behind one local control plane:
+
+- start `serve`
+- control the runtime over the HTTP API
+- run either `headless` or `headful` against that same persistent session
+
 It combines:
 
 - a Rust control plane for navigation, execution, sessions, DOM snapshots, events, and traces
 - a native macOS embedded-browser runtime backed by CEF
 - a headful standalone browser app with a native Cocoa chrome shell
 - deterministic trace recording and replay for testing and regression control
-- a local HTTP API for remote agent control
+- a local HTTP API for persistent agent control
 
 ## What Aegis Does
 
@@ -22,7 +28,7 @@ Core capabilities:
 - persist session state
 - emit ordered runtime events
 - record and replay deterministic traces
-- expose the runtime over a local API server
+- expose one persistent runtime over a local API server
 - launch a native standalone macOS browser shell
 
 ## Agent Guide
@@ -33,7 +39,7 @@ For the practical control surface agents should use, see:
 
 That guide covers:
 
-- CLI control
+- the production `serve` control model
 - HTTP API routes
 - command payloads
 - session and event semantics
@@ -55,9 +61,9 @@ The main binary is `aegis`.
 Top-level commands:
 
 - `serve`: run the local HTTP API
-- `navigate`: drive browser navigation
-- `execute`: run browser/runtime commands
-- `snapshot-dom`: capture the current DOM snapshot
+- `navigate`: one-shot runtime navigation
+- `execute`: one-shot runtime command execution
+- `snapshot-dom`: one-shot DOM capture
 - `session`: inspect or mutate session state
 - `trace`: manage trace recording and replay
 - `events`: inspect runtime events
@@ -69,6 +75,34 @@ Global runtime controls:
 - `--start-url <url>`
 - `--user-data-dir <path>`
 - `--host-lib <path>`
+
+## Production Control Path
+
+For production automation, treat `serve` plus the HTTP API as the single correct control surface.
+
+That means:
+
+- one persistent runtime per controlled browser session
+- no relaunch-per-command bridge behavior
+- the same control model for `headless` and `headful`
+- state, DOM, events, and trace capture all flowing through the same API session
+
+Recommended startup:
+
+```bash
+cargo run -- \
+  --host-lib ./native/build-xcode/Debug/libaegis_host.dylib \
+  --mode headful \
+  serve --addr 127.0.0.1:7878
+```
+
+Then drive the runtime over:
+
+- `POST /navigate`
+- `POST /execute`
+- `GET /dom`
+- `GET /events`
+- `GET/POST /session`
 
 ## Native Browser Engine
 
@@ -117,7 +151,10 @@ cargo run -- native build
 Run the local API server:
 
 ```bash
-cargo run -- serve --addr 127.0.0.1:7878
+cargo run -- \
+  --host-lib ./native/build-xcode/Debug/libaegis_host.dylib \
+  --mode headful \
+  serve --addr 127.0.0.1:7878
 ```
 
 Native macOS app build:
@@ -127,9 +164,6 @@ xcodebuild -project native/build-xcode/aegis_native.xcodeproj \
   -scheme aegis_native \
   -configuration Debug \
   -arch arm64 \
-  CODE_SIGNING_ALLOWED=NO \
-  CODE_SIGNING_REQUIRED=NO \
-  CODE_SIGN_IDENTITY= \
   build
 ```
 
@@ -148,7 +182,7 @@ Testing surfaces in this repo include:
 What is working in the codebase today:
 
 - Rust control-plane runtime and CLI
-- local HTTP API service for runtime control
+- local HTTP API service for persistent runtime control
 - deterministic trace record/replay flow
 - native macOS CEF-backed standalone app
 - headful browser window hosting with native Cocoa chrome
