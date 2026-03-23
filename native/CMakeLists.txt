@@ -66,7 +66,7 @@ target_include_directories(${AEGIS_NATIVE_TARGET} PRIVATE
 )
 target_compile_options(${AEGIS_NATIVE_TARGET} PRIVATE -fexceptions)
 target_compile_definitions(${AEGIS_NATIVE_TARGET} PRIVATE AEGIS_STANDALONE_APP=1)
-target_link_libraries(${AEGIS_NATIVE_TARGET} libcef_dll_wrapper ${CEF_STANDARD_LIBS})
+target_link_libraries(${AEGIS_NATIVE_TARGET} libcef_dll_wrapper ${CEF_STANDARD_LIBS} "-framework QuartzCore")
 set_target_properties(${AEGIS_NATIVE_TARGET} PROPERTIES
   MACOSX_BUNDLE_INFO_PLIST ${CMAKE_CURRENT_SOURCE_DIR}/mac/Info.plist.in
   CLANG_ENABLE_OBJC_ARC YES
