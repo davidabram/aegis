@@ -22,6 +22,7 @@ static const CGFloat kAddrGapFromNav = 10.0;
 static const CGFloat kAddrRightInset = 14.0;
 static const CGFloat kProgressHeight = 2.0;
 static const CGFloat kSeparatorHeight = 1.0;
+static const CGFloat kPageTransitionMaxAlpha = 0.16;
 
 static NSColor* AegisColor(CGFloat r, CGFloat g, CGFloat b, CGFloat a) {
   return [NSColor colorWithSRGBRed:r green:g blue:b alpha:a];
@@ -320,6 +321,7 @@ struct BrowserHostState {
   AegisAddressField* address_field = nil;
   NSView* progress_view = nil;
   NSView* web_container_view = nil;
+  NSView* page_transition_view = nil;
   AegisBrowserWindowController* controller = nil;
   CefRefPtr<CefBrowser> browser;
   std::string current_title = "Aegis";
@@ -532,7 +534,17 @@ void EnsureHostWindow(const std::string& title, int width, int height) {
   s.web_container_view = [[NSView alloc]
       initWithFrame:NSMakeRect(0, 0, w, h - kToolbarHeight)];
   [s.web_container_view setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+  [s.web_container_view setWantsLayer:YES];
   [s.root_view addSubview:s.web_container_view];
+
+  s.page_transition_view = [[NSView alloc]
+      initWithFrame:[s.web_container_view bounds]];
+  [s.page_transition_view setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+  [s.page_transition_view setWantsLayer:YES];
+  s.page_transition_view.layer.backgroundColor = [NSColor whiteColor].CGColor;
+  s.page_transition_view.hidden = YES;
+  s.page_transition_view.alphaValue = 0.0;
+  [s.web_container_view addSubview:s.page_transition_view];
 
   s.controller = [[AegisBrowserWindowController alloc] initWithStatePointer:&s];
   [s.window setDelegate:s.controller];
@@ -675,6 +687,7 @@ void EnsureHostWindow(const std::string& title, int width, int height) {
     if (isLoading) {
       CGFloat toolbar_w = state->toolbar_view.frame.size.width;
       state->progress_view.hidden = NO;
+      [state->progress_view setAlphaValue:1.0];
       [state->progress_view setFrame:NSMakeRect(0, kSeparatorHeight, 0, kProgressHeight)];
 
       [NSAnimationContext runAnimationGroup:^(NSAnimationContext* ctx) {
@@ -701,6 +714,31 @@ void EnsureHostWindow(const std::string& title, int width, int height) {
           [state->progress_view setAlphaValue:1.0];
         }];
       }];
+    }
+  }
+
+  if (state->page_transition_view) {
+    [state->page_transition_view.layer removeAllAnimations];
+    if (isLoading) {
+      state->page_transition_view.hidden = NO;
+      [state->page_transition_view setAlphaValue:0.0];
+      [NSAnimationContext runAnimationGroup:^(NSAnimationContext* ctx) {
+        ctx.duration = 0.12;
+        ctx.timingFunction = [CAMediaTimingFunction
+            functionWithName:kCAMediaTimingFunctionEaseOut];
+        [[state->page_transition_view animator] setAlphaValue:kPageTransitionMaxAlpha];
+      } completionHandler:nil];
+    } else {
+      if (!state->page_transition_view.hidden || state->page_transition_view.alphaValue > 0.0) {
+        [NSAnimationContext runAnimationGroup:^(NSAnimationContext* ctx) {
+          ctx.duration = 0.18;
+          ctx.timingFunction = [CAMediaTimingFunction
+              functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+          [[state->page_transition_view animator] setAlphaValue:0.0];
+        } completionHandler:^{
+          state->page_transition_view.hidden = YES;
+        }];
+      }
     }
   }
 }
@@ -810,7 +848,9 @@ void AegisAttachBrowserToHostWindow(CefRefPtr<CefBrowser> browser) {
   [browser_view setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
   if ([browser_view superview] != state.web_container_view) {
     [browser_view removeFromSuperview];
-    [state.web_container_view addSubview:browser_view];
+    [state.web_container_view addSubview:browser_view
+                              positioned:NSWindowBelow
+                              relativeTo:state.page_transition_view];
   }
 }
 
@@ -839,6 +879,7 @@ void AegisCloseBrowserHostWindow() {
   state.address_field = nil;
   state.progress_view = nil;
   state.web_container_view = nil;
+  state.page_transition_view = nil;
   state.controller = nil;
   [NSApp terminate:nil];
 }

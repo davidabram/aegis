@@ -232,6 +232,8 @@
   window.__aegis = {
     snapshot,
     exec,
+    click,
+    setValue,
     drainEvents,
     queue,
     assignId

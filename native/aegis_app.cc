@@ -11,6 +11,7 @@
 #endif
 #include "include/cef_browser.h"
 #include "include/cef_command_line.h"
+#include "include/cef_parser.h"
 #include "include/cef_process_message.h"
 #include "include/cef_v8.h"
 #include "include/wrapper/cef_helpers.h"
@@ -191,16 +192,100 @@ bool DispatchRendererOperation(const std::string& op,
   }
 
   if (op == aegis::kOpSendBatch) {
-    const auto quoted = QuoteForJavaScript(body);
-    return EvalToString(
-        frame,
-        "(() => { const req = JSON.parse(" + quoted +
-            "); const commands = req.commands || [];"
-            " const results = window.__aegis ? window.__aegis.exec(commands) : [];"
-            " const snapshot = window.__aegis ? window.__aegis.snapshot() : {nodes:[]};"
-            " const events = window.__aegis ? window.__aegis.drainEvents() : [];"
-            " return JSON.stringify({batch_id: req.batch_id || 0, results, snapshot, events}); })()",
-        response, error);
+    CefRefPtr<CefValue> parsed = CefParseJSON(body, JSON_PARSER_RFC);
+    if (!parsed.get() || parsed->GetType() != VTYPE_DICTIONARY) {
+      *error = "batch request is not valid json";
+      return false;
+    }
+
+    auto request = parsed->GetDictionary();
+    auto commands = request->HasKey("commands") ? request->GetList("commands") : CefListValue::Create();
+    const int batch_id = request->HasKey("batch_id") ? request->GetInt("batch_id") : 0;
+
+    std::string results_json = "[";
+    if (commands.get()) {
+      for (size_t index = 0; index < commands->GetSize(); ++index) {
+        auto command = commands->GetDictionary(static_cast<int>(index));
+        if (!command.get()) {
+          if (index != 0) {
+            results_json += ",";
+          }
+          results_json += R"({"ok":false,"error":"invalid command payload"})";
+          continue;
+        }
+
+        const auto type = command->GetString("type").ToString();
+        std::string command_result;
+
+        if (type == "eval") {
+          const auto code = command->GetString("code").ToString();
+          const auto wrapped =
+              "(() => { try { const __aegis_value = (function(){\n" + code +
+              "\n})(); return JSON.stringify({ok:true,value:(__aegis_value===undefined?null:__aegis_value)}); }"
+              " catch (error) { return JSON.stringify({ok:false,error:String(error && error.message ? error.message : error)}); } })()";
+          if (!EvalToString(frame, wrapped, &command_result, error)) {
+            return false;
+          }
+        } else if (type == "click") {
+          const auto id = std::to_string(command->GetInt("id"));
+          const auto wrapped =
+              "(() => { try { return JSON.stringify({ok:true,value:(window.__aegis ? window.__aegis.click(" +
+              id +
+              ") : null)}); } catch (error) { return JSON.stringify({ok:false,error:String(error && error.message ? error.message : error)}); } })()";
+          if (!EvalToString(frame, wrapped, &command_result, error)) {
+            return false;
+          }
+        } else if (type == "set_value") {
+          const auto id = std::to_string(command->GetInt("id"));
+          const auto value_json = QuoteForJavaScript(command->GetString("value").ToString());
+          const auto wrapped =
+              "(() => { try { return JSON.stringify({ok:true,value:(window.__aegis ? window.__aegis.setValue(" +
+              id + "," + value_json +
+              ") : null)}); } catch (error) { return JSON.stringify({ok:false,error:String(error && error.message ? error.message : error)}); } })()";
+          if (!EvalToString(frame, wrapped, &command_result, error)) {
+            return false;
+          }
+        } else {
+          command_result = "{\"ok\":false,\"error\":\"unsupported command " + type + "\"}";
+        }
+
+        if (index != 0) {
+          results_json += ",";
+        }
+        results_json += command_result.empty() ? "null" : command_result;
+      }
+    }
+    results_json += "]";
+
+    std::string snapshot_json;
+    if (!EvalToString(frame,
+                      "JSON.stringify(window.__aegis ? window.__aegis.snapshot() : {nodes:[]})",
+                      &snapshot_json, error)) {
+      return false;
+    }
+
+    std::string events_wrapper_json;
+    if (!EvalToString(frame,
+                      "JSON.stringify({events: window.__aegis ? window.__aegis.drainEvents() : []})",
+                      &events_wrapper_json, error)) {
+      return false;
+    }
+
+    auto events_value = CefParseJSON(events_wrapper_json, JSON_PARSER_RFC);
+    if (!events_value.get() || events_value->GetType() != VTYPE_DICTIONARY) {
+      *error = "batch events response is not valid json";
+      return false;
+    }
+    auto events_dict = events_value->GetDictionary();
+    auto events_value_wrapper = CefValue::Create();
+    events_value_wrapper->SetList(events_dict->GetList("events"));
+    const auto events_json = CefWriteJSON(events_value_wrapper, JSON_WRITER_DEFAULT).ToString();
+
+    *response = "{\"batch_id\":" + std::to_string(batch_id) +
+                ",\"results\":" + results_json +
+                ",\"snapshot\":" + snapshot_json +
+                ",\"events\":" + events_json + "}";
+    return true;
   }
 
   *error = "unsupported renderer operation";
