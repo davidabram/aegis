@@ -25,8 +25,6 @@ The runtime exposes one production control plane:
 
 - the local HTTP API backed by a persistent `serve` process
 
-One-shot CLI runtime commands exist, but the production automation path is `serve`.
-
 ## Runtime Modes
 
 - `headless`: automation without a visible window
@@ -58,66 +56,7 @@ cargo run -- \
   serve --addr 127.0.0.1:7878
 ```
 
-## CLI Commands
-
-For production agent orchestration, prefer the HTTP API below. The CLI commands are useful for local diagnostics and focused one-shot checks.
-
-### Navigate
-
-```bash
-cargo run -- --host-lib <host-lib> navigate <url>
-```
-
-Returns a JSON array of emitted runtime events.
-
-### Execute
-
-Run commands from a file:
-
-```bash
-cargo run -- --host-lib <host-lib> execute --file commands.json
-```
-
-Run commands inline:
-
-```bash
-cargo run -- --host-lib <host-lib> execute \
-  --json '[{"type":"eval","code":"document.title"}]'
-```
-
-Supported commands:
-
-- `{"type":"click","id":<node_id>}`
-- `{"type":"set_value","id":<node_id>,"value":"..."}`
-- `{"type":"eval","code":"...js..."}`
-
-Execution returns:
-
-- `batch_id`
-- `results`
-- `latest_event_sequence`
-
-### Snapshot DOM
-
-```bash
-cargo run -- --host-lib <host-lib> snapshot-dom
-```
-
-Use this to refresh the canonical DOM view before issuing node-targeted commands.
-
-### Session
-
-Inject session:
-
-```bash
-cargo run -- --host-lib <host-lib> session inject --file session.json
-```
-
-Snapshot session:
-
-```bash
-cargo run -- --host-lib <host-lib> session snapshot
-```
+## Session Shape
 
 `SessionState` shape:
 
@@ -155,14 +94,6 @@ Validation rules:
 - cookie domains must not be empty
 - network override headers must not be empty
 
-### Events
-
-Read incremental runtime events:
-
-```bash
-cargo run -- --host-lib <host-lib> events --since 0
-```
-
 Event stream semantics:
 
 - events are ordered
@@ -176,13 +107,7 @@ Runtime event types:
 - `network`
 - `log`
 
-### Traces
-
-Enable trace recording:
-
-```bash
-cargo run -- --host-lib <host-lib> trace enable traces/run.json
-```
+## Traces
 
 Replay a recorded trace:
 

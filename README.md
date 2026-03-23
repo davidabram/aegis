@@ -61,12 +61,7 @@ The main binary is `aegis`.
 Top-level commands:
 
 - `serve`: run the local HTTP API
-- `navigate`: one-shot runtime navigation
-- `execute`: one-shot runtime command execution
-- `snapshot-dom`: one-shot DOM capture
-- `session`: inspect or mutate session state
-- `trace`: manage trace recording and replay
-- `events`: inspect runtime events
+- `trace`: replay deterministic traces
 - `native`: inspect, configure, and build the native macOS runtime
 
 Global runtime controls:
