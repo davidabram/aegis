@@ -132,19 +132,18 @@ static NSColor* AegisColor(CGFloat r, CGFloat g, CGFloat b, CGFloat a) {
 }
 
 static NSColor* AegisWindowBg(void)          { return AegisColor(0.975, 0.975, 0.975, 1.0); }
-static NSColor* AegisActiveTabBg(void)       { return [NSColor whiteColor]; }
 static NSColor* AegisActiveTabBorder(void)   { return AegisColor(0.0, 0.0, 0.0, 0.08); }
 static NSColor* AegisPrimaryText(void)       { return AegisColor(0.10, 0.10, 0.10, 1.0); }
 static NSColor* AegisSecondaryText(void)     { return AegisColor(0.0, 0.0, 0.0, 0.50); }
 static NSColor* AegisPlaceholderText(void)   { return AegisColor(0.0, 0.0, 0.0, 0.32); }
-static NSColor* AegisAddrBg(void)            { return AegisColor(0.0, 0.0, 0.0, 0.038); }
-static NSColor* AegisAddrHoverBg(void)       { return AegisColor(0.0, 0.0, 0.0, 0.058); }
+static NSColor* AegisAddrBg(void)            { return AegisColor(0.0, 0.0, 0.0, 0.055); }
+static NSColor* AegisAddrHoverBg(void)       { return AegisColor(0.0, 0.0, 0.0, 0.075); }
 static NSColor* AegisAddrFocusBg(void)       { return [NSColor whiteColor]; }
-static NSColor* AegisAddrBorder(void)        { return AegisColor(0.0, 0.0, 0.0, 0.06); }
+static NSColor* AegisAddrBorder(void)        { return AegisColor(0.0, 0.0, 0.0, 0.09); }
 static NSColor* AegisAddrFocusBorder(void)   { return AegisColor(0.23, 0.51, 0.97, 0.50); }
 static NSColor* AegisBtnHoverBg(void)        { return AegisColor(0.0, 0.0, 0.0, 0.06); }
 static NSColor* AegisBtnPressedBg(void)      { return AegisColor(0.0, 0.0, 0.0, 0.10); }
-static NSColor* AegisSeparator(void)         { return AegisColor(0.0, 0.0, 0.0, 0.08); }
+static NSColor* AegisSeparator(void)         { return AegisColor(0.0, 0.0, 0.0, 0.12); }
 static NSColor* AegisAccent(void)            { return AegisColor(0.23, 0.51, 0.97, 1.0); }
 static NSColor* AegisNavIconDefault(void)    { return AegisColor(0.25, 0.25, 0.25, 1.0); }
 static NSColor* AegisNavIconActive(void)     { return AegisColor(0.12, 0.12, 0.12, 1.0); }
@@ -165,9 +164,12 @@ static NSColor* AegisLockIcon(void)          { return AegisColor(0.0, 0.0, 0.0, 
 - (instancetype)initWithSymbolName:(NSString*)name {
   self = [super initWithFrame:NSMakeRect(0, 0, kNavBtnSize, kNavBtnSize)];
   if (self) {
-    [self setButtonType:NSButtonTypeMomentaryPushIn];
+    [self setButtonType:NSButtonTypeMomentaryChange];
+    [self setBezelStyle:NSBezelStyleInline];
     [self setBordered:NO];
+    [self setTitle:@""];
     [self setImagePosition:NSImageOnly];
+    [self setImageScaling:NSImageScaleProportionallyDown];
     [self setWantsLayer:YES];
     self.layer.cornerRadius = kNavBtnRadius;
     [self setSymbolName:name];
@@ -178,11 +180,17 @@ static NSColor* AegisLockIcon(void)          { return AegisColor(0.0, 0.0, 0.0, 
 - (void)setSymbolName:(NSString*)name {
   NSImageSymbolConfiguration* config = [NSImageSymbolConfiguration
       configurationWithPointSize:13.0
-                          weight:NSFontWeightMedium];
-  NSImage* image = [[NSImage imageWithSystemSymbolName:name
-                                 accessibilityDescription:name]
-      imageWithSymbolConfiguration:config];
-  [self setImage:image];
+                          weight:NSFontWeightMedium
+                           scale:NSImageSymbolScaleMedium];
+  NSImage* image = [NSImage imageWithSystemSymbolName:name
+                                 accessibilityDescription:name];
+  if (image) {
+    image = [image imageWithSymbolConfiguration:config];
+    [image setTemplate:YES];
+    [self setImage:image];
+    [self setTitle:@""];
+    [self setImagePosition:NSImageOnly];
+  }
   [self setContentTintColor:AegisNavIconDefault()];
 }
 
@@ -489,13 +497,16 @@ void EnsureHostWindow(const std::string& title, int width, int height) {
   [s.root_view setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
   [s.window setContentView:s.root_view];
 
-  // ── Toolbar (NSVisualEffectView) ───────────────────────────────────────
+  // ── Toolbar (NSVisualEffectView — forced light) ─────────────────────
 
   s.toolbar_view = [[NSVisualEffectView alloc]
       initWithFrame:NSMakeRect(0, h - kToolbarHeight, w, kToolbarHeight)];
   [s.toolbar_view setMaterial:NSVisualEffectMaterialTitlebar];
-  [s.toolbar_view setBlendingMode:NSVisualEffectBlendingModeBehindWindow];
+  [s.toolbar_view setBlendingMode:NSVisualEffectBlendingModeWithinWindow];
   [s.toolbar_view setState:NSVisualEffectStateActive];
+  [s.toolbar_view setEmphasized:YES];
+  // Force light appearance on chrome only — web content uses system setting.
+  [s.toolbar_view setAppearance:[NSAppearance appearanceNamed:NSAppearanceNameAqua]];
   [s.toolbar_view setAutoresizingMask:NSViewWidthSizable | NSViewMinYMargin];
   [s.root_view addSubview:s.toolbar_view];
 
@@ -542,13 +553,14 @@ void EnsureHostWindow(const std::string& title, int width, int height) {
       initWithFrame:NSMakeRect(kTabLeftInset, tab_item_y, kTabInitialWidth, kTabHeight)];
   [s.tab_bg setWantsLayer:YES];
   s.tab_bg.layer.cornerRadius = kTabRadius;
-  s.tab_bg.layer.backgroundColor = AegisActiveTabBg().CGColor;
+  s.tab_bg.layer.backgroundColor = [NSColor whiteColor].CGColor;
+  s.tab_bg.layer.opaque = YES;
   s.tab_bg.layer.borderWidth = 0.5;
   s.tab_bg.layer.borderColor = AegisActiveTabBorder().CGColor;
   s.tab_bg.layer.shadowColor = [NSColor blackColor].CGColor;
-  s.tab_bg.layer.shadowOffset = CGSizeMake(0, -0.5);
-  s.tab_bg.layer.shadowRadius = 2.0;
-  s.tab_bg.layer.shadowOpacity = 0.06;
+  s.tab_bg.layer.shadowOffset = CGSizeMake(0, -1.0);
+  s.tab_bg.layer.shadowRadius = 3.0;
+  s.tab_bg.layer.shadowOpacity = 0.08;
   s.tab_bg.layer.masksToBounds = NO;
   [s.toolbar_view addSubview:s.tab_bg];
 
@@ -639,17 +651,20 @@ void EnsureHostWindow(const std::string& title, int width, int height) {
     [s.address_container addSubview:s.lock_icon];
   }
 
-  // Address text field
+  // Address text field — vertically centered in 32px container
   const CGFloat field_x = kAddrHPad + 14.0 + 6.0;  // after lock icon + gap
   const CGFloat field_w = addr_w - field_x - kAddrHPad;
+  const CGFloat field_h = 20.0;
+  const CGFloat field_y = (kAddrHeight - field_h) / 2.0;
   s.address_field = [[AegisAddressField alloc]
-      initWithFrame:NSMakeRect(field_x, 0, field_w, kAddrHeight)];
+      initWithFrame:NSMakeRect(field_x, field_y, field_w, field_h)];
   s.address_field.addressContainer = s.address_container;
   [s.address_field setAutoresizingMask:NSViewWidthSizable];
   [s.address_field setBezeled:NO];
   [s.address_field setBordered:NO];
   [s.address_field setFocusRingType:NSFocusRingTypeNone];
   [s.address_field setDrawsBackground:NO];
+  [s.address_field setBackgroundColor:[NSColor clearColor]];
   [s.address_field setTextColor:AegisPrimaryText()];
   [s.address_field setFont:[NSFont systemFontOfSize:13.0 weight:NSFontWeightRegular]];
   [s.address_field setPlaceholderString:@"Search or enter address"];
