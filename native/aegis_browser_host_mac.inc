@@ -23,6 +23,10 @@ static const CGFloat kAddrRightInset = 14.0;
 static const CGFloat kProgressHeight = 2.0;
 static const CGFloat kSeparatorHeight = 1.0;
 static const CGFloat kPageTransitionMaxAlpha = 0.16;
+static const CGFloat kPageTransitionDelay = 0.05;
+static const CGFloat kPageTransitionFadeInDuration = 0.14;
+static const CGFloat kPageTransitionFadeOutDuration = 0.18;
+static const CGFloat kPageTransitionMinVisibleDuration = 0.12;
 
 static NSColor* AegisColor(CGFloat r, CGFloat g, CGFloat b, CGFloat a) {
   return [NSColor colorWithSRGBRed:r green:g blue:b alpha:a];
@@ -42,6 +46,7 @@ static NSColor* AegisBtnHoverBg(void) { return AegisColor(0.0, 0.0, 0.0, 0.06); 
 static NSColor* AegisBtnPressedBg(void) { return AegisColor(0.0, 0.0, 0.0, 0.10); }
 static NSColor* AegisSeparator(void) { return AegisColor(0.0, 0.0, 0.0, 0.12); }
 static NSColor* AegisAccent(void) { return AegisColor(0.23, 0.51, 0.97, 1.0); }
+static NSColor* AegisPageTransitionFill(void) { return AegisColor(0.972, 0.976, 0.985, 1.0); }
 static NSColor* AegisNavIconDefault(void) { return AegisColor(0.25, 0.25, 0.25, 1.0); }
 static NSColor* AegisNavIconActive(void) { return AegisColor(0.12, 0.12, 0.12, 1.0); }
 static NSColor* AegisLockIcon(void) { return AegisColor(0.0, 0.0, 0.0, 0.36); }
@@ -331,6 +336,9 @@ struct BrowserHostState {
   bool is_loading = false;
   bool closing_from_browser = false;
   bool close_requested_by_user = false;
+  CFTimeInterval loading_started_at = 0;
+  CFTimeInterval transition_visible_since = 0;
+  std::uint64_t transition_generation = 0;
 };
 
 BrowserHostState& HostState() {
@@ -543,7 +551,7 @@ void EnsureHostWindow(const std::string& title, int width, int height) {
       initWithFrame:[s.web_container_view bounds]];
   [s.page_transition_view setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
   [s.page_transition_view setWantsLayer:YES];
-  s.page_transition_view.layer.backgroundColor = [NSColor whiteColor].CGColor;
+  s.page_transition_view.layer.backgroundColor = AegisPageTransitionFill().CGColor;
   s.page_transition_view.hidden = YES;
   s.page_transition_view.alphaValue = 0.0;
   [s.web_container_view addSubview:s.page_transition_view];
@@ -686,6 +694,7 @@ void EnsureHostWindow(const std::string& title, int width, int height) {
   }
 
   if (state->progress_view) {
+    [state->progress_view.layer removeAllAnimations];
     if (isLoading) {
       CGFloat toolbar_w = state->toolbar_view.frame.size.width;
       state->progress_view.hidden = NO;
@@ -721,25 +730,68 @@ void EnsureHostWindow(const std::string& title, int width, int height) {
 
   if (state->page_transition_view) {
     [state->page_transition_view.layer removeAllAnimations];
+    state->transition_generation += 1;
+    const std::uint64_t generation = state->transition_generation;
     if (isLoading) {
-      state->page_transition_view.hidden = NO;
-      [state->page_transition_view setAlphaValue:0.0];
-      [NSAnimationContext runAnimationGroup:^(NSAnimationContext* ctx) {
-        ctx.duration = 0.12;
-        ctx.timingFunction = [CAMediaTimingFunction
-            functionWithName:kCAMediaTimingFunctionEaseOut];
-        [[state->page_transition_view animator] setAlphaValue:kPageTransitionMaxAlpha];
-      } completionHandler:nil];
+      state->loading_started_at = CFAbsoluteTimeGetCurrent();
+      dispatch_after(
+          dispatch_time(DISPATCH_TIME_NOW,
+                        static_cast<int64_t>(kPageTransitionDelay * NSEC_PER_SEC)),
+          dispatch_get_main_queue(), ^{
+            if (state->transition_generation != generation || !state->is_loading ||
+                state->page_transition_view == nil) {
+              return;
+            }
+            state->page_transition_view.hidden = NO;
+            [state->page_transition_view setAlphaValue:0.0];
+            [NSAnimationContext runAnimationGroup:^(NSAnimationContext* ctx) {
+              ctx.duration = kPageTransitionFadeInDuration;
+              ctx.timingFunction = [CAMediaTimingFunction
+                  functionWithName:kCAMediaTimingFunctionEaseOut];
+              [[state->page_transition_view animator] setAlphaValue:kPageTransitionMaxAlpha];
+            } completionHandler:^{
+              if (state->transition_generation == generation) {
+                state->transition_visible_since = CFAbsoluteTimeGetCurrent();
+              }
+            }];
+          });
     } else {
-      if (!state->page_transition_view.hidden || state->page_transition_view.alphaValue > 0.0) {
-        [NSAnimationContext runAnimationGroup:^(NSAnimationContext* ctx) {
-          ctx.duration = 0.18;
-          ctx.timingFunction = [CAMediaTimingFunction
-              functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
-          [[state->page_transition_view animator] setAlphaValue:0.0];
-        } completionHandler:^{
-          state->page_transition_view.hidden = YES;
-        }];
+      CFTimeInterval delay = 0;
+      if (state->transition_visible_since > 0) {
+        const CFTimeInterval visible_for =
+            CFAbsoluteTimeGetCurrent() - state->transition_visible_since;
+        delay = fmax(0.0, kPageTransitionMinVisibleDuration - visible_for);
+      }
+      dispatch_after(
+          dispatch_time(DISPATCH_TIME_NOW,
+                        static_cast<int64_t>(delay * NSEC_PER_SEC)),
+          dispatch_get_main_queue(), ^{
+            if (state->transition_generation != generation || state->is_loading ||
+                state->page_transition_view == nil) {
+              return;
+            }
+            if (!state->page_transition_view.hidden ||
+                state->page_transition_view.alphaValue > 0.0) {
+              [NSAnimationContext runAnimationGroup:^(NSAnimationContext* ctx) {
+                ctx.duration = kPageTransitionFadeOutDuration;
+                ctx.timingFunction = [CAMediaTimingFunction
+                    functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+                [[state->page_transition_view animator] setAlphaValue:0.0];
+              } completionHandler:^{
+                if (state->transition_generation != generation ||
+                    state->page_transition_view == nil) {
+                  return;
+                }
+                state->page_transition_view.hidden = YES;
+                state->transition_visible_since = 0;
+              }];
+            } else {
+              state->page_transition_view.hidden = YES;
+              state->transition_visible_since = 0;
+            }
+          });
+      if (state->page_transition_view.hidden && state->page_transition_view.alphaValue <= 0.0) {
+        state->transition_visible_since = 0;
       }
     }
   }
@@ -891,6 +943,9 @@ void AegisCloseBrowserHostWindow() {
   state.page_transition_view = nil;
   state.controller = nil;
   state.close_requested_by_user = false;
+  state.loading_started_at = 0;
+  state.transition_visible_since = 0;
+  state.transition_generation = 0;
   [NSApp terminate:nil];
 }
 
