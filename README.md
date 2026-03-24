@@ -38,9 +38,10 @@ There is no production per-command relaunch path.
 
 Local release rule:
 
-- use the release CLI
-- use the release host library
-- prefer the stable installed app at `~/Applications/Aegis.app` when present
+- install one stable local release app at `~/Applications/Aegis.app`
+- use its bundled CLI as the canonical runtime entrypoint
+- do not rebuild or reinstall during normal `aegis` usage
+- refresh artifacts explicitly with `cargo build --release && aegis-bin native install`
 
 Runtime state rules:
 
@@ -55,6 +56,7 @@ The main binary is `aegis`.
 Human-use shortcut:
 
 - `aegis` with no arguments opens the local headful Aegis app
+- `aegis ...` with arguments uses the installed bundled CLI at `~/Applications/Aegis.app/Contents/MacOS/aegis_cli`
 
 Top-level commands:
 
@@ -63,6 +65,7 @@ Top-level commands:
 - `native status`
 - `native configure`
 - `native build`
+- `native install`
 - `native paths`
 
 Global runtime flags:
@@ -251,13 +254,15 @@ Native helper commands:
 aegis native status
 aegis native configure
 aegis native build
+aegis native install
 aegis native paths
 ```
 
 Install a stable local release app bundle:
 
 ```bash
-./scripts/install_local_release.sh
+cargo build --release
+aegis-bin native install
 ```
 
 That installs a locally ad hoc signed app at `~/Applications/Aegis.app`, clears quarantine

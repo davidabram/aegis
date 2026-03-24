@@ -63,6 +63,7 @@ enum NativeCommands {
         #[arg(long)]
         scheme: Option<String>,
     },
+    Install,
     Paths,
 }
 
@@ -232,6 +233,24 @@ fn handle_native_command(
                     "artifact": artifact,
                 }))?
             );
+        }
+        NativeCommands::Install => {
+            #[cfg(target_os = "macos")]
+            {
+                let current_exe = std::env::current_exe()?;
+                let bundle = native::install_local_release(workspace_root, &current_exe)?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "installed_app_bundle": bundle,
+                        "installed_app_executable": native::bundle_executable(&bundle),
+                    }))?
+                );
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                return Err("`aegis native install` is only supported on macOS".into());
+            }
         }
         NativeCommands::Paths => {
             let status = native::status(workspace_root);

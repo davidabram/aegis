@@ -72,6 +72,42 @@ pub fn status(root: impl AsRef<Path>) -> NativeStatus {
     }
 }
 
+#[cfg(target_os = "macos")]
+pub fn install_local_release(
+    root: impl AsRef<Path>,
+    source_executable: impl AsRef<Path>,
+) -> Result<PathBuf, AegisError> {
+    let root = root.as_ref();
+    let source_executable = source_executable.as_ref();
+    let build_output_bundle = root.join(DEFAULT_APP_BUNDLE_PATH);
+    let install_bundle = installed_app_bundle()
+        .ok_or_else(|| AegisError::Bridge("HOME is not set; cannot resolve local app install path".into()))?;
+
+    build_xcode(root, NativeConfiguration::Release, Some("aegis_host"))?;
+    build_xcode(root, NativeConfiguration::Release, None)?;
+
+    if install_bundle.exists() {
+        fs::remove_dir_all(&install_bundle)?;
+    }
+    if let Some(parent) = install_bundle.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    copy_dir_recursive(&build_output_bundle, &install_bundle)?;
+
+    let bundled_cli = install_bundle
+        .join("Contents")
+        .join("MacOS")
+        .join(DEFAULT_BUNDLED_CLI_NAME);
+    fs::copy(source_executable, &bundled_cli)?;
+    let mode = fs::metadata(source_executable)?.permissions().mode();
+    fs::set_permissions(&bundled_cli, fs::Permissions::from_mode(mode))?;
+
+    clear_quarantine_attribute(&install_bundle);
+    ad_hoc_sign_bundle(&install_bundle)?;
+
+    Ok(install_bundle)
+}
+
 pub fn configure_xcode(root: impl AsRef<Path>) -> Result<PathBuf, AegisError> {
     let root = root.as_ref();
     let native_dir = root.join(NATIVE_DIR);
@@ -198,13 +234,22 @@ pub fn is_bundle_executable(path: &Path) -> bool {
 
 #[cfg(target_os = "macos")]
 pub fn prepare_bundled_cli(
-    root: impl AsRef<Path>,
+    _root: impl AsRef<Path>,
     source_executable: impl AsRef<Path>,
 ) -> Result<PathBuf, AegisError> {
-    let root = root.as_ref();
-    let app_bundle = preferred_app_bundle(root);
+    let app_bundle = installed_app_bundle().ok_or_else(|| {
+        AegisError::Bridge(
+            "canonical app bundle is not installed at ~/Applications/Aegis.app. Run `aegis native install` first."
+                .into(),
+        )
+    })?;
     if !app_bundle.exists() {
-        build_xcode(root, NativeConfiguration::Release, None)?;
+        return Err(AegisError::Bridge(
+            format!(
+                "canonical app bundle not found at {}. Run `aegis native install` first.",
+                app_bundle.display()
+            ),
+        ));
     }
 
     let target = app_bundle
@@ -269,6 +314,26 @@ fn ad_hoc_sign_bundle(bundle: &Path) -> Result<(), AegisError> {
         ],
         Path::new("/"),
     )
+}
+
+#[cfg(target_os = "macos")]
+fn copy_dir_recursive(source: &Path, target: &Path) -> Result<(), AegisError> {
+    fs::create_dir_all(target)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let source_path = entry.path();
+        let target_path = target.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_dir_recursive(&source_path, &target_path)?;
+        } else if file_type.is_symlink() {
+            let link_target = fs::read_link(&source_path)?;
+            std::os::unix::fs::symlink(&link_target, &target_path)?;
+        } else {
+            fs::copy(&source_path, &target_path)?;
+        }
+    }
+    Ok(())
 }
 
 fn run_checked(program: &str, args: &[&str], root: &Path) -> Result<(), AegisError> {

@@ -45,9 +45,10 @@ Production state model:
 
 On macOS, runtime-backed CLI commands are re-execed through the bundled app path automatically.
 
-For local production-like use, the canonical shell command should invoke the workspace release
-binary after a fresh `cargo build --release`. That keeps the CLI you type and the bundled runtime
-CLI on the same build when `serve` re-execs through the app bundle.
+For local production-like use, the canonical path is one installed release app at
+`~/Applications/Aegis.app` plus its bundled CLI at
+`~/Applications/Aegis.app/Contents/MacOS/aegis_cli`.
+Normal `aegis` usage should not rebuild or reinstall anything.
 
 ## Fast Start
 
@@ -57,10 +58,11 @@ Inspect native paths:
 aegis native paths
 ```
 
-Install the stable local release app:
+Install or refresh the stable local release app:
 
 ```bash
-./scripts/install_local_release.sh
+cargo build --release
+aegis-bin native install
 ```
 
 Start the API server:
@@ -240,6 +242,7 @@ For robust control, use this sequence:
 ## Constraints
 
 - `serve` defaults to the release host library if it exists
+- the canonical local command path uses the installed bundled CLI, not an on-demand rebuild
 - native macOS builds require the local CEF SDK under `third_party/cef/...`
 - the published GitHub repo intentionally excludes the vendored CEF binary payload
 - local ad hoc signing can reduce repeated local trust noise, but it does not bypass macOS
