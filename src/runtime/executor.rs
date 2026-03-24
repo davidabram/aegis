@@ -47,8 +47,8 @@ impl AegisRuntime {
             events: EventStream::default(),
             scheduler: Scheduler::default(),
             trace_recorder: None,
-            runtime_bootstrapped: false,
-            bootstrap_duration_ms: None,
+            runtime_bootstrapped: true,
+            bootstrap_duration_ms: Some(0),
         })
     }
 
@@ -186,10 +186,6 @@ impl AegisRuntime {
     }
 
     fn ensure_runtime_bootstrapped(&mut self, capture_snapshot: bool) -> Result<(), AegisError> {
-        if !self.runtime_bootstrapped {
-            self.runtime_bootstrapped = true;
-            self.bootstrap_duration_ms = Some(0);
-        }
         if capture_snapshot {
             let snapshot = self.bridge.snapshot_dom()?;
             self.dom.replace_snapshot(snapshot);

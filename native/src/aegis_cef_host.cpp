@@ -620,7 +620,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
         RequireDictionary(DecodeEnvelope(MessageKind::SendBatch, request),
                           "batch request must be a dictionary");
     const auto body = WriteJson(payload);
-    const auto response = InvokeRenderer(aegis::kOpSendBatch, body);
+    const auto response = InvokeRendererReady(aegis::kOpSendBatch, body);
     return EncodeJsonEnvelope(MessageKind::SendBatch, response);
   }
 
@@ -628,7 +628,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
     static_cast<void>(request);
     EnsureRuntimeInstalled();
     return EncodeJsonEnvelope(MessageKind::SnapshotDom,
-                              InvokeRenderer(aegis::kOpSnapshotDom, "{}"));
+                              InvokeRendererReady(aegis::kOpSnapshotDom, "{}"));
   }
 
   std::vector<std::uint8_t> InjectSession(const std::vector<std::uint8_t>& request) override {
@@ -639,7 +639,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
     ReplaceNetworkOverrides(payload);
     ReplaceCookies(payload);
     EnsureRuntimeInstalled();
-    InvokeRenderer(aegis::kOpInjectStorage, WriteJson(payload));
+    InvokeRendererReady(aegis::kOpInjectStorage, WriteJson(payload));
     return {};
   }
 
@@ -648,7 +648,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
     EnsureRuntimeInstalled();
 
     auto storage = RequireDictionary(
-        ParseJsonValue(InvokeRenderer(aegis::kOpSnapshotStorage, "{}"),
+        ParseJsonValue(InvokeRendererReady(aegis::kOpSnapshotStorage, "{}"),
                        "storage snapshot is not valid json"),
         "storage snapshot must be a dictionary");
     storage->SetList("cookies", SnapshotCookies());
@@ -660,7 +660,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
     static_cast<void>(request);
     EnsureRuntimeInstalled();
 
-    const auto renderer_response = InvokeRenderer(aegis::kOpDrainEvents, "{}");
+    const auto renderer_response = InvokeRendererReady(aegis::kOpDrainEvents, "{}");
     AppendDebugLog("host: drain_events renderer_response bytes=" +
                    std::to_string(renderer_response.size()));
     auto response = RequireDictionary(
@@ -708,7 +708,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
     response->SetString("url", CurrentUrl());
     response->SetValue(
         "snapshot",
-        ParseJsonValue(InvokeRenderer(aegis::kOpSnapshotDom, "{}"),
+        ParseJsonValue(InvokeRendererReady(aegis::kOpSnapshotDom, "{}"),
                        "navigation snapshot is not valid json"));
 
     auto events = CefListValue::Create();
@@ -1217,13 +1217,18 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
   }
 
   void EnsureRuntimeInstalled() {
+    {
+      std::lock_guard lock(mutex_);
+      if (browser_.get() != nullptr && renderer_ready_ && page_ready_ && runtime_installed_) {
+        return;
+      }
+    }
     EnsurePageReady();
     std::lock_guard lock(mutex_);
     runtime_installed_ = true;
   }
 
-  std::string InvokeRenderer(const std::string& operation, const std::string& body) {
-    EnsurePageReady();
+  std::string InvokeRendererReady(const std::string& operation, const std::string& body) {
     AppendDebugLog("host: invoke_renderer " + operation);
 
     const int request_id = [this] {
@@ -1265,6 +1270,11 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
     }
     AppendDebugLog("host: invoke_renderer complete " + operation);
     return reply.body;
+  }
+
+  std::string InvokeRenderer(const std::string& operation, const std::string& body) {
+    EnsurePageReady();
+    return InvokeRendererReady(operation, body);
   }
 
   void CompleteRendererRequest(int request_id, bool ok, std::string body) {
