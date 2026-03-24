@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -38,34 +39,65 @@ def wait_for_runtime(base_url: str, timeout_s: float) -> tuple[float, dict]:
     raise TimeoutError("runtime did not become ready in time")
 
 
+def ensure_port_free(host: str, port: int) -> None:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(0.25)
+        if sock.connect_ex((host, port)) != 0:
+            return
+
+    subprocess.run(
+        ["zsh", "-lc", f"lsof -ti tcp:{port} | xargs -r kill -9"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    time.sleep(0.2)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Measure Aegis cold-start and first-command latency.")
     parser.add_argument("--addr", default="127.0.0.1:7915")
     parser.add_argument("--mode", choices=("headless", "headful"), default="headless")
     parser.add_argument("--start-url", default="https://example.com")
-    parser.add_argument("--host-lib", default="native/build-xcode/Debug/libaegis_host.dylib")
+    parser.add_argument("--host-lib", default="native/build-xcode/Release/libaegis_host.dylib")
     parser.add_argument("--timeout", type=float, default=20.0)
     parser.add_argument("--debug-log", default="/tmp/aegis-measure-startup.log")
     args = parser.parse_args()
 
     root = Path(__file__).resolve().parents[1]
-    binary = root / "native/build-xcode/Debug/aegis_native.app/Contents/MacOS/aegis_cli"
+    installed_cli = (
+        Path.home()
+        / "Applications"
+        / "Aegis.app"
+        / "Contents"
+        / "MacOS"
+        / "aegis_cli"
+    )
+    binary = (
+        installed_cli
+        if installed_cli.exists()
+        else root / "target" / "aarch64-apple-darwin" / "release" / "aegis"
+    )
     base_url = f"http://{args.addr}"
+    host, port_text = args.addr.rsplit(":", 1)
+    ensure_port_free(host, int(port_text))
 
     env = os.environ.copy()
     env["AEGIS_DEBUG_LOG"] = args.debug_log
+    env["AEGIS_WORKSPACE_ROOT"] = str(root)
+    env["AEGIS_BUNDLED_CLI"] = "1"
 
     command = [
         str(binary),
-        "serve",
-        "--addr",
-        args.addr,
         "--mode",
         args.mode,
         "--start-url",
         args.start_url,
         "--host-lib",
         args.host_lib,
+        "serve",
+        "--addr",
+        args.addr,
     ]
 
     process = subprocess.Popen(
