@@ -84,6 +84,14 @@ python3 scripts/measure_startup.py --mode headful
 The startup harness now measures the local bootstrap page by default so cold-start timings are not
 inflated by external network fetches.
 
+It also reports:
+
+- `process_spawn_ms`
+- `serve_ready_banner_ms`
+- `runtime_poll_attempts`
+- `runtime_ready_ms`
+- `first_command_ms`
+
 ## Session Shape
 
 `SessionState` shape:

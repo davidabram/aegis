@@ -7,6 +7,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 from pathlib import Path
@@ -28,15 +29,33 @@ def http_post_json(url: str, payload: dict, timeout: float) -> dict:
         return json.loads(response.read().decode())
 
 
-def wait_for_runtime(base_url: str, timeout_s: float) -> tuple[float, dict]:
+def wait_for_runtime(base_url: str, timeout_s: float) -> tuple[float, dict, int]:
     started = time.time()
+    attempts = 0
     while time.time() - started < timeout_s:
+        attempts += 1
         try:
             runtime = http_get_json(f"{base_url}/runtime", timeout=1.0)
-            return time.time() - started, runtime
+            return time.time() - started, runtime, attempts
         except Exception:
             time.sleep(0.05)
     raise TimeoutError("runtime did not become ready in time")
+
+
+def watch_ready_banner(stream, started_at: float, result: dict) -> None:
+    if stream is None:
+        return
+    try:
+        for line in iter(stream.readline, ""):
+            if "Aegis serve ready on http://" in line:
+                result["serve_ready_banner_ms"] = round((time.time() - started_at) * 1000, 1)
+                result["serve_ready_banner_line"] = line.strip()
+                break
+    finally:
+        try:
+            stream.close()
+        except Exception:
+            pass
 
 
 def ensure_port_free(host: str, port: int) -> None:
@@ -103,16 +122,27 @@ def main() -> int:
         args.addr,
     ]
 
+    launch_started_at = time.time()
     process = subprocess.Popen(
         command,
         cwd=root,
         env=env,
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
     )
+    started_at = time.time()
+    banner_info: dict[str, object] = {}
+    banner_thread = threading.Thread(
+        target=watch_ready_banner,
+        args=(process.stderr, started_at, banner_info),
+        daemon=True,
+    )
+    banner_thread.start()
 
     try:
-        runtime_ready_s, runtime_before = wait_for_runtime(base_url, args.timeout)
+        runtime_ready_s, runtime_before, runtime_attempts = wait_for_runtime(base_url, args.timeout)
 
         first_command_started = time.time()
         first_execute = http_post_json(
@@ -128,13 +158,17 @@ def main() -> int:
             "addr": args.addr,
             "mode": args.mode,
             "start_url": args.start_url,
+            "pid": process.pid,
+            "process_spawn_ms": round((started_at - launch_started_at) * 1000, 1),
             "runtime_ready_ms": round(runtime_ready_s * 1000, 1),
+            "runtime_poll_attempts": runtime_attempts,
             "first_command_ms": round(first_command_s * 1000, 1),
             "runtime_before": runtime_before,
             "first_execute": first_execute,
             "runtime_after": runtime_after,
             "debug_log": args.debug_log,
         }
+        report.update(banner_info)
         print(json.dumps(report, indent=2))
         return 0
     finally:
@@ -146,6 +180,7 @@ def main() -> int:
                 os.kill(process.pid, signal.SIGKILL)
             except Exception:
                 pass
+        banner_thread.join(timeout=0.2)
 
 
 if __name__ == "__main__":
