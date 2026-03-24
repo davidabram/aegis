@@ -4,9 +4,8 @@ use std::path::PathBuf;
 
 use aegis::api::server;
 use aegis::{
-    AegisConfigStore, BrowserConfig, BrowserExportReport, BrowserImportReport, BrowserKind,
-    BrowserMode, NativeConfiguration, build_xcode, configure_xcode, export_browser_profile,
-    import_browser_profile, list_browser_profiles, native, replay_trace,
+    AegisConfigStore, AegisSecretStore, BrowserConfig, BrowserMode, NativeConfiguration,
+    build_xcode, configure_xcode, native, replay_trace,
 };
 use clap::{Parser, Subcommand};
 
@@ -67,25 +66,15 @@ enum ConfigCommands {
         #[arg(long)]
         json: String,
     },
-    BrowserProfiles {
-        #[arg(long, value_enum)]
-        browser: BrowserArg,
-    },
-    ImportBrowser {
-        #[arg(long, value_enum)]
-        browser: BrowserArg,
-        #[arg(long, default_value = "Default")]
-        source_profile: String,
+    SecretsGet {
         #[arg(long)]
-        target_profile: Option<String>,
+        profile: Option<String>,
     },
-    ExportBrowser {
-        #[arg(long, value_enum)]
-        browser: BrowserArg,
+    SecretsSet {
         #[arg(long)]
-        source_profile: Option<String>,
-        #[arg(long, default_value = "Default")]
-        target_profile: String,
+        profile: Option<String>,
+        #[arg(long)]
+        json: String,
     },
 }
 
@@ -107,12 +96,6 @@ enum NativeCommands {
 enum NativeConfigurationArg {
     Debug,
     Release,
-}
-
-#[derive(Clone, clap::ValueEnum)]
-enum BrowserArg {
-    Chrome,
-    Brave,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -300,41 +283,32 @@ fn handle_config_command(
                 }))?
             );
         }
-        ConfigCommands::BrowserProfiles { browser } => {
-            let profiles = list_browser_profiles(resolve_browser(browser))?;
-            println!("{}", serde_json::to_string_pretty(&profiles)?);
+        ConfigCommands::SecretsGet { profile } => {
+            let store = AegisSecretStore::detect()?;
+            let profile = profile.unwrap_or_else(|| default_profile.to_string());
+            let value = store.load_profile_secrets(&profile)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "profile": profile,
+                    "secrets": value,
+                }))?
+            );
         }
-        ConfigCommands::ImportBrowser {
-            browser,
-            source_profile,
-            target_profile,
-        } => {
-            let report: BrowserImportReport = import_browser_profile(
-                resolve_browser(browser),
-                &source_profile,
-                target_profile.as_deref().unwrap_or(default_profile),
-            )?;
-            println!("{}", serde_json::to_string_pretty(&report)?);
-        }
-        ConfigCommands::ExportBrowser {
-            browser,
-            source_profile,
-            target_profile,
-        } => {
-            let report: BrowserExportReport = export_browser_profile(
-                resolve_browser(browser),
-                source_profile.as_deref().unwrap_or(default_profile),
-                &target_profile,
-            )?;
-            println!("{}", serde_json::to_string_pretty(&report)?);
+        ConfigCommands::SecretsSet { profile, json } => {
+            let store = AegisSecretStore::detect()?;
+            let profile = profile.unwrap_or_else(|| default_profile.to_string());
+            let value: serde_json::Value = serde_json::from_str(&json)?;
+            let path = store.save_profile_secrets(&profile, &value)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "profile": profile,
+                    "path": path,
+                    "secrets": value,
+                }))?
+            );
         }
     }
     Ok(())
-}
-
-fn resolve_browser(browser: BrowserArg) -> BrowserKind {
-    match browser {
-        BrowserArg::Chrome => BrowserKind::Chrome,
-        BrowserArg::Brave => BrowserKind::Brave,
-    }
 }

@@ -4,7 +4,6 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::browser_import::ImportedCredential;
 use crate::state::AegisStatePaths;
 
 #[derive(Debug, Clone)]
@@ -53,9 +52,9 @@ impl AegisConfigStore {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct StoredProfileCredentials {
+struct StoredProfileSecrets {
     version: u32,
-    credentials: Vec<ImportedCredential>,
+    secrets: Value,
 }
 
 #[derive(Debug, Clone)]
@@ -70,54 +69,38 @@ impl AegisSecretStore {
         })
     }
 
-    pub fn load_profile_credentials(
-        &self,
-        profile: &str,
-    ) -> Result<Vec<ImportedCredential>, String> {
+    pub fn load_profile_secrets(&self, profile: &str) -> Result<Value, String> {
         validate_name(profile, "profile")?;
-        let path = self.paths.profile_credentials_file(profile);
+        let path = self.paths.profile_secrets_file(profile);
         if !path.exists() {
-            return Ok(Vec::new());
+            return Ok(Value::Object(Default::default()));
         }
-        let bytes = fs::read(&path).map_err(|error| {
-            format!("failed to read credential file {}: {error}", path.display())
-        })?;
-        let stored: StoredProfileCredentials = serde_json::from_slice(&bytes).map_err(|error| {
-            format!(
-                "failed to parse credential file {}: {error}",
-                path.display()
-            )
-        })?;
-        Ok(stored.credentials)
+        let bytes = fs::read(&path)
+            .map_err(|error| format!("failed to read secret file {}: {error}", path.display()))?;
+        let stored: StoredProfileSecrets = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("failed to parse secret file {}: {error}", path.display()))?;
+        Ok(stored.secrets)
     }
 
-    pub fn save_profile_credentials(
-        &self,
-        profile: &str,
-        credentials: &[ImportedCredential],
-    ) -> Result<PathBuf, String> {
+    pub fn save_profile_secrets(&self, profile: &str, secrets: &Value) -> Result<PathBuf, String> {
         validate_name(profile, "profile")?;
-        let path = self.paths.profile_credentials_file(profile);
+        let path = self.paths.profile_secrets_file(profile);
         let parent = path
             .parent()
-            .ok_or_else(|| format!("invalid credential path {}", path.display()))?;
+            .ok_or_else(|| format!("invalid secret path {}", path.display()))?;
         fs::create_dir_all(parent).map_err(|error| {
             format!(
-                "failed to create credential directory {}: {error}",
+                "failed to create secret directory {}: {error}",
                 parent.display()
             )
         })?;
-        let payload = serde_json::to_vec_pretty(&StoredProfileCredentials {
+        let payload = serde_json::to_vec_pretty(&StoredProfileSecrets {
             version: 1,
-            credentials: credentials.to_vec(),
+            secrets: secrets.clone(),
         })
-        .map_err(|error| format!("failed to encode credential payload: {error}"))?;
-        fs::write(&path, payload).map_err(|error| {
-            format!(
-                "failed to write credential file {}: {error}",
-                path.display()
-            )
-        })?;
+        .map_err(|error| format!("failed to encode secret payload: {error}"))?;
+        fs::write(&path, payload)
+            .map_err(|error| format!("failed to write secret file {}: {error}", path.display()))?;
         set_owner_only_permissions(&path)?;
         Ok(path)
     }
@@ -150,4 +133,15 @@ fn set_owner_only_permissions(path: &std::path::Path) -> Result<(), String> {
 #[cfg(not(unix))]
 fn set_owner_only_permissions(_path: &std::path::Path) -> Result<(), String> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_name;
+
+    #[test]
+    fn validate_name_rejects_invalid_characters() {
+        assert!(validate_name("profile-1", "profile").is_ok());
+        assert!(validate_name("bad/name", "profile").is_err());
+    }
 }

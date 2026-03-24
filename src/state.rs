@@ -32,22 +32,6 @@ impl AegisStatePaths {
         self.settings_dir().join(format!("{concern}.json"))
     }
 
-    pub fn imports_dir(&self) -> PathBuf {
-        self.root.join("imports")
-    }
-
-    pub fn exports_dir(&self) -> PathBuf {
-        self.root.join("exports")
-    }
-
-    pub fn browser_import_dir(&self, browser: &str, profile: &str) -> PathBuf {
-        self.imports_dir().join(browser).join(profile)
-    }
-
-    pub fn browser_export_dir(&self, browser: &str, profile: &str) -> PathBuf {
-        self.exports_dir().join(browser).join(profile)
-    }
-
     pub fn secrets_dir(&self) -> PathBuf {
         self.root.join("secrets")
     }
@@ -56,8 +40,8 @@ impl AegisStatePaths {
         self.secrets_dir().join("profiles").join(profile)
     }
 
-    pub fn profile_credentials_file(&self, profile: &str) -> PathBuf {
-        self.profile_secret_dir(profile).join("credentials.json")
+    pub fn profile_secrets_file(&self, profile: &str) -> PathBuf {
+        self.profile_secret_dir(profile).join("secrets.json")
     }
 
     pub fn profiles_dir(&self) -> PathBuf {

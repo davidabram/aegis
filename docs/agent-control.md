@@ -46,10 +46,10 @@ Production state model:
 - session continuity goes through `GET /session`, `POST /session`, `POST /session/save`, and `POST /session/load`
 - the active profile persists to `~/.aegis/profiles/<profile>/session.json`
 - concern-specific local settings belong in `~/.aegis/settings/*.json`
-- Aegis-owned saved browser credentials belong in `~/.aegis/secrets/profiles/<profile>/credentials.json`
-- browser import/export manifests and copied artifacts belong under `~/.aegis/imports/...` and `~/.aegis/exports/...`
+- Aegis-owned secrets belong in `~/.aegis/secrets/profiles/<profile>/secrets.json`
 - traces go through `POST /trace/enable`
 - if `--start-url` is omitted, the runtime boots into a local no-network bootstrap page
+- Aegis does not use Chrome/Brave Safe Storage or browser login/profile databases in the production path
 
 For local production-like use, the canonical path is one installed release app at
 `~/Applications/Aegis.app` plus its bundled CLI at
@@ -75,39 +75,21 @@ Inspect or set Aegis-owned config:
 
 ```bash
 aegis config get agent
-aegis config set agent --json '{"default_profile":"work","browser_import":"brave"}'
+aegis config set agent --json '{"default_profile":"work"}'
 ```
 
-List local browser profiles:
+Inspect or set Aegis-owned secrets:
 
 ```bash
-aegis config browser-profiles --browser brave
-aegis config browser-profiles --browser chrome
+aegis config secrets-get --profile work
+aegis config secrets-set --profile work --json '{"github":{"username":"saint","password":"..."},"api_keys":{"openai":"..."}}'
 ```
 
-Import a browser profile into Aegis-owned state:
+Secrets rules:
 
-```bash
-aegis config import-browser \
-  --browser brave \
-  --source-profile Default \
-  --target-profile brave-import
-```
-
-Export an Aegis profile back into a browser-compatible target profile:
-
-```bash
-aegis config export-browser \
-  --browser chrome \
-  --source-profile brave-import \
-  --target-profile AegisInterop
-```
-
-Browser export rules:
-
-- the target browser must be fully closed
-- cookies and credentials are written into the target browser profile database
-- Aegis also writes a password-import CSV to `~/.aegis/exports/<browser>/<target>/passwords.csv`
+- secrets live only in `~/.aegis/secrets/...`
+- Aegis never reads Chrome/Brave Safe Storage or browser login databases
+- if an agent needs credentials, store them in Aegis and inject them explicitly
 
 Start the API server:
 

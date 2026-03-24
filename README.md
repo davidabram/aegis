@@ -52,11 +52,11 @@ Runtime state rules:
 - session persistence goes through `GET /session`, `POST /session`, `POST /session/save`, and `POST /session/load`
 - `--profile <name>` selects `~/.aegis/profiles/<name>/session.json`
 - `~/.aegis/settings/*.json` is the canonical home for concern-specific local settings
-- `~/.aegis/secrets/profiles/<profile>/credentials.json` is the canonical home for Aegis-owned saved browser credentials
-- `~/.aegis/imports/...` and `~/.aegis/exports/...` hold browser interop artifacts and manifests
+- `~/.aegis/secrets/profiles/<profile>/secrets.json` is the canonical home for Aegis-owned saved secrets
 - trace persistence goes through `POST /trace/enable`
 - if `--start-url` is omitted, the runtime boots into a local no-network bootstrap page
 - the canonical control style is semantic `match` targeting for `click` and `set_value`, not long-lived raw DOM ids
+- Aegis does not use Chrome/Brave Safe Storage, browser login DBs, or external keychain-backed browser profile storage anywhere in the production path
 
 ## CLI Surface
 
@@ -72,9 +72,8 @@ Top-level commands:
 - `serve`
 - `config get`
 - `config set`
-- `config browser-profiles`
-- `config import-browser`
-- `config export-browser`
+- `config secrets-get`
+- `config secrets-set`
 - `trace replay`
 - `native status`
 - `native configure`
@@ -89,51 +88,27 @@ Global runtime flags:
 - `--host-lib <path>`
 - `--profile <name>`
 
-## Config And Browser Interop
+## Config And Secrets
 
 Inspect or set Aegis-owned config:
 
 ```bash
 aegis config get agent
-aegis config set agent --json '{"default_profile":"work","browser_import":"brave"}'
+aegis config set agent --json '{"default_profile":"work"}'
 ```
 
-List available Chrome or Brave profiles:
+Inspect or set Aegis-owned per-profile secrets:
 
 ```bash
-aegis config browser-profiles --browser brave
-aegis config browser-profiles --browser chrome
+aegis config secrets-get --profile work
+aegis config secrets-set --profile work --json '{"github":{"username":"saint","password":"..."},"api_keys":{"openai":"..."}}'
 ```
 
-One-click import an existing browser profile into Aegis-owned state:
+Secrets rules:
 
-```bash
-aegis config import-browser \
-  --browser brave \
-  --source-profile Default \
-  --target-profile brave-import
-```
-
-That imports:
-
-- cookies into `~/.aegis/profiles/<target>/session.json`
-- saved credentials into `~/.aegis/secrets/profiles/<target>/credentials.json`
-- bookmarks/preferences copies into `~/.aegis/imports/<browser>/<source>/`
-
-Export an Aegis profile back into a browser-compatible profile database:
-
-```bash
-aegis config export-browser \
-  --browser chrome \
-  --source-profile brave-import \
-  --target-profile AegisInterop
-```
-
-Export rules:
-
-- the target browser must be fully closed
-- cookies and credentials are written into the target browser profile database
-- a browser-import CSV is also written to `~/.aegis/exports/<browser>/<target>/passwords.csv`
+- secrets live only in `~/.aegis/secrets/...`
+- Aegis does not read or write Chrome/Brave cookies, login databases, or Safe Storage entries
+- if you want browser automation to use credentials, store them explicitly in Aegis and inject them through the runtime/session/config surfaces
 
 ## Start A Runtime
 
