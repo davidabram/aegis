@@ -11,10 +11,13 @@
 #include <fstream>
 #include <functional>
 #include <cstdlib>
+#include <cerrno>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <pthread.h>
+#include <signal.h>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -132,6 +135,10 @@ std::filesystem::path HostRootCacheDir() {
   return HostSupportDir() / "agent-runtime";
 }
 
+std::filesystem::path HostInstancesDir() {
+  return HostRootCacheDir() / "instances";
+}
+
 struct HostRuntimePaths {
   std::filesystem::path root_cache_dir;
   std::filesystem::path profile_dir;
@@ -146,13 +153,86 @@ std::string HostRuntimeInstanceId() {
 }
 
 HostRuntimePaths CreateHostRuntimePaths() {
-  const auto instance_root = HostRootCacheDir() / "instances" / HostRuntimeInstanceId();
+  const auto instance_root = HostInstancesDir() / HostRuntimeInstanceId();
   const auto profile_dir = instance_root / "profile";
   std::filesystem::create_directories(profile_dir);
   return {
       .root_cache_dir = instance_root,
       .profile_dir = profile_dir,
   };
+}
+
+bool ProcessExists(pid_t pid) {
+  if (pid <= 0) {
+    return false;
+  }
+  if (::kill(pid, 0) == 0) {
+    return true;
+  }
+  return errno == EPERM;
+}
+
+std::optional<pid_t> ParseInstancePid(const std::filesystem::path& path) {
+  const auto name = path.filename().string();
+  const auto dash = name.find('-');
+  const auto pid_text = dash == std::string::npos ? name : name.substr(0, dash);
+  if (pid_text.empty()) {
+    return std::nullopt;
+  }
+  for (const char ch : pid_text) {
+    if (!std::isdigit(static_cast<unsigned char>(ch))) {
+      return std::nullopt;
+    }
+  }
+  try {
+    return static_cast<pid_t>(std::stoll(pid_text));
+  } catch (...) {
+    return std::nullopt;
+  }
+}
+
+void RemoveTreeIfExists(const std::filesystem::path& path) {
+  std::error_code error;
+  std::filesystem::remove_all(path, error);
+}
+
+void CleanupLegacyRuntimeRoot() {
+  const auto root = HostRootCacheDir();
+  std::error_code error;
+  std::filesystem::create_directories(root, error);
+  if (error) {
+    return;
+  }
+
+  for (const auto& entry : std::filesystem::directory_iterator(root, error)) {
+    if (error) {
+      return;
+    }
+    if (entry.path().filename() == "instances") {
+      continue;
+    }
+    RemoveTreeIfExists(entry.path());
+  }
+}
+
+void CleanupStaleRuntimeInstances() {
+  const auto instances_dir = HostInstancesDir();
+  std::error_code error;
+  std::filesystem::create_directories(instances_dir, error);
+  if (error) {
+    return;
+  }
+
+  for (const auto& entry : std::filesystem::directory_iterator(instances_dir, error)) {
+    if (error) {
+      return;
+    }
+    const auto pid = ParseInstancePid(entry.path());
+    if (!pid.has_value() || ProcessExists(*pid)) {
+      continue;
+    }
+    RemoveTreeIfExists(entry.path());
+  }
 }
 
 std::filesystem::path DetectAppBundle(const std::filesystem::path& anchor) {
@@ -488,6 +568,8 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       throw std::runtime_error("aegis CEF host must be created on the process main thread");
     }
     AppendDebugLog("host: constructed");
+    CleanupLegacyRuntimeRoot();
+    CleanupStaleRuntimeInstances();
     if (manage_cef_lifecycle_) {
       Start();
     } else {
@@ -945,6 +1027,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
         cef_unload_library();
         cef_initialized_ = false;
       }
+      RemoveTreeIfExists(runtime_paths_.root_cache_dir);
       std::lock_guard lock(mutex_);
       startup_error_ = error.what();
       cv_.notify_all();
@@ -977,6 +1060,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       CefShutdown();
       cef_unload_library();
       cef_initialized_ = false;
+      RemoveTreeIfExists(runtime_paths_.root_cache_dir);
     } catch (...) {
       cef_initialized_ = false;
     }
