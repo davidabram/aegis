@@ -3,13 +3,34 @@
 
 #include <string>
 
+#include "include/cef_app.h"
 #include "include/cef_browser.h"
 #include "include/internal/cef_types.h"
+
+struct AegisCefBootstrapOptions {
+  bool headless = false;
+  bool external_message_pump = false;
+  bool initialize_browser_host_application = false;
+  std::string browser_subprocess_path;
+  std::string framework_dir_path;
+  std::string main_bundle_path;
+  std::string resources_dir_path;
+  std::string locales_dir_path;
+  std::string root_cache_path;
+  std::string cache_path;
+};
 
 std::string AegisStandaloneRootCachePath();
 std::string AegisStandaloneCachePath();
 void AegisInstallModalAlertSuppression();
 void AegisInitializeBrowserHostApplication();
+void AegisConfigureCefSettings(const AegisCefBootstrapOptions& options,
+                               CefSettings* settings);
+bool AegisExecuteProcessAndInitialize(const CefMainArgs& main_args,
+                                      const AegisCefBootstrapOptions& options,
+                                      CefRefPtr<CefApp> app,
+                                      int* subprocess_exit_code,
+                                      std::string* error);
 CefWindowHandle AegisCreateBrowserHostView(const std::string& title,
                                            int width,
                                            int height);

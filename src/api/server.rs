@@ -15,9 +15,10 @@ use tokio::sync::oneshot;
 use tokio::time::timeout;
 
 use crate::browser::BrowserConfig;
-use crate::commands::command::{Command, CommandMatcher, CommandTarget};
+use crate::commands::command::{Command, CommandTarget};
+use crate::commands::matcher::resolve_command_target as resolve_snapshot_target;
 use crate::config_store::{AegisConfigStore, AegisSecretStore, CredentialInput};
-use crate::dom::node::{DomNode, DomNodeSemantics, DomSnapshot};
+use crate::dom::node::{DomNode, DomSnapshot};
 use crate::events::stream::{EventReadWindow, SequencedEvent};
 use crate::host::LoadedAegisClient;
 use crate::runtime::executor::{ExecutionReport, RuntimeStatus};
@@ -561,90 +562,7 @@ fn resolve_command_target<'a>(
     snapshot: &'a DomSnapshot,
     target: &CommandTarget,
 ) -> Option<&'a DomNode> {
-    match target {
-        CommandTarget::Id { id } => snapshot.nodes.iter().find(|node| node.id == *id),
-        CommandTarget::Match { matcher } => snapshot
-            .nodes
-            .iter()
-            .find(|node| node_matches_command_matcher(node, matcher)),
-    }
-}
-
-fn node_matches_command_matcher(node: &DomNode, matcher: &CommandMatcher) -> bool {
-    let semantic = node.semantic.as_ref().cloned().unwrap_or(DomNodeSemantics {
-        role: None,
-        name: None,
-        label: None,
-        control_type: None,
-        actionable: false,
-        disabled: false,
-        actions: Vec::new(),
-    });
-    if matcher
-        .role
-        .as_ref()
-        .is_some_and(|value| !includes_normalized(semantic.role.as_deref(), value))
-    {
-        return false;
-    }
-    if matcher
-        .name
-        .as_ref()
-        .is_some_and(|value| !includes_normalized(semantic.name.as_deref(), value))
-    {
-        return false;
-    }
-    if matcher
-        .label
-        .as_ref()
-        .is_some_and(|value| !includes_normalized(semantic.label.as_deref(), value))
-    {
-        return false;
-    }
-    if matcher
-        .control_type
-        .as_ref()
-        .is_some_and(|value| !includes_normalized(semantic.control_type.as_deref(), value))
-    {
-        return false;
-    }
-    if matcher
-        .tag
-        .as_ref()
-        .is_some_and(|value| !includes_normalized(Some(node.tag.as_str()), value))
-    {
-        return false;
-    }
-    if matcher
-        .text
-        .as_ref()
-        .is_some_and(|value| !includes_normalized(node.text.as_deref(), value))
-    {
-        return false;
-    }
-    if matcher.placeholder.as_ref().is_some_and(|value| {
-        !includes_normalized(node.attrs.get("placeholder").map(String::as_str), value)
-    }) {
-        return false;
-    }
-    if matcher.href_contains.as_ref().is_some_and(|value| {
-        !includes_normalized(node.attrs.get("href").map(String::as_str), value)
-    }) {
-        return false;
-    }
-    if matcher
-        .actionable
-        .is_some_and(|value| semantic.actionable != value)
-    {
-        return false;
-    }
-    if matcher
-        .disabled
-        .is_some_and(|value| semantic.disabled != value)
-    {
-        return false;
-    }
-    true
+    resolve_snapshot_target(snapshot, target, None)
 }
 
 fn classify_credential_field(node: &DomNode) -> Option<CredentialFieldKind> {
@@ -1145,7 +1063,10 @@ fn read_diagnostics(diagnostics: &Arc<Mutex<ServeDiagnostics>>) -> RuntimeDiagno
                 latest_event_sequence: 0,
                 oldest_retained_event_sequence: None,
                 current_url: None,
+                current_title: None,
+                document_ready_state: None,
                 last_dom_refresh_at_ms: None,
+                last_live_state_refresh_at_ms: None,
                 last_event_at_ms: None,
                 last_successful_command_at_ms: None,
                 last_successful_bridge_roundtrip_at_ms: None,
@@ -1295,7 +1216,10 @@ impl ServeDiagnostics {
         } else {
             RuntimeOperationalState::Starting
         };
-        let command_ready = state == RuntimeOperationalState::Ready;
+        let command_ready = !matches!(
+            state,
+            RuntimeOperationalState::Starting | RuntimeOperationalState::Wedged
+        );
         RuntimeDiagnosticsResponse {
             state,
             control_plane_up: true,

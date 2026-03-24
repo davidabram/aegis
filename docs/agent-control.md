@@ -63,6 +63,14 @@ For local production-like use, the canonical path is one installed release app a
 `~/Applications/Aegis.app` plus its bundled CLI at
 `~/Applications/Aegis.app/Contents/MacOS/aegis_cli`, fronted by the installed shell launcher at
 `~/.local/bin/aegis` or `~/bin/aegis`.
+
+For production-signing workflows, the installer honors `AEGIS_CODESIGN_IDENTITY`,
+`AEGIS_CODESIGN_OPTIONS`, and `AEGIS_CODESIGN_ENTITLEMENTS`. It signs nested helpers/frameworks
+explicitly, verifies the installed bundle with `codesign --verify --strict`, and runs
+`spctl --assess` when a real signing identity is configured.
+For the strongest local-only workflow without a paid Apple account, run
+`./scripts/verify_local_release.sh`. It installs the canonical app, verifies the bundle signature,
+skips Gatekeeper assessment for ad hoc signing, and then runs the host-backed smoke test.
 Normal `aegis` usage should not rebuild or reinstall anything.
 
 ## Fast Start
@@ -213,6 +221,9 @@ Base address defaults to `http://127.0.0.1:7878`.
 curl http://127.0.0.1:7878/healthz
 ```
 
+After `aegis serve` reports ready, health is expected to be immediately command-ready.
+Production startup should not sit in a long-lived `starting` state with a bound control plane.
+
 ### Runtime Info
 
 ```bash
@@ -276,6 +287,7 @@ curl -X POST http://127.0.0.1:7878/execute \
 Canonical targeting rule:
 
 - prefer semantic `match` targets for `click` and `set_value`
+- prefer `name`, `role`, and `control_type` over raw text when a docs UI has repeated labels
 - use raw node `id` only for short-lived follow-up actions against a freshly materialized DOM
 - on reactive pages, node ids are not a stable long-term contract
 
@@ -302,6 +314,17 @@ curl -X POST http://127.0.0.1:7878/execute \
           "name": "Search",
           "actionable": true
         }
+      },
+      {
+        "type": "press_key",
+        "key": "Enter"
+      },
+      {
+        "type": "wait_for",
+        "url_contains": "search",
+        "text": "browser automation",
+        "ready_state": "complete",
+        "timeout_ms": 5000
       }
     ]
   }'
@@ -319,10 +342,20 @@ Supported matcher fields:
 - `href_contains`
 - `actionable`
 - `disabled`
+- `exact`
+
+Additional command types:
+
+- `hover`
+- `press_key`
+- `wait_for`
 
 Notes:
 - `navigate` returns quickly with ordered navigation/events and invalidates the cached DOM tree
 - `GET /dom` or a DOM-targeting command such as `click` / `set_value` repopulates the DOM snapshot on demand
+- `click`, `hover`, and `set_value` use strict action-aware target resolution and return richer match diagnostics
+- `press_key` can target the currently focused element or an explicit nested `target`
+- `wait_for` can poll `url_contains`, `title_contains`, `text`, `ready_state`, and an optional `target`
 - `execute` may return `"snapshot": null` for low-latency commands such as `eval` and `scroll`
 - agents should treat the event stream as the incremental source of truth between full snapshots
 - the most reliable loop on live sites is `navigate -> /dom -> execute(match...)`

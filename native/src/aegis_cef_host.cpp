@@ -47,6 +47,8 @@
 namespace aegis {
 namespace {
 
+thread_local std::string g_last_host_error;
+
 constexpr auto kStartupTimeout = std::chrono::seconds(30);
 constexpr auto kRendererTimeout = std::chrono::seconds(30);
 constexpr auto kShutdownTimeout = std::chrono::seconds(2);
@@ -1130,37 +1132,33 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       AppendDebugLog("host: cef_load_library complete");
 
       CefMainArgs main_args;
-      CefSettings settings;
-#if !defined(CEF_USE_SANDBOX)
-      settings.no_sandbox = true;
-#endif
-      settings.external_message_pump = true;
-      settings.windowless_rendering_enabled = true;
-      settings.command_line_args_disabled = false;
-      settings.log_severity = LOGSEVERITY_DISABLE;
-
-      if (options_.headless) {
-        AegisInstallModalAlertSuppression();
-      }
-
-      if (!options_.headless) {
-        AppendDebugLog("host: initialize_host_application begin");
-        AegisInitializeBrowserHostApplication();
-        AppendDebugLog("host: initialize_host_application complete");
-      }
-
-      CefString(&settings.browser_subprocess_path) = paths_.helper_executable.string();
-      CefString(&settings.framework_dir_path) = paths_.framework_dir.string();
-      CefString(&settings.main_bundle_path) = paths_.app_bundle.string();
-      CefString(&settings.resources_dir_path) = paths_.resources_dir.string();
-      CefString(&settings.locales_dir_path) = paths_.locales_dir.string();
-
+      AegisCefBootstrapOptions bootstrap_options;
+      bootstrap_options.headless = options_.headless;
+      bootstrap_options.external_message_pump = true;
+      bootstrap_options.initialize_browser_host_application = !options_.headless;
+      bootstrap_options.browser_subprocess_path = paths_.helper_executable.string();
+      bootstrap_options.framework_dir_path = paths_.framework_dir.string();
+      bootstrap_options.main_bundle_path = paths_.app_bundle.string();
+      bootstrap_options.resources_dir_path = paths_.resources_dir.string();
+      bootstrap_options.locales_dir_path = paths_.locales_dir.string();
+      bootstrap_options.root_cache_path = runtime_session_paths_.instance_dir.string();
+      bootstrap_options.cache_path =
+          (runtime_session_paths_.instance_dir / "cache").string();
       app_ = new AegisApp(false);
-      AppendDebugLog("host: cef_initialize begin");
-      if (!CefInitialize(main_args, settings, app_.get(), nullptr)) {
-        throw std::runtime_error("CefInitialize failed");
+      int subprocess_exit_code = -1;
+      std::string initialize_error;
+      AppendDebugLog("host: canonical cef bootstrap begin");
+      const bool initialized = AegisExecuteProcessAndInitialize(
+          main_args, bootstrap_options, app_, &subprocess_exit_code, &initialize_error);
+      AppendDebugLog("host: canonical cef bootstrap subprocess_exit_code=" +
+                     std::to_string(subprocess_exit_code));
+      if (subprocess_exit_code >= 0) {
+        throw std::runtime_error("unexpected subprocess execution in embedded host");
       }
-      AppendDebugLog("host: cef_initialize complete");
+      if (!initialized) {
+        throw std::runtime_error(
+            initialize_error.empty() ? "canonical cef bootstrap failed" : initialize_error);
+      }
       cef_initialized_ = true;
       ApplyAegisProductionPreferences(CefPreferenceManager::GetGlobalPreferenceManager());
       AppendDebugLog("host: cef initialized");
@@ -1174,6 +1172,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
         cv_.notify_all();
       }
     } catch (const std::exception& error) {
+      AppendDebugLog(std::string("host: startup_error ") + error.what());
       if (cef_initialized_) {
         CefShutdown();
         cef_unload_library();
@@ -1944,14 +1943,23 @@ bool RunEmbeddedHostOperation(const std::vector<std::uint8_t>& config,
 }  // namespace aegis
 
 extern "C" AegisHostHandle aegis_create_host(const std::uint8_t* input_ptr, std::size_t input_len) {
+  aegis::g_last_host_error.clear();
   try {
     auto host = std::make_unique<aegis::AegisCefHost>(
         aegis::ParseBrowserOptions(aegis::CopyInput(input_ptr, input_len)));
     host->WaitForReady();
     return host.release();
+  } catch (const std::exception& ex) {
+    aegis::g_last_host_error = ex.what();
+    return nullptr;
   } catch (...) {
+    aegis::g_last_host_error = "unknown native host startup failure";
     return nullptr;
   }
+}
+
+extern "C" const char* aegis_last_error_message(void) {
+  return aegis::g_last_host_error.empty() ? nullptr : aegis::g_last_host_error.c_str();
 }
 
 extern "C" void aegis_destroy_host(AegisHostHandle handle) {

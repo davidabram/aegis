@@ -174,6 +174,38 @@ bool CommandTargetArgument(CefRefPtr<CefDictionaryValue> command,
   return false;
 }
 
+bool OptionalNestedTargetArgument(CefRefPtr<CefDictionaryValue> command,
+                                  const char* key,
+                                  std::string* argument,
+                                  std::string* error) {
+  if (!command->HasKey(key)) {
+    *argument = "null";
+    return true;
+  }
+  auto wrapper = command->GetDictionary(key);
+  if (!wrapper.get()) {
+    *error = "command target wrapper must be an object";
+    return false;
+  }
+  if (wrapper->HasKey("match")) {
+    auto matcher = wrapper->GetDictionary("match");
+    if (!matcher.get()) {
+      *error = "command match target must be an object";
+      return false;
+    }
+    auto wrapped = CefValue::Create();
+    wrapped->SetDictionary(matcher->Copy(false));
+    *argument = CefWriteJSON(wrapped, JSON_WRITER_DEFAULT).ToString();
+    return true;
+  }
+  if (wrapper->HasKey("id")) {
+    *argument = std::to_string(wrapper->GetInt("id"));
+    return true;
+  }
+  *argument = "null";
+  return true;
+}
+
 std::string NormalizeEvalCode(std::string code) {
   auto trim = [](std::string* value) {
     std::size_t start = 0;
@@ -438,7 +470,7 @@ bool DispatchRendererOperation(const std::string& op,
         }
 
         const auto type = command->GetString("type").ToString();
-        if (type != "eval" && type != "scroll") {
+        if (type != "eval" && type != "scroll" && type != "press_key") {
           requires_snapshot = true;
         }
         std::string command_result;
@@ -475,6 +507,43 @@ bool DispatchRendererOperation(const std::string& op,
               "(() => { try { return JSON.stringify({ok:true,value:(window.__aegis ? window.__aegis.setValue(" +
               target_argument + "," + value_json +
               ") : null)}); } catch (error) { return JSON.stringify({ok:false,error:String(error && error.message ? error.message : error)}); } })()";
+          if (!EvalToString(frame, wrapped, &command_result, error)) {
+            return false;
+          }
+        } else if (type == "hover") {
+          std::string target_argument;
+          if (!CommandTargetArgument(command, &target_argument, error)) {
+            return false;
+          }
+          const auto wrapped =
+              "(() => { try { return JSON.stringify({ok:true,value:(window.__aegis ? window.__aegis.hover(" +
+              target_argument +
+              ") : null)}); } catch (error) { return JSON.stringify({ok:false,error:String(error && error.message ? error.message : error)}); } })()";
+          if (!EvalToString(frame, wrapped, &command_result, error)) {
+            return false;
+          }
+        } else if (type == "press_key") {
+          std::string target_argument;
+          if (!OptionalNestedTargetArgument(command, "target", &target_argument, error)) {
+            return false;
+          }
+          const auto key_json = QuoteForJavaScript(command->GetString("key").ToString());
+          const auto code_json = command->HasKey("code")
+                                     ? QuoteForJavaScript(command->GetString("code").ToString())
+                                     : "null";
+          const auto alt_key = command->GetBool("alt_key") ? "true" : "false";
+          const auto ctrl_key = command->GetBool("ctrl_key") ? "true" : "false";
+          const auto meta_key = command->GetBool("meta_key") ? "true" : "false";
+          const auto shift_key = command->GetBool("shift_key") ? "true" : "false";
+          const auto wrapped =
+              "(() => { try { return JSON.stringify({ok:true,value:(window.__aegis ? window.__aegis.pressKey(" +
+              target_argument + "," + key_json +
+              ",{code:" + code_json +
+              ",altKey:" + alt_key +
+              ",ctrlKey:" + ctrl_key +
+              ",metaKey:" + meta_key +
+              ",shiftKey:" + shift_key +
+              "}) : null)}); } catch (error) { return JSON.stringify({ok:false,error:String(error && error.message ? error.message : error)}); } })()";
           if (!EvalToString(frame, wrapped, &command_result, error)) {
             return false;
           }

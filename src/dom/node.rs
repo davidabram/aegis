@@ -18,6 +18,8 @@ pub struct DomNodeSemantics {
     pub actionable: bool,
     #[serde(default)]
     pub disabled: bool,
+    #[serde(default)]
+    pub visible: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub actions: Vec<String>,
 }

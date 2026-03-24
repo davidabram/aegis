@@ -21,6 +21,23 @@ fn encodes_batch_request_with_stable_shape() {
             Command::Click {
                 target: CommandTarget::Id { id: 9 },
             },
+            Command::Hover {
+                target: CommandTarget::Match {
+                    matcher: CommandMatcher {
+                        role: Some("button".into()),
+                        name: Some("Open".into()),
+                        label: None,
+                        control_type: None,
+                        tag: None,
+                        text: None,
+                        placeholder: None,
+                        href_contains: None,
+                        actionable: Some(true),
+                        disabled: Some(false),
+                        exact: Some(true),
+                    },
+                },
+            },
             Command::SetValue {
                 target: CommandTarget::Match {
                     matcher: CommandMatcher {
@@ -34,9 +51,42 @@ fn encodes_batch_request_with_stable_shape() {
                         href_contains: None,
                         actionable: Some(true),
                         disabled: Some(false),
+                        exact: None,
                     },
                 },
                 value: "hello".into(),
+            },
+            Command::PressKey {
+                target: Some(CommandTarget::Id { id: 9 }),
+                key: "Enter".into(),
+                code: Some("Enter".into()),
+                alt_key: false,
+                ctrl_key: false,
+                meta_key: false,
+                shift_key: false,
+            },
+            Command::WaitFor {
+                target: Some(CommandTarget::Match {
+                    matcher: CommandMatcher {
+                        role: None,
+                        name: Some("Results".into()),
+                        label: None,
+                        control_type: None,
+                        tag: None,
+                        text: None,
+                        placeholder: None,
+                        href_contains: None,
+                        actionable: Some(true),
+                        disabled: Some(false),
+                        exact: None,
+                    },
+                }),
+                url_contains: Some("search".into()),
+                title_contains: Some("Results".into()),
+                text: Some("browser automation".into()),
+                ready_state: Some("complete".into()),
+                timeout_ms: Some(1_500),
+                poll_interval_ms: Some(25),
             },
             Command::Scroll { x: 0, y: 480 },
         ],
@@ -45,10 +95,14 @@ fn encodes_batch_request_with_stable_shape() {
     let encoded = aegis::commands::encoder::encode_batch(&request).expect("batch encodes");
     assert!(encoded.contains("\"batch_id\":42"));
     assert!(encoded.contains("\"type\":\"click\""));
+    assert!(encoded.contains("\"type\":\"hover\""));
     assert!(encoded.contains("\"type\":\"set_value\""));
+    assert!(encoded.contains("\"type\":\"press_key\""));
+    assert!(encoded.contains("\"type\":\"wait_for\""));
     assert!(encoded.contains("\"type\":\"scroll\""));
     assert!(encoded.contains("\"match\""));
     assert!(encoded.contains("\"control_type\":\"searchbox\""));
+    assert!(encoded.contains("\"exact\":true"));
 }
 
 #[test]
@@ -317,6 +371,7 @@ fn diffs_snapshots_for_semantic_changes() {
                 control_type: Some("button".into()),
                 actionable: true,
                 disabled: false,
+                visible: true,
                 actions: vec!["click".into()],
             }),
             children: vec![],
@@ -335,6 +390,7 @@ fn diffs_snapshots_for_semantic_changes() {
                 control_type: Some("button".into()),
                 actionable: true,
                 disabled: false,
+                visible: true,
                 actions: vec!["click".into(), "submit".into()],
             }),
             children: vec![],
@@ -356,6 +412,7 @@ fn diffs_snapshots_for_semantic_changes() {
                 control_type: Some("button".into()),
                 actionable: true,
                 disabled: false,
+                visible: true,
                 actions: vec!["click".into(), "submit".into()],
             }),
             children: vec![],

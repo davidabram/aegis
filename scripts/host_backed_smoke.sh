@@ -2,11 +2,22 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-HOST_LIB="${ROOT_DIR}/native/build-xcode/Release/libaegis_host.dylib"
+INSTALLED_HOST_LIB="${HOME}/Applications/Aegis.app/Contents/Frameworks/libaegis_host.dylib"
+WORKSPACE_HOST_LIB="${ROOT_DIR}/native/build-xcode/Release/libaegis_host.dylib"
+HOST_LIB="${AEGIS_SMOKE_HOST_LIB:-}"
 ADDR="${AEGIS_SMOKE_ADDR:-127.0.0.1:7881}"
 BASE_URL="http://${ADDR}"
 TRACE_PATH="${ROOT_DIR}/.fozzy/host_backed_trace.fozzy"
 PROFILE="host-backed-smoke"
+MODE="${AEGIS_SMOKE_MODE:-headless}"
+
+if [[ -z "${HOST_LIB}" ]]; then
+  if [[ -f "${INSTALLED_HOST_LIB}" ]]; then
+    HOST_LIB="${INSTALLED_HOST_LIB}"
+  else
+    HOST_LIB="${WORKSPACE_HOST_LIB}"
+  fi
+fi
 
 if [[ ! -f "${HOST_LIB}" ]]; then
   echo "missing host library at ${HOST_LIB}" >&2
@@ -35,7 +46,7 @@ trap cleanup EXIT
 cd "${ROOT_DIR}"
 cargo run --quiet -- \
   --host-lib "${HOST_LIB}" \
-  --mode headless \
+  --mode "${MODE}" \
   --profile "${PROFILE}" \
   serve --addr "${ADDR}" >"${SERVER_LOG}" 2>&1 &
 SERVER_PID=$!
@@ -51,7 +62,11 @@ last_error = None
 while time.time() < deadline:
     try:
         with urllib.request.urlopen(base_url + "/healthz", timeout=2) as response:
-            if response.status == 200:
+            if response.status != 200:
+                time.sleep(0.5)
+                continue
+            health = json.loads(response.read().decode("utf-8"))
+            if health["command_ready"] is True and health["bridge_healthy"] is True:
                 sys.exit(0)
     except Exception as exc:
         last_error = exc
@@ -63,7 +78,7 @@ try:
 except FileNotFoundError:
     pass
 
-raise SystemExit(f"server failed to become ready: {last_error}")
+raise SystemExit(f"server failed to become command-ready: {last_error}")
 PY
 
 python3 - <<'PY' "${BASE_URL}" "${TRACE_PATH}"
@@ -91,9 +106,19 @@ html = """<!doctype html>
 <html>
   <head><title>Aegis Smoke</title></head>
   <body>
-    <label for="email">Email</label>
-    <input id="email" name="email" type="email" placeholder="Email address" />
-    <button id="submit" type="button" onclick="document.title = document.getElementById('email').value">Save</button>
+    <label for="search">Search</label>
+    <input id="search" name="search" type="search" placeholder="Search docs" aria-label="Search docs" />
+    <ul>
+      <li><a id="primary-link" href="#result" onclick="document.title = 'Result opened'; document.getElementById('status').textContent = 'Result opened'; return false;">Open result</a></li>
+      <li>Open result</li>
+    </ul>
+    <div id="status" role="status">Idle</div>
+    <button
+      id="submit"
+      type="button"
+      onmouseover="document.getElementById('status').textContent = 'Hover ready'"
+      onclick="document.title = document.getElementById('search').value; document.getElementById('status').textContent = 'Saved';"
+    >Save</button>
   </body>
 </html>"""
 data_url = "data:text/html," + urllib.parse.quote(html, safe="")
@@ -104,6 +129,7 @@ assert any(event["event"]["type"] == "navigation" for event in navigate_events),
 runtime = request("GET", "/runtime")
 assert runtime["diagnostics"]["command_ready"] is True, runtime
 assert runtime["diagnostics"]["browser_backend_healthy"] is True, runtime
+assert runtime["diagnostics"]["runtime"]["current_title"] == "Aegis Smoke", runtime
 
 dom = request("GET", "/dom")
 assert dom["nodes"], dom
@@ -112,28 +138,78 @@ assert any(node.get("tag") == "input" for node in dom["nodes"]), dom
 report = request("POST", "/execute", {
     "commands": [
         {
+            "type": "hover",
+            "match": {
+                "role": "button",
+                "name": "Save",
+                "actionable": True,
+                "exact": True
+            }
+        },
+        {
             "type": "set_value",
             "match": {
-                "control_type": "email",
-                "placeholder": "Email address"
+                "control_type": "searchbox",
+                "placeholder": "Search docs",
+                "actionable": True
             },
             "value": "smoke@example.com"
         },
         {
-            "type": "click",
-            "match": {
-                "role": "button",
-                "name": "Save"
+            "type": "press_key",
+            "key": "Tab"
+        },
+        {
+            "type": "press_key",
+            "key": "Enter",
+            "target": {
+                "match": {
+                    "role": "button",
+                    "name": "Save",
+                    "actionable": True
+                }
             }
         },
         {
+            "type": "wait_for",
+            "title_contains": "smoke@example.com",
+            "text": "Saved",
+            "ready_state": "complete",
+            "timeout_ms": 2000,
+            "poll_interval_ms": 25
+        },
+        {
+            "type": "click",
+            "match": {
+                "role": "link",
+                "name": "Open result",
+                "actionable": True,
+                "exact": True
+            }
+        },
+        {
+            "type": "wait_for",
+            "title_contains": "Result opened",
+            "text": "Result opened",
+            "timeout_ms": 2000,
+            "poll_interval_ms": 25
+        },
+        {
             "type": "eval",
-            "code": "document.title"
+            "code": "({ title: document.title, status: document.getElementById('status').textContent })"
         }
     ]
 })
 assert report["results"][-1]["ok"] is True, report
-assert report["results"][-1]["value"] == "smoke@example.com", report
+assert report["results"][0]["value"]["hovered"] > 0, report
+assert report["results"][0]["value"]["matcher_debug"]["candidate_count"] >= 1, report
+assert report["results"][1]["value"]["id"] > 0, report
+assert report["results"][3]["value"]["triggered_submit"] is False, report
+assert report["results"][4]["ok"] is True, report
+assert report["results"][5]["value"]["navigation_changed"] is False, report
+assert report["results"][6]["ok"] is True, report
+assert report["results"][-1]["value"]["title"] == "Result opened", report
+assert report["results"][-1]["value"]["status"] == "Result opened", report
 
 events_window = request("GET", "/events?since=0")
 assert events_window["gap_detected"] is False, events_window
@@ -146,4 +222,6 @@ doctor = request("GET", "/doctor")
 assert doctor["command_ready"] is True, doctor
 assert doctor["bridge_healthy"] is True, doctor
 assert doctor["browser_backend_healthy"] is True, doctor
+assert doctor["runtime"]["current_title"] == "Result opened", doctor
+assert doctor["runtime"]["document_ready_state"] in {"interactive", "complete"}, doctor
 PY

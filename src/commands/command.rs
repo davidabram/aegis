@@ -25,6 +25,8 @@ pub struct CommandMatcher {
     pub actionable: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exact: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -46,10 +48,45 @@ pub enum Command {
         #[serde(flatten)]
         target: CommandTarget,
     },
+    Hover {
+        #[serde(flatten)]
+        target: CommandTarget,
+    },
     SetValue {
         #[serde(flatten)]
         target: CommandTarget,
         value: String,
+    },
+    PressKey {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<CommandTarget>,
+        key: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<String>,
+        #[serde(default)]
+        alt_key: bool,
+        #[serde(default)]
+        ctrl_key: bool,
+        #[serde(default)]
+        meta_key: bool,
+        #[serde(default)]
+        shift_key: bool,
+    },
+    WaitFor {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<CommandTarget>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        url_contains: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title_contains: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ready_state: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        poll_interval_ms: Option<u64>,
     },
     Scroll {
         x: i64,

@@ -118,28 +118,25 @@ int main(int argc, char* argv[]) {
       [NSApp finishLaunching];
     }
 
-    CefSettings settings;
-#if !defined(CEF_USE_SANDBOX)
-    settings.no_sandbox = true;
-#endif
-    settings.windowless_rendering_enabled = true;
-    settings.command_line_args_disabled = false;
-    settings.external_message_pump = embedded_command_mode;
-
     CefRefPtr<AegisApp> app(new AegisApp(!embedded_command_mode, startup_url));
-    append_debug("main: before CefExecuteProcess");
-    const int subprocess_exit_code = CefExecuteProcess(main_args, app.get(), nullptr);
-    append_debug("main: after CefExecuteProcess=" + std::to_string(subprocess_exit_code));
+    AegisCefBootstrapOptions bootstrap_options;
+    bootstrap_options.headless = embedded_command_mode && !headful_mode;
+    bootstrap_options.external_message_pump = embedded_command_mode;
+    int subprocess_exit_code = -1;
+    std::string initialize_error;
+    append_debug("main: before canonical cef bootstrap");
+    const bool initialized = AegisExecuteProcessAndInitialize(
+        main_args, bootstrap_options, app, &subprocess_exit_code, &initialize_error);
+    append_debug("main: after canonical cef bootstrap subprocess_exit_code=" +
+                 std::to_string(subprocess_exit_code));
     if (subprocess_exit_code >= 0) {
       return subprocess_exit_code;
     }
-
-    append_debug("main: before CefInitialize");
-    if (!CefInitialize(main_args, settings, app.get(), nullptr)) {
-      append_debug("main: CefInitialize failed");
+    if (!initialized) {
+      append_debug("main: " + initialize_error);
       return CefGetExitCode();
     }
-    append_debug("main: after CefInitialize");
+    append_debug("main: after canonical cef bootstrap");
 
     if (embedded_command_mode && !headful_mode) {
       [NSApp setActivationPolicy:NSApplicationActivationPolicyProhibited];

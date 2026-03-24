@@ -29,7 +29,8 @@
     "aria-selected",
     "aria-expanded",
     "aria-pressed",
-    "aria-describedby"
+    "aria-describedby",
+    "aria-disabled"
   ]);
   const ignoredTags = new Set(["script", "style", "meta", "link", "noscript", "template"]);
   const semanticTextTags = new Set([
@@ -54,7 +55,7 @@
     "td",
     "legend"
   ]);
-  const semanticTextRoles = new Set(["button", "link", "textbox", "searchbox", "option", "tab"]);
+  const semanticTextRoles = new Set(["button", "link", "textbox", "searchbox", "option", "tab", "combobox"]);
 
   function normalizeText(value) {
     return String(value || "").replace(/\s+/g, " ").trim();
@@ -62,6 +63,14 @@
 
   function truncateText(value, maxLength = 200) {
     return value.length > maxLength ? value.slice(0, maxLength) : value;
+  }
+
+  function currentPageState() {
+    return {
+      url: window.location ? window.location.href : null,
+      title: document.title || null,
+      ready_state: document.readyState || null
+    };
   }
 
   function isIgnoredNode(node) {
@@ -79,6 +88,57 @@
       nodeById.set(id, node);
     }
     return id;
+  }
+
+  function isElementVisible(node) {
+    if (!node || node.nodeType !== Node.ELEMENT_NODE) {
+      return false;
+    }
+    const style = window.getComputedStyle ? window.getComputedStyle(node) : null;
+    if (node.hasAttribute("hidden")) {
+      return false;
+    }
+    if (style && (style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse")) {
+      return false;
+    }
+    if (node.getAttribute("aria-hidden") === "true") {
+      return false;
+    }
+    const rect = typeof node.getBoundingClientRect === "function" ? node.getBoundingClientRect() : null;
+    if (!rect) {
+      return true;
+    }
+    return rect.width > 0 && rect.height > 0;
+  }
+
+  function elementValue(node) {
+    if (node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement || node instanceof HTMLSelectElement) {
+      return node.value;
+    }
+    return null;
+  }
+
+  function associatedLabel(node) {
+    if (!node || node.nodeType !== Node.ELEMENT_NODE) {
+      return null;
+    }
+    if (node instanceof HTMLInputElement ||
+        node instanceof HTMLTextAreaElement ||
+        node instanceof HTMLSelectElement) {
+      if (node.labels && node.labels.length > 0) {
+        const text = normalizeText(Array.from(node.labels).map((label) => label.innerText || label.textContent || "").join(" "));
+        if (text) {
+          return truncateText(text);
+        }
+      }
+    }
+    if (node instanceof HTMLLabelElement) {
+      const text = normalizeText(node.innerText || node.textContent || "");
+      if (text) {
+        return truncateText(text);
+      }
+    }
+    return null;
   }
 
   function readNodeText(node, attrs) {
@@ -111,13 +171,6 @@
     return text ? truncateText(text) : null;
   }
 
-  function elementValue(node) {
-    if (node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement || node instanceof HTMLSelectElement) {
-      return node.value;
-    }
-    return null;
-  }
-
   function implicitRole(node, attrs) {
     if (!node || node.nodeType !== Node.ELEMENT_NODE) {
       return null;
@@ -132,6 +185,7 @@
     if (tag === "textarea") return "textbox";
     if (tag === "option") return "option";
     if (tag === "summary") return "button";
+    if (node.isContentEditable) return "textbox";
     if (tag === "input") {
       switch ((attrs.type || "text").toLowerCase()) {
         case "search":
@@ -150,25 +204,6 @@
         default:
           return "textbox";
       }
-    }
-    return null;
-  }
-
-  function associatedLabel(node) {
-    if (!node || node.nodeType !== Node.ELEMENT_NODE) {
-      return null;
-    }
-    if (node instanceof HTMLInputElement ||
-        node instanceof HTMLTextAreaElement ||
-        node instanceof HTMLSelectElement) {
-      if (node.labels && node.labels.length > 0) {
-        const text = normalizeText(Array.from(node.labels).map((label) => label.innerText || label.textContent || "").join(" "));
-        if (text) return truncateText(text);
-      }
-    }
-    if (node instanceof HTMLLabelElement) {
-      const text = normalizeText(node.innerText || node.textContent || "");
-      if (text) return truncateText(text);
     }
     return null;
   }
@@ -223,6 +258,9 @@
     if (tag === "textarea" || tag === "select") {
       return tag;
     }
+    if (node.isContentEditable) {
+      return "textbox";
+    }
     if (tag === "a" && attrs.href) {
       return "link";
     }
@@ -244,19 +282,22 @@
       return actions;
     }
     if (tag === "a" && attrs.href) {
-      actions.push("click", "open");
+      actions.push("click", "open", "hover", "press_key");
     }
     if (tag === "button" || (tag === "input" && ["button", "submit", "reset", "checkbox", "radio", "image"].includes(type)) || tag === "summary") {
-      actions.push("click");
+      actions.push("click", "hover", "press_key");
     }
-    if (tag === "input" && ["submit", "image"].includes(type)) {
+    if (tag === "input" && [ "submit", "image" ].includes(type)) {
       actions.push("submit");
     }
     if (tag === "button" && type === "submit") {
       actions.push("submit");
     }
     if (node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement || node instanceof HTMLSelectElement || node.isContentEditable) {
-      actions.push("type");
+      actions.push("type", "focus", "hover", "press_key");
+    }
+    if (tag === "label" || attrs.role || tag === "div" || tag === "span") {
+      actions.push("hover");
     }
     return Array.from(new Set(actions));
   }
@@ -269,6 +310,7 @@
     const disabled = !!(node && node.nodeType === Node.ELEMENT_NODE &&
       (node.hasAttribute("disabled") || attrs["aria-disabled"] === "true"));
     const control = controlType(node, attrs);
+    const visible = isElementVisible(node);
     if (!role && !label && !name && !control && actions.length === 0 && !disabled) {
       return null;
     }
@@ -279,6 +321,7 @@
       control_type: control,
       actionable: control !== "hidden" && actions.length > 0,
       disabled,
+      visible,
       actions
     };
   }
@@ -367,25 +410,192 @@
     return nodeById.get(id) || null;
   }
 
-  function includesNormalized(actual, expected) {
-    if (!expected) {
-      return true;
-    }
-    const left = normalizeText(actual || "");
-    const right = normalizeText(expected || "");
+  function includesNormalized(actual, expected, exactOnly) {
+    const left = normalizeText(actual || "").toLowerCase();
+    const right = normalizeText(expected || "").toLowerCase();
     if (!right) {
       return true;
     }
-    return left.toLowerCase().includes(right.toLowerCase());
+    if (!left) {
+      return false;
+    }
+    return exactOnly ? left === right : left.includes(right);
   }
 
-  function resolveTarget(target) {
+  function describeNode(node) {
+    const attrs = {};
+    for (const attr of Array.from(node.attributes || [])) {
+      if (attrAllowList.has(attr.name)) {
+        attrs[attr.name] = attr.value;
+      }
+    }
+    const liveValue = elementValue(node);
+    if (liveValue != null) {
+      attrs.value = liveValue;
+    }
+    const text = readNodeText(node, attrs);
+    const semantic = semanticInfo(node, attrs, text) || {
+      role: null,
+      name: null,
+      label: null,
+      control_type: null,
+      actionable: false,
+      disabled: false,
+      visible: false,
+      actions: []
+    };
+    return {
+      node,
+      id: assignId(node),
+      tag: node.tagName ? node.tagName.toLowerCase() : "",
+      attrs,
+      text,
+      semantic
+    };
+  }
+
+  function placeholderHaystack(descriptor) {
+    return [
+      descriptor.attrs.placeholder || "",
+      descriptor.attrs["aria-label"] || "",
+      descriptor.semantic.name || "",
+      descriptor.semantic.label || ""
+    ].join(" ");
+  }
+
+  function isTargetableForAction(descriptor, action) {
+    if (!descriptor.semantic.visible || descriptor.semantic.disabled) {
+      return false;
+    }
+    if (action === "click") {
+      return descriptor.semantic.actions.includes("click") ||
+        descriptor.semantic.actions.includes("open") ||
+        descriptor.semantic.actions.includes("submit") ||
+        descriptor.tag === "label";
+    }
+    if (action === "type") {
+      return descriptor.semantic.actions.includes("type");
+    }
+    if (action === "hover") {
+      return descriptor.semantic.actions.includes("hover") || descriptor.semantic.visible;
+    }
+    if (action === "press_key") {
+      return descriptor.semantic.actions.includes("press_key") ||
+        descriptor.semantic.actions.includes("focus") ||
+        descriptor.semantic.actions.includes("type");
+    }
+    return true;
+  }
+
+  function scoreStringField(field, actual, expected, exactOnly, fields) {
+    if (!expected) {
+      return 0;
+    }
+    const left = normalizeText(actual || "");
+    const right = normalizeText(expected || "");
+    if (!left || !right) {
+      return null;
+    }
+    if (left.toLowerCase() === right.toLowerCase()) {
+      fields.push({ field, exact: true, score: 120 });
+      return 120;
+    }
+    if (exactOnly || !left.toLowerCase().includes(right.toLowerCase())) {
+      return null;
+    }
+    fields.push({ field, exact: false, score: 60 });
+    return 60;
+  }
+
+  function scoreCandidate(descriptor, matcher, action) {
+    if (typeof matcher.actionable === "boolean" && !!descriptor.semantic.actionable !== matcher.actionable) {
+      return null;
+    }
+    if (typeof matcher.disabled === "boolean" && !!descriptor.semantic.disabled !== matcher.disabled) {
+      return null;
+    }
+
+    if (action && !isTargetableForAction(descriptor, action)) {
+      return null;
+    }
+
+    const fields = [];
+    const exactOnly = !!matcher.exact;
+    let score = 0;
+    const checks = [
+      ["role", descriptor.semantic.role, matcher.role],
+      ["name", descriptor.semantic.name, matcher.name],
+      ["label", descriptor.semantic.label, matcher.label],
+      ["control_type", descriptor.semantic.control_type, matcher.control_type],
+      ["tag", descriptor.tag, matcher.tag],
+      ["text", descriptor.text, matcher.text],
+      ["placeholder", placeholderHaystack(descriptor), matcher.placeholder],
+      ["href_contains", descriptor.attrs.href, matcher.href_contains]
+    ];
+
+    for (const [field, actual, expected] of checks) {
+      const fieldScore = scoreStringField(field, actual, expected, exactOnly, fields);
+      if (fieldScore == null) {
+        return null;
+      }
+      score += fieldScore;
+    }
+
+    if (descriptor.semantic.visible) {
+      score += 40;
+    }
+    if (descriptor.semantic.actionable) {
+      score += 20;
+    }
+    if (action && isTargetableForAction(descriptor, action)) {
+      score += 120;
+    }
+    if (descriptor.tag === "a" || descriptor.tag === "button" || descriptor.tag === "input" || descriptor.tag === "textarea" || descriptor.tag === "select") {
+      score += 10;
+    }
+
+    return {
+      descriptor,
+      score,
+      fields
+    };
+  }
+
+  function resolutionDebug(candidates) {
+    return candidates.slice(0, 3).map((candidate) => ({
+      id: candidate.descriptor.id,
+      tag: candidate.descriptor.tag,
+      text: candidate.descriptor.text,
+      role: candidate.descriptor.semantic.role || null,
+      name: candidate.descriptor.semantic.name || null,
+      control_type: candidate.descriptor.semantic.control_type || null,
+      actionable: !!candidate.descriptor.semantic.actionable,
+      visible: !!candidate.descriptor.semantic.visible,
+      score: candidate.score,
+      fields: candidate.fields
+    }));
+  }
+
+  function resolveTarget(target, action) {
     if (typeof target === "number") {
       const node = findById(target);
       if (!node) {
         throw new Error(`node ${target} not found`);
       }
-      return { node, targetId: target, matched: false };
+      const descriptor = describeNode(node);
+      if (action && !isTargetableForAction(descriptor, action)) {
+        throw new Error(`node ${target} is not targetable for ${action}`);
+      }
+      return {
+        node,
+        targetId: target,
+        matched: false,
+        debug: {
+          candidate_count: 1,
+          chosen: resolutionDebug([{ descriptor, score: 0, fields: [] }])[0],
+          candidates: resolutionDebug([{ descriptor, score: 0, fields: [] }])
+        }
+      };
     }
 
     if (!target || typeof target !== "object") {
@@ -393,41 +603,52 @@
     }
 
     const matcher = target;
-    const elements = document.querySelectorAll("*");
-    for (const node of elements) {
-      const attrs = {};
-      for (const attr of Array.from(node.attributes || [])) {
-        if (attrAllowList.has(attr.name)) {
-          attrs[attr.name] = attr.value;
-        }
-      }
-      const liveValue = elementValue(node);
-      if (liveValue != null) {
-        attrs.value = liveValue;
-      }
-      const text = readNodeText(node, attrs);
-      const semantic = semanticInfo(node, attrs, text) || {};
-      const tag = node.tagName ? node.tagName.toLowerCase() : "";
-
-      if (matcher.role && !includesNormalized(semantic.role, matcher.role)) continue;
-      if (matcher.name && !includesNormalized(semantic.name, matcher.name)) continue;
-      if (matcher.label && !includesNormalized(semantic.label, matcher.label)) continue;
-      if (matcher.control_type && !includesNormalized(semantic.control_type, matcher.control_type)) continue;
-      if (matcher.tag && !includesNormalized(tag, matcher.tag)) continue;
-      if (matcher.text && !includesNormalized(text, matcher.text)) continue;
-      if (matcher.placeholder && !includesNormalized(attrs.placeholder, matcher.placeholder)) continue;
-      if (matcher.href_contains && !includesNormalized(attrs.href, matcher.href_contains)) continue;
-      if (typeof matcher.actionable === "boolean" && !!semantic.actionable !== matcher.actionable) continue;
-      if (typeof matcher.disabled === "boolean" && !!semantic.disabled !== matcher.disabled) continue;
-
-      const targetId = assignId(node);
-      if (targetId == null) {
+    const candidates = [];
+    for (const node of document.querySelectorAll("*")) {
+      if (isIgnoredNode(node)) {
         continue;
       }
-      return { node, targetId, matched: true };
+      const descriptor = describeNode(node);
+      if (descriptor.id == null) {
+        continue;
+      }
+      const candidate = scoreCandidate(descriptor, matcher, action);
+      if (candidate) {
+        candidates.push(candidate);
+      }
     }
 
-    throw new Error(`no node matched ${JSON.stringify(matcher)}`);
+    candidates.sort((left, right) => {
+      if (right.score !== left.score) {
+        return right.score - left.score;
+      }
+      if (!!right.descriptor.semantic.actionable !== !!left.descriptor.semantic.actionable) {
+        return right.descriptor.semantic.actionable ? 1 : -1;
+      }
+      return left.descriptor.id - right.descriptor.id;
+    });
+
+    if (candidates.length === 0) {
+      throw new Error(`no node matched ${JSON.stringify(matcher)}`);
+    }
+
+    if (candidates.length > 1 && candidates[0].score === candidates[1].score) {
+      throw new Error(`ambiguous node match ${JSON.stringify({
+        matcher,
+        candidates: resolutionDebug(candidates)
+      })}`);
+    }
+
+    return {
+      node: candidates[0].descriptor.node,
+      targetId: candidates[0].descriptor.id,
+      matched: true,
+      debug: {
+        candidate_count: candidates.length,
+        chosen: resolutionDebug(candidates)[0],
+        candidates: resolutionDebug(candidates)
+      }
+    };
   }
 
   function scrollIntoViewIfNeeded(el) {
@@ -438,12 +659,16 @@
 
   function focusIfPossible(el) {
     if (typeof el.focus === "function") {
-      el.focus({ preventScroll: true });
+      try {
+        el.focus({ preventScroll: true });
+      } catch (_error) {
+        el.focus();
+      }
     }
   }
 
-  function resolveActionTarget(el) {
-    if (el instanceof HTMLLabelElement && el.control) {
+  function resolveActionTarget(el, action) {
+    if ((action === "click" || action === "type") && el instanceof HTMLLabelElement && el.control) {
       return el.control;
     }
     return el;
@@ -480,9 +705,28 @@
     );
   }
 
+  function baseActionResult(resolved, el, before, after) {
+    const type = el instanceof HTMLInputElement || el instanceof HTMLButtonElement
+      ? (el.getAttribute("type") || "").toLowerCase()
+      : "";
+    return {
+      matched: resolved.matched,
+      tag: el.tagName.toLowerCase(),
+      control_type: type || el.tagName.toLowerCase(),
+      actionable: true,
+      target: resolved.debug.chosen,
+      matcher_debug: resolved.debug,
+      page_before: before,
+      page_after: after,
+      navigation_changed: before.url !== after.url,
+      title_changed: before.title !== after.title
+    };
+  }
+
   function click(target) {
-    const resolved = resolveTarget(target);
-    const el = resolveActionTarget(resolved.node);
+    const before = currentPageState();
+    const resolved = resolveTarget(target, "click");
+    const el = resolveActionTarget(resolved.node, "click");
     scrollIntoViewIfNeeded(el);
     focusIfPossible(el);
     dispatchPointerLikeEvent(el, "pointerover");
@@ -506,11 +750,10 @@
     } else {
       dispatchMouseLikeEvent(el, "click");
     }
+    const after = currentPageState();
     return {
       clicked: resolved.targetId,
-      matched: resolved.matched,
-      tag: el.tagName.toLowerCase(),
-      control_type: type || el.tagName.toLowerCase()
+      ...baseActionResult(resolved, el, before, after)
     };
   }
 
@@ -532,8 +775,9 @@
   }
 
   function setValue(target, value) {
-    const resolved = resolveTarget(target);
-    const el = resolveActionTarget(resolved.node);
+    const before = currentPageState();
+    const resolved = resolveTarget(target, "type");
+    const el = resolveActionTarget(resolved.node, "type");
     scrollIntoViewIfNeeded(el);
     focusIfPossible(el);
     const previousValue = "value" in el ? el.value : "";
@@ -545,8 +789,10 @@
       }
     } else if (el.isContentEditable) {
       el.textContent = value;
-    } else {
+    } else if ("value" in el) {
       el.value = value;
+    } else {
+      throw new Error(`node ${resolved.targetId} is not typeable`);
     }
 
     if (typeof InputEvent === "function") {
@@ -562,7 +808,93 @@
       el.dispatchEvent(new Event("input", { bubbles: true }));
     }
     el.dispatchEvent(new Event("change", { bubbles: true }));
-    return { id: resolved.targetId, matched: resolved.matched, value };
+    const after = currentPageState();
+    return {
+      id: resolved.targetId,
+      value,
+      ...baseActionResult(resolved, el, before, after)
+    };
+  }
+
+  function hover(target) {
+    const before = currentPageState();
+    const resolved = resolveTarget(target, "hover");
+    const el = resolveActionTarget(resolved.node, "hover");
+    scrollIntoViewIfNeeded(el);
+    dispatchPointerLikeEvent(el, "pointerover");
+    dispatchMouseLikeEvent(el, "mouseover");
+    dispatchPointerLikeEvent(el, "pointerenter");
+    dispatchMouseLikeEvent(el, "mouseenter");
+    dispatchPointerLikeEvent(el, "pointermove");
+    dispatchMouseLikeEvent(el, "mousemove");
+    const after = currentPageState();
+    return {
+      hovered: resolved.targetId,
+      ...baseActionResult(resolved, el, before, after)
+    };
+  }
+
+  function dispatchKeyEvent(el, type, options) {
+    const event = new KeyboardEvent(type, {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      key: options.key,
+      code: options.code || options.key,
+      altKey: !!options.altKey,
+      ctrlKey: !!options.ctrlKey,
+      metaKey: !!options.metaKey,
+      shiftKey: !!options.shiftKey
+    });
+    return el.dispatchEvent(event);
+  }
+
+  function pressKey(target, key, options) {
+    const before = currentPageState();
+    let resolved = null;
+    let el = document.activeElement || document.body;
+    if (target != null) {
+      resolved = resolveTarget(target, "press_key");
+      el = resolveActionTarget(resolved.node, "press_key");
+      scrollIntoViewIfNeeded(el);
+      focusIfPossible(el);
+    } else {
+      focusIfPossible(el);
+    }
+
+    const eventOptions = {
+      key,
+      code: options && options.code ? options.code : key,
+      altKey: !!(options && options.altKey),
+      ctrlKey: !!(options && options.ctrlKey),
+      metaKey: !!(options && options.metaKey),
+      shiftKey: !!(options && options.shiftKey)
+    };
+
+    const keydownAccepted = dispatchKeyEvent(el, "keydown", eventOptions);
+    const keypressAccepted = dispatchKeyEvent(el, "keypress", eventOptions);
+    let triggeredSubmit = false;
+    if (keydownAccepted && keypressAccepted && key === "Enter") {
+      if (el.form && typeof el.form.requestSubmit === "function") {
+        el.form.requestSubmit();
+        triggeredSubmit = true;
+      } else if ((el instanceof HTMLButtonElement || el instanceof HTMLAnchorElement) && typeof el.click === "function") {
+        el.click();
+      }
+    }
+    dispatchKeyEvent(el, "keyup", eventOptions);
+    const after = currentPageState();
+    return {
+      key,
+      code: eventOptions.code,
+      triggered_submit: triggeredSubmit,
+      target: resolved ? resolved.debug.chosen : null,
+      matcher_debug: resolved ? resolved.debug : null,
+      page_before: before,
+      page_after: after,
+      navigation_changed: before.url !== after.url,
+      title_changed: before.title !== after.title
+    };
   }
 
   function scrollToPosition(x, y) {
@@ -578,8 +910,25 @@
         switch (command.type) {
           case "click":
             return { ok: true, value: click(command.match || command.id) };
+          case "hover":
+            return { ok: true, value: hover(command.match || command.id) };
           case "set_value":
             return { ok: true, value: setValue(command.match || command.id, command.value) };
+          case "press_key":
+            return {
+              ok: true,
+              value: pressKey(
+                command.target ? (command.target.match || command.target.id) : null,
+                command.key,
+                {
+                  code: command.code,
+                  altKey: command.alt_key,
+                  ctrlKey: command.ctrl_key,
+                  metaKey: command.meta_key,
+                  shiftKey: command.shift_key
+                }
+              )
+            };
           case "scroll":
             return { ok: true, value: scrollToPosition(command.x, command.y) };
           case "eval":
@@ -687,10 +1036,13 @@
     snapshot,
     exec,
     click,
+    hover,
+    pressKey,
     setValue,
     scrollToPosition,
     drainEvents,
     queue,
-    assignId
+    assignId,
+    currentPageState
   };
 })();

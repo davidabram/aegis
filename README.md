@@ -194,6 +194,11 @@ Core routes:
 - `POST /session`
 - `POST /trace/enable`
 
+`aegis serve` now fails fast if the browser command bridge cannot finish startup. A running
+server implies the runtime has already completed an initial bridge roundtrip, so `/healthz`
+should report `command_ready: true` and `bridge_healthy: true` as soon as the process reports
+ready.
+
 ### `GET /runtime`
 
 Returns:
@@ -208,6 +213,10 @@ The `runtime` object includes:
 - `bootstrap_duration_ms`
 - `dom_nodes`
 - `latest_event_sequence`
+- `current_url`
+- `current_title`
+- `document_ready_state`
+- `last_live_state_refresh_at_ms`
 
 The response also includes:
 
@@ -242,7 +251,10 @@ Supported command types:
 
 - `eval`
 - `click`
+- `hover`
 - `set_value`
+- `press_key`
+- `wait_for`
 - `scroll`
 
 `eval.code` should be a JavaScript expression such as `document.title`.
@@ -252,6 +264,8 @@ Execution model:
 
 - `navigate` returns ordered navigation/events quickly and invalidates the cached DOM tree
 - `GET /dom` or a node-ID command such as `click` / `set_value` materializes a fresh DOM snapshot on demand
+- `hover` and matcher-based `press_key` resolve against the live DOM with strict action-aware ranking
+- `wait_for` executes inside the runtime owner loop, polling live page metadata and optionally DOM conditions until the condition is satisfied or times out
 - `execute` can omit the snapshot for low-latency commands like `eval` and `scroll`
 - incremental state flows through `GET /events`
 
@@ -284,6 +298,14 @@ Runtime event types:
 - `navigation`
 - `network`
 - `log`
+
+`GET /doctor` and `GET /runtime` also expose the live page truth the runtime is tracking:
+
+- `runtime.current_url`
+- `runtime.current_title`
+- `runtime.document_ready_state`
+
+`command_ready` now indicates whether the runtime can accept commands, even while it is currently busy executing one.
 
 ### `GET/POST /session`
 
@@ -384,9 +406,29 @@ Install a stable local release app bundle:
 ./install.sh
 ```
 
+Run the full local production-like verification flow:
+
+```bash
+./scripts/verify_local_release.sh
+```
+
 That installs a locally ad hoc signed app at `~/Applications/Aegis.app`, clears quarantine
 attributes, installs the canonical `aegis` launcher, and gives the runtime a stable local app
 path without requiring a paid Apple Developer account.
+
+For distribution-grade installs, `aegis native install` and `./install.sh` also honor:
+
+- `AEGIS_CODESIGN_IDENTITY="Developer ID Application: ..."` to sign the bundle with a real identity
+- `AEGIS_CODESIGN_OPTIONS="runtime"` to opt into hardened runtime options during signing
+- `AEGIS_CODESIGN_ENTITLEMENTS=/absolute/path/to/entitlements.plist` to attach app entitlements
+
+The installer now signs nested helpers/frameworks explicitly and runs `codesign --verify --strict`
+after installation. When a real signing identity is provided, it also runs `spctl --assess` so
+the install fails immediately if Gatekeeper would reject the bundle.
+
+The checked-in local entitlements template lives at `native/mac/aegis.entitlements`. The local
+verification script exports that file automatically unless `AEGIS_CODESIGN_ENTITLEMENTS` is already
+set.
 
 ## Local Signing Limits
 
