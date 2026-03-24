@@ -59,6 +59,8 @@ enum BrowserModeArg {
 
 #[derive(Clone, Subcommand)]
 enum Commands {
+    #[command(about = "Open the canonical local headful browser app")]
+    Open,
     #[command(about = "Start the persistent browser runtime and local HTTP control API")]
     Serve {
         #[arg(
@@ -176,6 +178,9 @@ Quick starts:
   aegis
       Open the local headful browser app from the canonical installed path.
 
+  aegis open
+      Open the canonical local app explicitly.
+
   aegis --mode headful serve --addr 127.0.0.1:7878
       Start the visible browser runtime plus local HTTP API.
 
@@ -193,6 +198,7 @@ Aegis production usage
 
 2. Human browsing:
    aegis
+   aegis open
 
 3. Start the persistent automation runtime:
    aegis --mode headless serve --addr 127.0.0.1:7878
@@ -213,6 +219,7 @@ Aegis examples
 
 Launch the local browser app:
   aegis
+  aegis open
 
 Start a visible runtime for agent debugging:
   aegis --mode headful --profile work serve --addr 127.0.0.1:7878
@@ -277,6 +284,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             handle_native_command(command.clone(), &workspace_root)?;
             return Ok(());
         }
+        Commands::Open => {
+            #[cfg(target_os = "macos")]
+            {
+                let bundle = native::open_local_app(&workspace_root)?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "opened_app_bundle": bundle,
+                    }))?
+                );
+                return Ok(());
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                return Err("`aegis open` is only supported on macOS".into());
+            }
+        }
         Commands::Usage => {
             println!("{USAGE_TEXT}");
             return Ok(());
@@ -307,6 +331,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             server::serve(addr, host_lib, browser_config, cli.profile.clone()).await?;
         }
+        Commands::Open => unreachable!("handled before runtime startup"),
         Commands::Trace { command } => match command {
             TraceCommands::Replay { .. } => unreachable!("handled before host init"),
         },
@@ -327,20 +352,30 @@ fn resolve_workspace_root() -> Result<PathBuf, Box<dyn std::error::Error>> {
 }
 
 fn resolved_command(cli: &Cli) -> Commands {
+    if cli.command.is_none() && default_open_shortcut_requested() {
+        return Commands::Open;
+    }
+    resolved_command_for_shortcut(cli, false)
+}
+
+fn resolved_command_for_shortcut(cli: &Cli, default_open_shortcut: bool) -> Commands {
+    if cli.command.is_none() && default_open_shortcut {
+        return Commands::Open;
+    }
     cli.command.clone().unwrap_or(Commands::Serve {
         addr: SocketAddr::from(([127, 0, 0, 1], 7878)),
     })
 }
 
 fn effective_mode(cli: &Cli) -> BrowserModeArg {
-    if cli.command.is_none() && !mode_flag_was_set() {
+    if matches!(resolved_command(cli), Commands::Open) {
         return BrowserModeArg::Headful;
     }
     cli.mode.clone()
 }
 
-fn mode_flag_was_set() -> bool {
-    std::env::args_os().any(|arg| arg == "--mode")
+fn default_open_shortcut_requested() -> bool {
+    std::env::args_os().len() == 1
 }
 
 fn handle_native_command(
@@ -526,4 +561,37 @@ fn handle_config_command(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_cli(args: &[&str]) -> Cli {
+        Cli::parse_from(args)
+    }
+
+    #[test]
+    fn no_args_defaults_to_open_shortcut() {
+        let cli = parse_cli(&["aegis"]);
+        assert!(matches!(
+            resolved_command_for_shortcut(&cli, true),
+            Commands::Open
+        ));
+    }
+
+    #[test]
+    fn explicit_serve_is_preserved() {
+        let cli = parse_cli(&["aegis", "serve"]);
+        assert!(matches!(resolved_command(&cli), Commands::Serve { .. }));
+    }
+
+    #[test]
+    fn runtime_flags_without_subcommand_default_to_serve() {
+        let cli = parse_cli(&["aegis", "--mode", "headless"]);
+        assert!(matches!(
+            resolved_command_for_shortcut(&cli, false),
+            Commands::Serve { .. }
+        ));
+    }
 }

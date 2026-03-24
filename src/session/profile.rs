@@ -101,7 +101,9 @@ impl SessionProfileStore {
             session: session.clone(),
         })
         .map_err(|error| format!("failed to encode session profile: {error}"))?;
-        with_state_file_lock(&self.info.path, || write_state_file(&self.info.path, &payload))?;
+        with_state_file_lock(&self.info.path, || {
+            write_state_file(&self.info.path, &payload)
+        })?;
         Ok(self.info.path.clone())
     }
 }
@@ -168,11 +170,11 @@ mod tests {
                 .parent()
                 .expect("session profile should have a parent directory"),
         )
-            .expect("session profile directory should be readable")
-            .filter_map(Result::ok)
-            .map(|entry| entry.file_name().to_string_lossy().into_owned())
-            .filter(|name| name.starts_with("session.json.corrupt."))
-            .count();
+        .expect("session profile directory should be readable")
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("session.json.corrupt."))
+        .count();
         assert_eq!(backups, 1);
         unsafe {
             std::env::remove_var("AEGIS_HOME");

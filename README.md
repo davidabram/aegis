@@ -67,10 +67,12 @@ The main binary is `aegis`.
 Human-use shortcut:
 
 - `aegis` with no arguments opens the local headful Aegis app
+- `aegis open` explicitly opens the same installed app
 - `aegis ...` with arguments uses the installed bundled CLI at `~/Applications/Aegis.app/Contents/MacOS/aegis_cli`
 
 Top-level commands:
 
+- `open`
 - `serve`
 - `usage`
 - `examples`
@@ -115,6 +117,7 @@ What it does:
 - builds the release binary
 - installs `~/Applications/Aegis.app`
 - installs the bundled CLI at `~/Applications/Aegis.app/Contents/MacOS/aegis_cli`
+- installs the canonical shell launcher at `~/.local/bin/aegis` or `~/bin/aegis`
 - bootstraps and verifies the canonical `~/.aegis` state tree
 
 The older helper path now delegates to the same installer:
@@ -380,13 +383,12 @@ aegis native paths
 Install a stable local release app bundle:
 
 ```bash
-cargo build --release
-aegis-bin native install
+./install.sh
 ```
 
 That installs a locally ad hoc signed app at `~/Applications/Aegis.app`, clears quarantine
-attributes, and gives the runtime a stable local app path without requiring a paid Apple
-Developer account.
+attributes, installs the canonical `aegis` launcher, and gives the runtime a stable local app
+path without requiring a paid Apple Developer account.
 
 ## Local Signing Limits
 

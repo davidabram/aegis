@@ -211,6 +211,25 @@ pub fn artifact_for_scheme(
 }
 
 #[cfg(target_os = "macos")]
+pub fn open_local_app(root: impl AsRef<Path>) -> Result<PathBuf, AegisError> {
+    let bundle = preferred_app_bundle(root.as_ref());
+    if !bundle.exists() {
+        return Err(AegisError::Bridge(format!(
+            "app bundle not found at {}. Run `./install.sh` to install the canonical local release first.",
+            bundle.display()
+        )));
+    }
+
+    run_checked(
+        "open",
+        &[bundle.to_str().ok_or_else(path_encoding_error)?],
+        Path::new("/"),
+    )?;
+
+    Ok(bundle)
+}
+
+#[cfg(target_os = "macos")]
 fn preferred_app_bundle(root: &Path) -> PathBuf {
     installed_app_bundle().unwrap_or_else(|| root.join(DEFAULT_APP_BUNDLE_PATH))
 }

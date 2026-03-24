@@ -424,7 +424,11 @@ pub fn with_state_file_lock<T>(
     action()
 }
 
-pub fn replace_corrupt_state_file(path: &Path, replacement: &[u8], label: &str) -> Result<(), String> {
+pub fn replace_corrupt_state_file(
+    path: &Path,
+    replacement: &[u8],
+    label: &str,
+) -> Result<(), String> {
     let backup = corrupt_backup_path(path);
     if path.exists() {
         fs::rename(path, &backup).map_err(|error| {
@@ -452,7 +456,12 @@ pub fn write_state_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
         .write(true)
         .truncate(true)
         .open(&temp_path)
-        .map_err(|error| format!("failed to open temp state file {}: {error}", temp_path.display()))?;
+        .map_err(|error| {
+            format!(
+                "failed to open temp state file {}: {error}",
+                temp_path.display()
+            )
+        })?;
 
     if let Err(error) = file.write_all(bytes) {
         let _ = fs::remove_file(&temp_path);
@@ -524,7 +533,9 @@ impl StateFileLock {
             .write(true)
             .truncate(false)
             .open(&lock_path)
-            .map_err(|error| format!("failed to open state lock {}: {error}", lock_path.display()))?;
+            .map_err(|error| {
+                format!("failed to open state lock {}: {error}", lock_path.display())
+            })?;
         lock_file_exclusive(&file, &lock_path)?;
         Ok(Self { file })
     }
@@ -720,10 +731,16 @@ mod tests {
             std::env::set_var("AEGIS_HOME", temp.path());
         }
         let paths = AegisStatePaths::detect().expect("state layout should bootstrap");
-        fs::set_permissions(paths.session_file("default"), fs::Permissions::from_mode(0o644))
-            .expect("session permissions should be changed for test");
-        fs::set_permissions(paths.settings_file("agent"), fs::Permissions::from_mode(0o644))
-            .expect("settings permissions should be changed for test");
+        fs::set_permissions(
+            paths.session_file("default"),
+            fs::Permissions::from_mode(0o644),
+        )
+        .expect("session permissions should be changed for test");
+        fs::set_permissions(
+            paths.settings_file("agent"),
+            fs::Permissions::from_mode(0o644),
+        )
+        .expect("settings permissions should be changed for test");
 
         let paths = AegisStatePaths::detect().expect("state layout should re-secure files");
         let session_mode = fs::metadata(paths.session_file("default"))

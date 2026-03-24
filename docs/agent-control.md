@@ -61,7 +61,8 @@ Production state model:
 
 For local production-like use, the canonical path is one installed release app at
 `~/Applications/Aegis.app` plus its bundled CLI at
-`~/Applications/Aegis.app/Contents/MacOS/aegis_cli`.
+`~/Applications/Aegis.app/Contents/MacOS/aegis_cli`, fronted by the installed shell launcher at
+`~/.local/bin/aegis` or `~/bin/aegis`.
 Normal `aegis` usage should not rebuild or reinstall anything.
 
 ## Fast Start
@@ -75,8 +76,7 @@ aegis native paths
 Install or refresh the stable local release app:
 
 ```bash
-cargo build --release
-aegis-bin native install
+./install.sh
 ```
 
 Inspect or set Aegis-owned config:

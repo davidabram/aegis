@@ -9,6 +9,8 @@ REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 RELEASE_BIN="$REPO_ROOT/target/aarch64-apple-darwin/release/aegis"
 INSTALLED_APP="$HOME/Applications/Aegis.app"
 INSTALLED_CLI="$INSTALLED_APP/Contents/MacOS/aegis_cli"
+LAUNCHER_DIR=""
+LAUNCHER_PATH=""
 
 if [[ -t 1 ]]; then
   C_RESET=$'\033[0m'
@@ -92,16 +94,71 @@ run_quiet_step() {
   return 1
 }
 
+path_contains_dir() {
+  local dir="$1"
+  local entry
+  IFS=':' read -r -a entries <<< "${PATH:-}"
+  for entry in "${entries[@]}"; do
+    if [[ "$entry" == "$dir" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+select_launcher_dir() {
+  local candidate
+  for candidate in "$HOME/.local/bin" "$HOME/bin"; do
+    if path_contains_dir "$candidate"; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  printf '%s\n' "$HOME/.local/bin"
+}
+
+resolve_path_command() {
+  type -P "$1" 2>/dev/null || true
+}
+
+install_launcher() {
+  mkdir -p "$LAUNCHER_DIR"
+  cat >"$LAUNCHER_PATH" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+
+INSTALLED_CLI="$INSTALLED_CLI"
+
+if [[ ! -x "\$INSTALLED_CLI" ]]; then
+  printf 'Aegis is not installed at %s\n' "\$INSTALLED_CLI" >&2
+  printf 'Run ./install.sh from the Aegis repo to refresh the canonical local release.\n' >&2
+  exit 1
+fi
+
+exec "\$INSTALLED_CLI" "\$@"
+EOF
+  chmod 0755 "$LAUNCHER_PATH"
+}
+
 print_summary() {
+  local resolved_aegis
+  resolved_aegis="$(resolve_path_command aegis)"
   log_section "Install Complete"
   log_success "Installed app bundle: $INSTALLED_APP"
   log_success "Installed CLI: $INSTALLED_CLI"
+  log_success "Canonical launcher: $LAUNCHER_PATH"
   log_success "Canonical state root: ${AEGIS_HOME:-$HOME/.aegis}"
   printf '\n'
   log_info "Open the browser with: aegis"
+  log_info "Open explicitly with: aegis open"
   log_info "Run the automation server with: aegis serve --addr 127.0.0.1:7878"
   log_info "Inspect config with: aegis config get agent"
   log_info "Inspect secrets with: aegis config secrets-get --profile default"
+  if ! path_contains_dir "$LAUNCHER_DIR"; then
+    log_warn "Add $LAUNCHER_DIR to your PATH so 'aegis' resolves to the canonical installed launcher."
+  elif [[ "$resolved_aegis" != "$LAUNCHER_PATH" ]]; then
+    log_warn "'aegis' currently resolves to ${resolved_aegis:-another path}. Put $LAUNCHER_DIR earlier on PATH to prefer the installed release."
+  fi
 }
 
 log_section "Aegis Installer"
@@ -120,6 +177,8 @@ if [[ ! -d "$REPO_ROOT/third_party/cef" ]]; then
 fi
 
 cd "$REPO_ROOT"
+LAUNCHER_DIR="$(select_launcher_dir)"
+LAUNCHER_PATH="$LAUNCHER_DIR/aegis"
 
 log_section "Build"
 run_step "building release Rust binary" cargo build --release
@@ -135,6 +194,8 @@ if [[ ! -x "$INSTALLED_CLI" ]]; then
   fail "Expected installed CLI at $INSTALLED_CLI, but it was not found."
 fi
 
+run_step "installing the canonical shell launcher" install_launcher
+
 log_section "Bootstrap State"
 run_quiet_step "bootstrapping canonical Aegis config" "$INSTALLED_CLI" config get agent
 run_quiet_step "bootstrapping canonical Aegis runtime config" "$INSTALLED_CLI" config get runtime
@@ -143,6 +204,7 @@ run_quiet_step "bootstrapping canonical Aegis secrets store" "$INSTALLED_CLI" co
 log_section "Verify"
 run_quiet_step "verifying installed CLI surface" "$INSTALLED_CLI" config --help
 run_quiet_step "verifying installed native paths" "$INSTALLED_CLI" native paths
+run_quiet_step "verifying canonical launcher" "$LAUNCHER_PATH" usage
 
 if [[ ! -d "${AEGIS_HOME:-$HOME/.aegis}" ]]; then
   fail "Expected canonical Aegis state directory at ${AEGIS_HOME:-$HOME/.aegis}, but it was not created."

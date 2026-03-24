@@ -91,10 +91,7 @@ enum ApiCommand {
         oneshot::Sender<Result<ExecutionReport, AegisError>>,
     ),
     SnapshotDom(oneshot::Sender<Result<DomSnapshot, AegisError>>),
-    Events(
-        u64,
-        oneshot::Sender<Result<EventReadWindow, AegisError>>,
-    ),
+    Events(u64, oneshot::Sender<Result<EventReadWindow, AegisError>>),
     EnableTrace(PathBuf, oneshot::Sender<Result<(), AegisError>>),
 }
 
