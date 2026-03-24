@@ -620,8 +620,12 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
         RequireDictionary(DecodeEnvelope(MessageKind::SendBatch, request),
                           "batch request must be a dictionary");
     const auto body = WriteJson(payload);
-    const auto response = InvokeRendererReady(aegis::kOpSendBatch, body);
-    return EncodeJsonEnvelope(MessageKind::SendBatch, response);
+    auto response = RequireDictionary(
+        ParseJsonValue(InvokeRendererReady(aegis::kOpSendBatch, body),
+                       "batch response is not valid json"),
+        "batch response must be a dictionary");
+    MergeLocalEventsIntoResponse(response);
+    return EncodeEnvelope(MessageKind::SendBatch, response);
   }
 
   std::vector<std::uint8_t> SnapshotDom(const std::vector<std::uint8_t>& request) override {
@@ -672,25 +676,13 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
         response->HasKey("events") ? response->GetList("events") : CefListValue::Create();
     AppendDebugLog("host: drain_events existing_events=" +
                    std::to_string(existing_events ? existing_events->GetSize() : 0));
-    auto events = CefListValue::Create();
-    if (existing_events.get()) {
-      for (size_t index = 0; index < existing_events->GetSize(); ++index) {
-        auto value = existing_events->GetValue(static_cast<int>(index));
-        if (value.get()) {
-          events->SetValue(static_cast<int>(index), value->Copy());
-        }
-      }
-    }
-
     auto local_events = DrainLocalEvents();
     AppendDebugLog("host: drain_events local_events=" + std::to_string(local_events.size()));
-    auto index = static_cast<int>(events->GetSize());
-    for (auto& json : local_events) {
+    for (const auto& json : local_events) {
       AppendDebugLog("host: drain_events merge_local_event bytes=" +
                      std::to_string(json.size()));
-      events->SetValue(index++, ParseJsonValue(json, "local event is not valid json"));
     }
-    response->SetList("events", events);
+    MergeEventsIntoResponse(response, std::move(local_events));
     AppendDebugLog("host: drain_events encode_response");
     auto encoded = EncodeEnvelope(MessageKind::DrainEvents, response);
     AppendDebugLog("host: drain_events encoded");
@@ -714,6 +706,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
     auto events = CefListValue::Create();
     events->SetValue(0, NavigationEvent(CurrentUrl()));
     response->SetList("events", events);
+    MergeLocalEventsIntoResponse(response);
     AppendDebugLog("host: navigate encode_response");
     auto encoded = EncodeEnvelope(MessageKind::Navigate, response);
     AppendDebugLog("host: navigate encoded");
@@ -958,6 +951,31 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
     auto wrapped = CefValue::Create();
     wrapped->SetDictionary(event);
     return wrapped;
+  }
+
+  void MergeEventsIntoResponse(CefRefPtr<CefDictionaryValue> response,
+                               std::vector<std::string> local_events) {
+    auto existing_events =
+        response->HasKey("events") ? response->GetList("events") : CefListValue::Create();
+    auto events = CefListValue::Create();
+    if (existing_events.get()) {
+      for (size_t index = 0; index < existing_events->GetSize(); ++index) {
+        auto value = existing_events->GetValue(static_cast<int>(index));
+        if (value.get()) {
+          events->SetValue(static_cast<int>(index), value->Copy());
+        }
+      }
+    }
+
+    auto index = static_cast<int>(events->GetSize());
+    for (auto& json : local_events) {
+      events->SetValue(index++, ParseJsonValue(json, "local event is not valid json"));
+    }
+    response->SetList("events", events);
+  }
+
+  void MergeLocalEventsIntoResponse(CefRefPtr<CefDictionaryValue> response) {
+    MergeEventsIntoResponse(response, DrainLocalEvents());
   }
 
   void PushLocalEvent(CefRefPtr<CefValue> event) {

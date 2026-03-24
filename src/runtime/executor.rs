@@ -91,8 +91,7 @@ impl AegisRuntime {
             self.dom.replace_snapshot(snapshot);
         }
 
-        let mut raw_events = response.events;
-        raw_events.extend(self.bridge.drain_events()?);
+        let raw_events = response.events;
         self.apply_dom_mutations(&raw_events);
 
         let events = raw_events
