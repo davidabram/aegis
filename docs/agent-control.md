@@ -46,6 +46,8 @@ Production state model:
 - session continuity goes through `GET /session`, `POST /session`, `POST /session/save`, and `POST /session/load`
 - the active profile persists to `~/.aegis/profiles/<profile>/session.json`
 - concern-specific local settings belong in `~/.aegis/settings/*.json`
+- Aegis-owned saved browser credentials belong in `~/.aegis/secrets/profiles/<profile>/credentials.json`
+- browser import/export manifests and copied artifacts belong under `~/.aegis/imports/...` and `~/.aegis/exports/...`
 - traces go through `POST /trace/enable`
 - if `--start-url` is omitted, the runtime boots into a local no-network bootstrap page
 
@@ -68,6 +70,44 @@ Install or refresh the stable local release app:
 cargo build --release
 aegis-bin native install
 ```
+
+Inspect or set Aegis-owned config:
+
+```bash
+aegis config get agent
+aegis config set agent --json '{"default_profile":"work","browser_import":"brave"}'
+```
+
+List local browser profiles:
+
+```bash
+aegis config browser-profiles --browser brave
+aegis config browser-profiles --browser chrome
+```
+
+Import a browser profile into Aegis-owned state:
+
+```bash
+aegis config import-browser \
+  --browser brave \
+  --source-profile Default \
+  --target-profile brave-import
+```
+
+Export an Aegis profile back into a browser-compatible target profile:
+
+```bash
+aegis config export-browser \
+  --browser chrome \
+  --source-profile brave-import \
+  --target-profile AegisInterop
+```
+
+Browser export rules:
+
+- the target browser must be fully closed
+- cookies and credentials are written into the target browser profile database
+- Aegis also writes a password-import CSV to `~/.aegis/exports/<browser>/<target>/passwords.csv`
 
 Start the API server:
 

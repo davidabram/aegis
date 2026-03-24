@@ -67,11 +67,10 @@ impl SessionProfileStore {
         session
             .validate()
             .map_err(|error| format!("invalid session profile data: {error}"))?;
-        let parent = self
-            .info
-            .path
-            .parent()
-            .ok_or_else(|| format!("invalid session profile path {}", self.info.path.display()))?;
+        let parent =
+            self.info.path.parent().ok_or_else(|| {
+                format!("invalid session profile path {}", self.info.path.display())
+            })?;
         fs::create_dir_all(parent)
             .map_err(|error| format!("failed to create session profile directory: {error}"))?;
         let payload = serde_json::to_vec_pretty(&StoredSessionProfile {

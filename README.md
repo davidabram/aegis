@@ -52,6 +52,8 @@ Runtime state rules:
 - session persistence goes through `GET /session`, `POST /session`, `POST /session/save`, and `POST /session/load`
 - `--profile <name>` selects `~/.aegis/profiles/<name>/session.json`
 - `~/.aegis/settings/*.json` is the canonical home for concern-specific local settings
+- `~/.aegis/secrets/profiles/<profile>/credentials.json` is the canonical home for Aegis-owned saved browser credentials
+- `~/.aegis/imports/...` and `~/.aegis/exports/...` hold browser interop artifacts and manifests
 - trace persistence goes through `POST /trace/enable`
 - if `--start-url` is omitted, the runtime boots into a local no-network bootstrap page
 - the canonical control style is semantic `match` targeting for `click` and `set_value`, not long-lived raw DOM ids
@@ -68,6 +70,11 @@ Human-use shortcut:
 Top-level commands:
 
 - `serve`
+- `config get`
+- `config set`
+- `config browser-profiles`
+- `config import-browser`
+- `config export-browser`
 - `trace replay`
 - `native status`
 - `native configure`
@@ -81,6 +88,52 @@ Global runtime flags:
 - `--start-url <url>`
 - `--host-lib <path>`
 - `--profile <name>`
+
+## Config And Browser Interop
+
+Inspect or set Aegis-owned config:
+
+```bash
+aegis config get agent
+aegis config set agent --json '{"default_profile":"work","browser_import":"brave"}'
+```
+
+List available Chrome or Brave profiles:
+
+```bash
+aegis config browser-profiles --browser brave
+aegis config browser-profiles --browser chrome
+```
+
+One-click import an existing browser profile into Aegis-owned state:
+
+```bash
+aegis config import-browser \
+  --browser brave \
+  --source-profile Default \
+  --target-profile brave-import
+```
+
+That imports:
+
+- cookies into `~/.aegis/profiles/<target>/session.json`
+- saved credentials into `~/.aegis/secrets/profiles/<target>/credentials.json`
+- bookmarks/preferences copies into `~/.aegis/imports/<browser>/<source>/`
+
+Export an Aegis profile back into a browser-compatible profile database:
+
+```bash
+aegis config export-browser \
+  --browser chrome \
+  --source-profile brave-import \
+  --target-profile AegisInterop
+```
+
+Export rules:
+
+- the target browser must be fully closed
+- cookies and credentials are written into the target browser profile database
+- a browser-import CSV is also written to `~/.aegis/exports/<browser>/<target>/passwords.csv`
 
 ## Start A Runtime
 

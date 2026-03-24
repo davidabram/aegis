@@ -80,8 +80,9 @@ pub fn install_local_release(
     let root = root.as_ref();
     let source_executable = source_executable.as_ref();
     let build_output_bundle = root.join(DEFAULT_APP_BUNDLE_PATH);
-    let install_bundle = installed_app_bundle()
-        .ok_or_else(|| AegisError::Bridge("HOME is not set; cannot resolve local app install path".into()))?;
+    let install_bundle = installed_app_bundle().ok_or_else(|| {
+        AegisError::Bridge("HOME is not set; cannot resolve local app install path".into())
+    })?;
 
     build_xcode(root, NativeConfiguration::Release, Some("aegis_host"))?;
     build_xcode(root, NativeConfiguration::Release, None)?;

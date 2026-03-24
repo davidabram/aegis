@@ -3,7 +3,11 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use aegis::api::server;
-use aegis::{BrowserConfig, BrowserMode, NativeConfiguration, build_xcode, configure_xcode, native, replay_trace};
+use aegis::{
+    AegisConfigStore, BrowserConfig, BrowserExportReport, BrowserImportReport, BrowserKind,
+    BrowserMode, NativeConfiguration, build_xcode, configure_xcode, export_browser_profile,
+    import_browser_profile, list_browser_profiles, native, replay_trace,
+};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -38,6 +42,10 @@ enum Commands {
         #[command(subcommand)]
         command: TraceCommands,
     },
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommands,
+    },
     Native {
         #[command(subcommand)]
         command: NativeCommands,
@@ -47,6 +55,38 @@ enum Commands {
 #[derive(Clone, Subcommand)]
 enum TraceCommands {
     Replay { path: PathBuf },
+}
+
+#[derive(Clone, Subcommand)]
+enum ConfigCommands {
+    Get {
+        concern: String,
+    },
+    Set {
+        concern: String,
+        #[arg(long)]
+        json: String,
+    },
+    BrowserProfiles {
+        #[arg(long, value_enum)]
+        browser: BrowserArg,
+    },
+    ImportBrowser {
+        #[arg(long, value_enum)]
+        browser: BrowserArg,
+        #[arg(long, default_value = "Default")]
+        source_profile: String,
+        #[arg(long)]
+        target_profile: Option<String>,
+    },
+    ExportBrowser {
+        #[arg(long, value_enum)]
+        browser: BrowserArg,
+        #[arg(long)]
+        source_profile: Option<String>,
+        #[arg(long, default_value = "Default")]
+        target_profile: String,
+    },
 }
 
 #[derive(Clone, Subcommand)]
@@ -67,6 +107,12 @@ enum NativeCommands {
 enum NativeConfigurationArg {
     Debug,
     Release,
+}
+
+#[derive(Clone, clap::ValueEnum)]
+enum BrowserArg {
+    Chrome,
+    Brave,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -101,6 +147,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             handle_native_command(command.clone(), &workspace_root)?;
             return Ok(());
         }
+        Commands::Config { command } => {
+            handle_config_command(command.clone(), &cli.profile)?;
+            return Ok(());
+        }
         _ => {}
     }
 
@@ -122,6 +172,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Trace { command } => match command {
             TraceCommands::Replay { .. } => unreachable!("handled before host init"),
         },
+        Commands::Config { .. } => unreachable!("handled before host init"),
         Commands::Native { .. } => unreachable!("handled before runtime startup"),
     }
 
@@ -224,4 +275,66 @@ fn handle_native_command(
     }
 
     Ok(())
+}
+
+fn handle_config_command(
+    command: ConfigCommands,
+    default_profile: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
+        ConfigCommands::Get { concern } => {
+            let store = AegisConfigStore::detect()?;
+            let value = store.get(&concern)?;
+            println!("{}", serde_json::to_string_pretty(&value)?);
+        }
+        ConfigCommands::Set { concern, json } => {
+            let store = AegisConfigStore::detect()?;
+            let value: serde_json::Value = serde_json::from_str(&json)?;
+            let path = store.set(&concern, &value)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "concern": concern,
+                    "path": path,
+                    "value": value,
+                }))?
+            );
+        }
+        ConfigCommands::BrowserProfiles { browser } => {
+            let profiles = list_browser_profiles(resolve_browser(browser))?;
+            println!("{}", serde_json::to_string_pretty(&profiles)?);
+        }
+        ConfigCommands::ImportBrowser {
+            browser,
+            source_profile,
+            target_profile,
+        } => {
+            let report: BrowserImportReport = import_browser_profile(
+                resolve_browser(browser),
+                &source_profile,
+                target_profile.as_deref().unwrap_or(default_profile),
+            )?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        ConfigCommands::ExportBrowser {
+            browser,
+            source_profile,
+            target_profile,
+        } => {
+            let report: BrowserExportReport = export_browser_profile(
+                resolve_browser(browser),
+                source_profile.as_deref().unwrap_or(default_profile),
+                &target_profile,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+    }
+    Ok(())
+}
+
+fn resolve_browser(browser: BrowserArg) -> BrowserKind {
+    match browser {
+        BrowserArg::Chrome => BrowserKind::Chrome,
+        BrowserArg::Brave => BrowserKind::Brave,
+    }
 }

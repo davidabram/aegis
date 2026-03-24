@@ -1,9 +1,9 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 use std::sync::mpsc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
@@ -76,13 +76,19 @@ enum ApiCommand {
     SnapshotSession(oneshot::Sender<Result<SessionState, AegisError>>),
     SaveSessionProfile(oneshot::Sender<Result<SessionProfileInfo, AegisError>>),
     LoadSessionProfile(oneshot::Sender<Result<SessionProfileInfo, AegisError>>),
-    Navigate(String, oneshot::Sender<Result<Vec<SequencedEvent>, AegisError>>),
+    Navigate(
+        String,
+        oneshot::Sender<Result<Vec<SequencedEvent>, AegisError>>,
+    ),
     Execute(
         Vec<Command>,
         oneshot::Sender<Result<ExecutionReport, AegisError>>,
     ),
     SnapshotDom(oneshot::Sender<Result<DomSnapshot, AegisError>>),
-    Events(u64, oneshot::Sender<Result<Vec<SequencedEvent>, AegisError>>),
+    Events(
+        u64,
+        oneshot::Sender<Result<Vec<SequencedEvent>, AegisError>>,
+    ),
     EnableTrace(PathBuf, oneshot::Sender<Result<(), AegisError>>),
     RuntimeInfo(oneshot::Sender<(BrowserConfig, RuntimeStatus)>),
 }
@@ -172,35 +178,35 @@ pub async fn serve(
         match rx.recv_timeout(IDLE_PUMP_INTERVAL) {
             Ok(command) => match command {
                 ApiCommand::InjectSession(session, reply) => {
-                    let result = client
-                        .inject_session(session.clone())
-                        .and_then(|_| profile_store.save(&session).map(|_| ()).map_err(AegisError::Bridge));
+                    let result = client.inject_session(session.clone()).and_then(|_| {
+                        profile_store
+                            .save(&session)
+                            .map(|_| ())
+                            .map_err(AegisError::Bridge)
+                    });
                     let _ = reply.send(result);
                 }
                 ApiCommand::SnapshotSession(reply) => {
                     let _ = reply.send(client.snapshot_session());
                 }
                 ApiCommand::SaveSessionProfile(reply) => {
-                    let result = client
-                        .snapshot_session()
-                        .and_then(|session| {
-                            profile_store
-                                .save(&session)
-                                .map(|_| profile_store.info())
-                                .map_err(AegisError::Bridge)
-                        });
+                    let result = client.snapshot_session().and_then(|session| {
+                        profile_store
+                            .save(&session)
+                            .map(|_| profile_store.info())
+                            .map_err(AegisError::Bridge)
+                    });
                     let _ = reply.send(result);
                 }
                 ApiCommand::LoadSessionProfile(reply) => {
-                    let result = profile_store
-                        .load()
-                        .map_err(AegisError::Bridge)
-                        .and_then(|maybe_session| match maybe_session {
-                            Some(session) => client
-                                .inject_session(session)
-                                .map(|_| profile_store.info()),
+                    let result = profile_store.load().map_err(AegisError::Bridge).and_then(
+                        |maybe_session| match maybe_session {
+                            Some(session) => {
+                                client.inject_session(session).map(|_| profile_store.info())
+                            }
                             None => Ok(profile_store.info()),
-                        });
+                        },
+                    );
                     let _ = reply.send(result);
                 }
                 ApiCommand::Navigate(url, reply) => {
@@ -290,7 +296,9 @@ async fn runtime_info(State(state): State<ApiState>) -> Result<Json<RuntimeInfo>
     }))
 }
 
-async fn save_session_profile(State(state): State<ApiState>) -> Result<Json<SessionProfileInfo>, ApiError> {
+async fn save_session_profile(
+    State(state): State<ApiState>,
+) -> Result<Json<SessionProfileInfo>, ApiError> {
     let (reply_tx, reply_rx) = oneshot::channel();
     state
         .tx
@@ -300,7 +308,9 @@ async fn save_session_profile(State(state): State<ApiState>) -> Result<Json<Sess
     Ok(Json(profile))
 }
 
-async fn load_session_profile(State(state): State<ApiState>) -> Result<Json<SessionProfileInfo>, ApiError> {
+async fn load_session_profile(
+    State(state): State<ApiState>,
+) -> Result<Json<SessionProfileInfo>, ApiError> {
     let (reply_tx, reply_rx) = oneshot::channel();
     state
         .tx

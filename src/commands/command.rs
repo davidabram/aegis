@@ -51,8 +51,13 @@ pub enum Command {
         target: CommandTarget,
         value: String,
     },
-    Scroll { x: i64, y: i64 },
-    Eval { code: String },
+    Scroll {
+        x: i64,
+        y: i64,
+    },
+    Eval {
+        code: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

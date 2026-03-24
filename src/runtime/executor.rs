@@ -126,7 +126,10 @@ impl AegisRuntime {
         }
         let mut changes = Vec::<DomMutation>::new();
         for event in events {
-            if let RuntimeEvent::DomMutation { changes: event_changes } = &event.event {
+            if let RuntimeEvent::DomMutation {
+                changes: event_changes,
+            } = &event.event
+            {
                 changes.extend(event_changes.iter().cloned());
             }
         }
@@ -219,11 +222,8 @@ impl AegisRuntime {
     }
 
     fn commands_require_dom_snapshot(&self, commands: &[Command]) -> bool {
-        commands.iter().any(|command| {
-            matches!(
-                command,
-                Command::Click { .. } | Command::SetValue { .. }
-            )
-        })
+        commands
+            .iter()
+            .any(|command| matches!(command, Command::Click { .. } | Command::SetValue { .. }))
     }
 }

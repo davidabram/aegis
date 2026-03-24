@@ -6,8 +6,8 @@ use aegis::{
     events::stream::{EventStream, EventType, SequencedEvent},
     replay_trace,
     transport::protocol::{
-        BatchWireResponse, EvalJsRequest, MessageKind, NavigateResponse, TraceFile,
-        decode_message, encode_message,
+        BatchWireResponse, EvalJsRequest, MessageKind, NavigateResponse, TraceFile, decode_message,
+        encode_message,
     },
 };
 use std::collections::HashMap;
