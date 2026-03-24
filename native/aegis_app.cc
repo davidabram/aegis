@@ -77,6 +77,49 @@ std::string QuoteForJavaScript(const std::string& input) {
   return out;
 }
 
+std::string QuoteForJson(const std::string& input) {
+  std::string out;
+  out.reserve(input.size() + 8);
+  out.push_back('"');
+  for (const unsigned char ch : input) {
+    switch (ch) {
+      case '\\':
+        out += "\\\\";
+        break;
+      case '"':
+        out += "\\\"";
+        break;
+      case '\b':
+        out += "\\b";
+        break;
+      case '\f':
+        out += "\\f";
+        break;
+      case '\n':
+        out += "\\n";
+        break;
+      case '\r':
+        out += "\\r";
+        break;
+      case '\t':
+        out += "\\t";
+        break;
+      default:
+        if (ch < 0x20) {
+          constexpr char kHex[] = "0123456789abcdef";
+          out += "\\u00";
+          out.push_back(kHex[(ch >> 4) & 0x0f]);
+          out.push_back(kHex[ch & 0x0f]);
+        } else {
+          out.push_back(static_cast<char>(ch));
+        }
+        break;
+    }
+  }
+  out.push_back('"');
+  return out;
+}
+
 bool EvalToString(CefRefPtr<CefFrame> frame,
                   const std::string& code,
                   std::string* value,
@@ -123,6 +166,92 @@ bool EvalToString(CefRefPtr<CefFrame> frame,
     return true;
   }
   value->clear();
+  return true;
+}
+
+bool EvalToJson(CefRefPtr<CefFrame> frame,
+                const std::string& code,
+                std::string* value,
+                std::string* error) {
+  auto context = frame->GetV8Context();
+  if (!context.get()) {
+    *error = "v8 context unavailable";
+    return false;
+  }
+  if (!context->Enter()) {
+    *error = "failed to enter v8 context";
+    return false;
+  }
+
+  CefRefPtr<CefV8Value> result;
+  CefRefPtr<CefV8Exception> exception;
+  const bool ok = context->Eval(code, frame->GetURL(), 0, result, exception);
+  if (!ok) {
+    context->Exit();
+    *error = exception.get() ? exception->GetMessage().ToString()
+                             : std::string("javascript evaluation failed");
+    return false;
+  }
+
+  if (!result.get() || result->IsUndefined() || result->IsNull()) {
+    *value = "null";
+    context->Exit();
+    return true;
+  }
+  if (result->IsString()) {
+    *value = QuoteForJson(result->GetStringValue().ToString());
+    context->Exit();
+    return true;
+  }
+  if (result->IsBool()) {
+    *value = result->GetBoolValue() ? "true" : "false";
+    context->Exit();
+    return true;
+  }
+  if (result->IsInt() || result->IsUInt()) {
+    *value = std::to_string(result->GetIntValue());
+    context->Exit();
+    return true;
+  }
+  if (result->IsDouble()) {
+    *value = std::to_string(result->GetDoubleValue());
+    context->Exit();
+    return true;
+  }
+
+  auto global = context->GetGlobal();
+  if (!global.get()) {
+    context->Exit();
+    *error = "v8 global unavailable";
+    return false;
+  }
+
+  const CefString temp_name("__aegis_eval_value");
+  global->SetValue(temp_name, result, V8_PROPERTY_ATTRIBUTE_NONE);
+
+  CefRefPtr<CefV8Value> json_result;
+  CefRefPtr<CefV8Exception> json_exception;
+  const bool json_ok = context->Eval("JSON.stringify(globalThis.__aegis_eval_value)",
+                                     frame->GetURL(), 0, json_result, json_exception);
+  global->DeleteValue(temp_name);
+  context->Exit();
+
+  if (!json_ok) {
+    *error = json_exception.get() ? json_exception->GetMessage().ToString()
+                                  : std::string("failed to serialize javascript value");
+    return false;
+  }
+
+  if (!json_result.get() || json_result->IsUndefined() || json_result->IsNull()) {
+    *value = "null";
+    return true;
+  }
+  if (!json_result->IsString()) {
+    *error = "serialized javascript value is not a string";
+    return false;
+  }
+
+  *value = json_result->GetStringValue().ToString();
   return true;
 }
 
@@ -219,12 +348,13 @@ bool DispatchRendererOperation(const std::string& op,
 
         if (type == "eval") {
           const auto code = command->GetString("code").ToString();
-          const auto wrapped =
-              "(() => { try { const __aegis_value = (function(){\n" + code +
-              "\n})(); return JSON.stringify({ok:true,value:(__aegis_value===undefined?null:__aegis_value)}); }"
-              " catch (error) { return JSON.stringify({ok:false,error:String(error && error.message ? error.message : error)}); } })()";
-          if (!EvalToString(frame, wrapped, &command_result, error)) {
-            return false;
+          std::string value_json;
+          std::string command_error;
+          if (EvalToJson(frame, code, &value_json, &command_error)) {
+            command_result = "{\"ok\":true,\"value\":" + value_json + "}";
+          } else {
+            command_result =
+                "{\"ok\":false,\"error\":" + QuoteForJson(command_error) + "}";
           }
         } else if (type == "click") {
           const auto id = std::to_string(command->GetInt("id"));

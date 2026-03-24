@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::mpsc;
+use std::time::Duration;
 use std::thread;
 
 use axum::extract::{Query, State};
@@ -19,6 +20,8 @@ use crate::host::LoadedAegisClient;
 use crate::runtime::executor::ExecutionReport;
 use crate::session::cookies::SessionState;
 use crate::transport::bridge::AegisError;
+
+const IDLE_PUMP_INTERVAL: Duration = Duration::from_millis(10);
 
 #[derive(Clone)]
 pub struct ApiState {
@@ -119,34 +122,40 @@ pub async fn serve(
         Err(error) => return Err(AegisError::Bridge(error.to_string())),
     }
 
-    while let Ok(command) = rx.recv() {
-        match command {
-            ApiCommand::InjectSession(session, reply) => {
-                let _ = reply.send(client.inject_session(session));
+    loop {
+        match rx.recv_timeout(IDLE_PUMP_INTERVAL) {
+            Ok(command) => match command {
+                ApiCommand::InjectSession(session, reply) => {
+                    let _ = reply.send(client.inject_session(session));
+                }
+                ApiCommand::SnapshotSession(reply) => {
+                    let _ = reply.send(client.snapshot_session());
+                }
+                ApiCommand::Navigate(url, reply) => {
+                    let result = client.navigate(url);
+                    let _ = reply.send(result);
+                }
+                ApiCommand::Execute(commands, reply) => {
+                    let _ = reply.send(client.execute(&commands));
+                }
+                ApiCommand::SnapshotDom(reply) => {
+                    let _ = reply.send(Ok(client.snapshot_dom()));
+                }
+                ApiCommand::Events(since, reply) => {
+                    let _ = reply.send(Ok(client.events_since(since)));
+                }
+                ApiCommand::EnableTrace(path, reply) => {
+                    client.enable_trace_recording(path);
+                    let _ = reply.send(Ok(()));
+                }
+                ApiCommand::BrowserConfig(reply) => {
+                    let _ = reply.send(browser_config.clone());
+                }
+            },
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                client.pump()?;
             }
-            ApiCommand::SnapshotSession(reply) => {
-                let _ = reply.send(client.snapshot_session());
-            }
-            ApiCommand::Navigate(url, reply) => {
-                let result = client.navigate(url);
-                let _ = reply.send(result);
-            }
-            ApiCommand::Execute(commands, reply) => {
-                let _ = reply.send(client.execute(&commands));
-            }
-            ApiCommand::SnapshotDom(reply) => {
-                let _ = reply.send(Ok(client.snapshot_dom()));
-            }
-            ApiCommand::Events(since, reply) => {
-                let _ = reply.send(Ok(client.events_since(since)));
-            }
-            ApiCommand::EnableTrace(path, reply) => {
-                client.enable_trace_recording(path);
-                let _ = reply.send(Ok(()));
-            }
-            ApiCommand::BrowserConfig(reply) => {
-                let _ = reply.send(browser_config.clone());
-            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
 

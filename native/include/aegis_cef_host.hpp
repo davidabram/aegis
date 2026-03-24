@@ -23,6 +23,7 @@ class CefHost {
   virtual std::vector<std::uint8_t> SnapshotSession(const std::vector<std::uint8_t>& request) = 0;
   virtual std::vector<std::uint8_t> DrainEvents(const std::vector<std::uint8_t>& request) = 0;
   virtual std::vector<std::uint8_t> Navigate(const std::vector<std::uint8_t>& request) = 0;
+  virtual std::vector<std::uint8_t> Pump(const std::vector<std::uint8_t>& request) = 0;
 };
 
 AegisHostFunctionTable ExportFunctionTable();

@@ -111,6 +111,10 @@ impl LoadedAegisClient {
         self.client.runtime().dom_snapshot()
     }
 
+    pub fn pump(&mut self) -> Result<(), AegisError> {
+        self.client.pump()
+    }
+
     pub fn enable_trace_recording(&mut self, path: impl Into<std::path::PathBuf>) {
         self.client.runtime_mut().enable_trace_recording(path);
     }

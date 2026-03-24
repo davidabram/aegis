@@ -624,6 +624,14 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
     return encoded;
   }
 
+  std::vector<std::uint8_t> Pump(const std::vector<std::uint8_t>& request) override {
+    static_cast<void>(request);
+    RequireOwnerThread();
+    AegisPumpBrowserHostWindow();
+    CefDoMessageLoopWork();
+    return {};
+  }
+
   void OnPrimaryBrowserCreated(CefRefPtr<CefBrowser> browser) override {
     AppendDebugLog("host: on_browser_created");
     {
@@ -1409,6 +1417,14 @@ AegisHostStatus Navigate(
   return Dispatch(ctx, input_ptr, input_len, output, &CefHost::Navigate);
 }
 
+AegisHostStatus Pump(
+    AegisHostHandle ctx,
+    const std::uint8_t* input_ptr,
+    std::size_t input_len,
+    AegisHostBuffer* output) {
+  return Dispatch(ctx, input_ptr, input_len, output, &CefHost::Pump);
+}
+
 void FreeBuffer(AegisHostHandle, AegisHostBuffer buffer) {
   delete[] buffer.ptr;
 }
@@ -1425,6 +1441,7 @@ AegisHostFunctionTable ExportFunctionTable() {
       .snapshot_session = SnapshotSession,
       .drain_events = DrainEvents,
       .navigate = Navigate,
+      .pump = Pump,
       .free_buffer = FreeBuffer,
   };
 }

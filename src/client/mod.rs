@@ -28,6 +28,10 @@ impl AegisClient {
         self.runtime.inject_session(session)
     }
 
+    pub fn pump(&mut self) -> Result<(), AegisError> {
+        self.runtime.pump()
+    }
+
     pub fn navigation_events_since(&self, sequence: u64) -> Vec<SequencedEvent> {
         self.runtime
             .event_stream()

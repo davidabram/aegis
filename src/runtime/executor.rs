@@ -114,6 +114,10 @@ impl AegisRuntime {
         self.bridge.snapshot_session()
     }
 
+    pub fn pump(&mut self) -> Result<(), AegisError> {
+        self.bridge.pump()
+    }
+
     pub fn dom_snapshot(&self) -> crate::dom::node::DomSnapshot {
         self.dom.snapshot()
     }

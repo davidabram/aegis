@@ -79,6 +79,7 @@ pub struct HostFunctionTable {
     pub snapshot_session: HostApi,
     pub drain_events: HostApi,
     pub navigate: HostApi,
+    pub pump: HostApi,
     pub free_buffer: HostFree,
 }
 
@@ -193,6 +194,15 @@ impl CefBridge {
             snapshot: response.snapshot,
             events: response.events,
         })
+    }
+
+    pub fn pump(&mut self) -> Result<(), AegisError> {
+        match &mut self.backend {
+            BridgeBackend::Dynamic { host, fns } => {
+                let _ = Self::invoke_raw(*host, *fns, fns.pump, &[])?;
+                Ok(())
+            }
+        }
     }
 
     fn invoke_message(&mut self, kind: MessageKind, input: &[u8]) -> Result<Vec<u8>, AegisError> {
