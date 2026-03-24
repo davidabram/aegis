@@ -728,6 +728,9 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
     static_cast<void>(request);
     RequireOwnerThread();
     AegisPumpBrowserHostWindow();
+    if (!options_.headless && AegisBrowserHostWindowCloseRequested()) {
+      throw std::runtime_error("browser window closed by user");
+    }
     CefDoMessageLoopWork();
     return {};
   }
@@ -819,16 +822,18 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
 
   void OnBeforeClose(CefRefPtr<CefBrowser> browser) override {
     AppendDebugLog("host: on_before_close");
-    std::lock_guard lock(mutex_);
-    if (browser_.get() && browser->IsSame(browser_)) {
-      browser_ = nullptr;
-      request_context_ = nullptr;
-      client_ = nullptr;
-      page_ready_ = false;
-      renderer_ready_ = false;
-      runtime_installed_ = false;
-      browser_closed_ = true;
-      cv_.notify_all();
+    {
+      std::lock_guard lock(mutex_);
+      if (browser_.get() && browser->IsSame(browser_)) {
+        browser_ = nullptr;
+        request_context_ = nullptr;
+        client_ = nullptr;
+        page_ready_ = false;
+        renderer_ready_ = false;
+        runtime_installed_ = false;
+        browser_closed_ = true;
+        cv_.notify_all();
+      }
     }
     if (!options_.headless) {
       AegisCloseBrowserHostWindow();

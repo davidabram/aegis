@@ -330,6 +330,7 @@ struct BrowserHostState {
   bool can_go_forward = false;
   bool is_loading = false;
   bool closing_from_browser = false;
+  bool close_requested_by_user = false;
 };
 
 BrowserHostState& HostState() {
@@ -371,6 +372,7 @@ void EnsureHostWindow(const std::string& title, int width, int height) {
 
   s.current_title = title;
   s.current_url = title;
+  s.close_requested_by_user = false;
   [s.window setTitlebarAppearsTransparent:YES];
   [s.window setTitleVisibility:NSWindowTitleHidden];
   [s.window setMovableByWindowBackground:YES];
@@ -765,6 +767,13 @@ void EnsureHostWindow(const std::string& title, int width, int height) {
   if (state.closing_from_browser) {
     return YES;
   }
+  if (state.close_requested_by_user) {
+    return NO;
+  }
+  state.close_requested_by_user = true;
+  if (state.window) {
+    [state.window orderOut:nil];
+  }
   if (state.browser) {
     state.browser->GetHost()->CloseBrowser(true);
     return NO;
@@ -881,6 +890,7 @@ void AegisCloseBrowserHostWindow() {
   state.web_container_view = nil;
   state.page_transition_view = nil;
   state.controller = nil;
+  state.close_requested_by_user = false;
   [NSApp terminate:nil];
 }
 
@@ -901,4 +911,9 @@ void AegisPumpBrowserHostWindow() {
   }
 
   [NSApp updateWindows];
+}
+
+bool AegisBrowserHostWindowCloseRequested() {
+  auto& state = HostState();
+  return state.close_requested_by_user;
 }

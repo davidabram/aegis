@@ -21,5 +21,6 @@ void AegisSetBrowserHostNavigationState(bool can_go_back,
 void AegisAttachBrowserToHostWindow(CefRefPtr<CefBrowser> browser);
 void AegisCloseBrowserHostWindow();
 void AegisPumpBrowserHostWindow();
+bool AegisBrowserHostWindowCloseRequested();
 
 #endif  // AEGIS_NATIVE_AEGIS_NATIVE_MAC_H_

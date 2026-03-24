@@ -668,6 +668,7 @@ void AegisApp::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
     primary_browser_ = nullptr;
 #if defined(AEGIS_STANDALONE_APP)
     AegisCloseBrowserHostWindow();
+    CefQuitMessageLoop();
 #endif
   }
 }
