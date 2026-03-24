@@ -4,6 +4,8 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS ON)
 
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+
 set(CEF_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/cef/cef_binary_146.0.6+g68649e2+chromium-146.0.7680.154_macosarm64")
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CEF_ROOT}/cmake")
 
@@ -16,10 +18,28 @@ set(AEGIS_NATIVE_HELPER_TARGET "aegis_native_Helper")
 set(AEGIS_NATIVE_HELPER_OUTPUT_NAME "aegis_native Helper")
 set(AEGIS_HOST_LIBRARY_TARGET "aegis_host")
 set(AEGIS_SHARED_SUPPORT_TARGET "aegis_shared_support")
+set(AEGIS_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+set(AEGIS_RUNTIME_SCRIPT_JS "${CMAKE_CURRENT_SOURCE_DIR}/../assets/js/aegis_runtime.js")
+set(AEGIS_RUNTIME_SCRIPT_HEADER "${AEGIS_GENERATED_DIR}/aegis_runtime_script.h")
+
+add_custom_command(
+  OUTPUT ${AEGIS_RUNTIME_SCRIPT_HEADER}
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/../scripts/generate_runtime_header.py
+          ${AEGIS_RUNTIME_SCRIPT_JS}
+          ${AEGIS_RUNTIME_SCRIPT_HEADER}
+  DEPENDS
+    ${AEGIS_RUNTIME_SCRIPT_JS}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../scripts/generate_runtime_header.py
+  VERBATIM
+)
+
+add_custom_target(aegis_runtime_header DEPENDS ${AEGIS_RUNTIME_SCRIPT_HEADER})
 
 SET_CEF_TARGET_OUT_DIR()
 
 set(AEGIS_NATIVE_SOURCES
+  ${AEGIS_RUNTIME_SCRIPT_HEADER}
   aegis_app.h
   aegis_app.cc
   aegis_client.h
@@ -58,9 +78,11 @@ set(EXECUTABLE_NAME "${AEGIS_NATIVE_TARGET}")
 set(PRODUCT_NAME "${AEGIS_NATIVE_TARGET}")
 
 add_executable(${AEGIS_NATIVE_TARGET} MACOSX_BUNDLE ${AEGIS_NATIVE_SOURCES} ${AEGIS_NATIVE_RESOURCES})
+add_dependencies(${AEGIS_NATIVE_TARGET} aegis_runtime_header)
 SET_EXECUTABLE_TARGET_PROPERTIES(${AEGIS_NATIVE_TARGET})
 target_include_directories(${AEGIS_NATIVE_TARGET} PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
+  ${AEGIS_GENERATED_DIR}
   ${CMAKE_CURRENT_SOURCE_DIR}/include
   ${CEF_ROOT}
   ${CEF_ROOT}/include
@@ -76,13 +98,16 @@ set_target_properties(${AEGIS_NATIVE_TARGET} PROPERTIES
 )
 
 add_library(${AEGIS_SHARED_SUPPORT_TARGET} STATIC
+  ${AEGIS_RUNTIME_SCRIPT_HEADER}
   aegis_app.cc
   aegis_client.cc
   aegis_browser_host_mac.mm
 )
+add_dependencies(${AEGIS_SHARED_SUPPORT_TARGET} aegis_runtime_header)
 target_compile_features(${AEGIS_SHARED_SUPPORT_TARGET} PRIVATE cxx_std_20)
 target_include_directories(${AEGIS_SHARED_SUPPORT_TARGET} PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
+  ${AEGIS_GENERATED_DIR}
   ${CMAKE_CURRENT_SOURCE_DIR}/include
   ${CEF_ROOT}
   ${CEF_ROOT}/include
@@ -132,9 +157,11 @@ foreach(_suffix_list ${CEF_HELPER_APP_SUFFIXES})
   file(WRITE ${_helper_info_plist} ${_plist_contents})
 
   add_executable(${_helper_target} MACOSX_BUNDLE ${AEGIS_NATIVE_HELPER_SOURCES})
+  add_dependencies(${_helper_target} aegis_runtime_header)
   SET_EXECUTABLE_TARGET_PROPERTIES(${_helper_target})
   target_include_directories(${_helper_target} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
+    ${AEGIS_GENERATED_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CEF_ROOT}
     ${CEF_ROOT}/include

@@ -6,7 +6,7 @@
 
 #include "aegis_client.h"
 #include "aegis_messages.h"
-#include "aegis_runtime_script.h"
+#include "build-xcode/generated/aegis_runtime_script.h"
 #if defined(AEGIS_STANDALONE_APP)
 #include "aegis_native_mac.h"
 #endif

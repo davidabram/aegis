@@ -90,6 +90,9 @@
   }
 
   function snapshot() {
+    if (!document.documentElement) {
+      return { nodes: [] };
+    }
     const nodes = [];
     const walker = document.createTreeWalker(document.documentElement, NodeFilter.SHOW_ELEMENT);
     let current = walker.currentNode;
@@ -233,13 +236,24 @@
     }
   });
 
-  if (document.documentElement) {
+  let observerAttached = false;
+
+  function attachObserver() {
+    if (observerAttached || !document.documentElement) {
+      return;
+    }
+    observerAttached = true;
     observer.observe(document.documentElement, {
       subtree: true,
       childList: true,
       characterData: true,
       attributes: true
     });
+  }
+
+  attachObserver();
+  if (!observerAttached) {
+    document.addEventListener("DOMContentLoaded", attachObserver, { once: true });
   }
 
   window.__aegis_queue = queue;
