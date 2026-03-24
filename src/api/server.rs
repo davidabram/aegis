@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
@@ -12,6 +12,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
+use tokio::time::timeout;
 
 use crate::browser::BrowserConfig;
 use crate::commands::command::{Command, CommandMatcher, CommandTarget};
@@ -25,13 +26,16 @@ use crate::session::profile::{SessionProfileInfo, SessionProfileStore};
 use crate::transport::bridge::AegisError;
 
 const IDLE_PUMP_INTERVAL: Duration = Duration::from_millis(10);
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Clone)]
 pub struct ApiState {
     tx: mpsc::Sender<ApiCommand>,
     host_library: PathBuf,
+    browser: BrowserConfig,
     startup: Arc<Mutex<ServeStartupMetrics>>,
     profile: SessionProfileInfo,
+    diagnostics: Arc<Mutex<ServeDiagnostics>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -43,7 +47,13 @@ pub struct ServeStartupMetrics {
 
 #[derive(Debug, Serialize)]
 struct HealthResponse {
-    status: &'static str,
+    control_plane_up: bool,
+    runtime_state: RuntimeOperationalState,
+    command_ready: bool,
+    bridge_healthy: bool,
+    browser_backend_healthy: bool,
+    active_operation: Option<OperationSnapshot>,
+    last_failure: Option<FailureSnapshot>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -67,11 +77,6 @@ pub struct EventQuery {
     pub since: u64,
 }
 
-#[derive(Debug, Serialize)]
-pub struct ApiErrorBody {
-    pub error: String,
-}
-
 enum ApiCommand {
     InjectSession(SessionState, oneshot::Sender<Result<(), AegisError>>),
     SnapshotSession(oneshot::Sender<Result<SessionState, AegisError>>),
@@ -91,7 +96,86 @@ enum ApiCommand {
         oneshot::Sender<Result<Vec<SequencedEvent>, AegisError>>,
     ),
     EnableTrace(PathBuf, oneshot::Sender<Result<(), AegisError>>),
-    RuntimeInfo(oneshot::Sender<(BrowserConfig, RuntimeStatus)>),
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum RuntimeOperationalState {
+    Starting,
+    Ready,
+    Busy,
+    Degraded,
+    Wedged,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct OperationSnapshot {
+    id: u64,
+    name: String,
+    stage: String,
+    started_at_ms: u64,
+    elapsed_ms: u64,
+    timed_out: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct FailureSnapshot {
+    operation: String,
+    stage: String,
+    message: String,
+    elapsed_ms: u64,
+    timed_out: bool,
+    restart_recommended: bool,
+    first_seen_at_ms: u64,
+    last_seen_at_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+struct ActiveOperation {
+    id: u64,
+    name: String,
+    stage: String,
+    started_at_ms: u64,
+    started_at: Instant,
+    timed_out: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ServeDiagnostics {
+    runtime: RuntimeStatus,
+    active_operation: Option<ActiveOperation>,
+    last_failure: Option<FailureSnapshot>,
+    total_operations: u64,
+    successful_operations: u64,
+    timed_out_operations: u64,
+    next_operation_id: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RuntimeDiagnosticsResponse {
+    state: RuntimeOperationalState,
+    control_plane_up: bool,
+    command_ready: bool,
+    bridge_healthy: bool,
+    browser_backend_healthy: bool,
+    dom_snapshot_available: bool,
+    active_operation: Option<OperationSnapshot>,
+    last_failure: Option<FailureSnapshot>,
+    total_operations: u64,
+    successful_operations: u64,
+    timed_out_operations: u64,
+    runtime: RuntimeStatus,
+}
+
+#[derive(Debug, Deserialize)]
+struct NativeOperationError {
+    kind: String,
+    operation: String,
+    stage: String,
+    message: String,
+    elapsed_ms: u64,
+    timed_out: bool,
+    restart_recommended: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -140,12 +224,15 @@ pub async fn serve(
         api_bind_ms: 0,
         total_ready_ms: 0,
     }));
+    let diagnostics = Arc::new(Mutex::new(ServeDiagnostics::new(client.runtime_status())));
     let (startup_tx, startup_rx) = mpsc::channel::<Result<(), String>>();
     let state = ApiState {
         tx,
         host_library,
+        browser: browser_config.clone(),
         startup: startup.clone(),
         profile: profile_store.info(),
+        diagnostics: diagnostics.clone(),
     };
     let startup_host_library = state.host_library.clone();
 
@@ -204,27 +291,52 @@ pub async fn serve(
         match rx.recv_timeout(IDLE_PUMP_INTERVAL) {
             Ok(command) => match command {
                 ApiCommand::InjectSession(session, reply) => {
+                    record_operation_started(&diagnostics, "inject_session", "injecting session");
                     let result = client.inject_session(session.clone()).and_then(|_| {
                         profile_store
                             .save(&session)
                             .map(|_| ())
                             .map_err(AegisError::Bridge)
                     });
+                    record_operation_finished(&diagnostics, "inject_session", &client, &result);
                     let _ = reply.send(result);
                 }
                 ApiCommand::SnapshotSession(reply) => {
-                    let _ = reply.send(client.snapshot_session());
+                    record_operation_started(
+                        &diagnostics,
+                        "snapshot_session",
+                        "capturing session state",
+                    );
+                    let result = client.snapshot_session();
+                    record_operation_finished(&diagnostics, "snapshot_session", &client, &result);
+                    let _ = reply.send(result);
                 }
                 ApiCommand::SaveSessionProfile(reply) => {
+                    record_operation_started(
+                        &diagnostics,
+                        "save_session_profile",
+                        "persisting session profile",
+                    );
                     let result = client.snapshot_session().and_then(|session| {
                         profile_store
                             .save(&session)
                             .map(|_| profile_store.info())
                             .map_err(AegisError::Bridge)
                     });
+                    record_operation_finished(
+                        &diagnostics,
+                        "save_session_profile",
+                        &client,
+                        &result,
+                    );
                     let _ = reply.send(result);
                 }
                 ApiCommand::LoadSessionProfile(reply) => {
+                    record_operation_started(
+                        &diagnostics,
+                        "load_session_profile",
+                        "loading session profile",
+                    );
                     let result = profile_store.load().map_err(AegisError::Bridge).and_then(
                         |maybe_session| match maybe_session {
                             Some(session) => {
@@ -233,14 +345,31 @@ pub async fn serve(
                             None => Ok(profile_store.info()),
                         },
                     );
+                    record_operation_finished(
+                        &diagnostics,
+                        "load_session_profile",
+                        &client,
+                        &result,
+                    );
                     let _ = reply.send(result);
                 }
                 ApiCommand::Navigate(url, reply) => {
+                    record_operation_started(
+                        &diagnostics,
+                        "navigate",
+                        &format!("navigating to {url}"),
+                    );
                     credential_capture.reset_on_explicit_navigation(&url);
                     let result = client.navigate(url);
+                    record_operation_finished(&diagnostics, "navigate", &client, &result);
                     let _ = reply.send(result);
                 }
                 ApiCommand::Execute(commands, reply) => {
+                    record_operation_started(
+                        &diagnostics,
+                        "execute",
+                        "executing browser command batch",
+                    );
                     let maybe_snapshot = if credential_settings.auto_store
                         && commands.iter().any(|command| {
                             matches!(command, Command::SetValue { .. } | Command::Click { .. })
@@ -275,25 +404,48 @@ pub async fn serve(
                         }
                         Ok(report)
                     });
+                    record_operation_finished(&diagnostics, "execute", &client, &result);
                     let _ = reply.send(result);
                 }
                 ApiCommand::SnapshotDom(reply) => {
-                    let _ = reply.send(client.snapshot_dom());
+                    record_operation_started(
+                        &diagnostics,
+                        "snapshot_dom",
+                        "capturing DOM snapshot",
+                    );
+                    let result = client.snapshot_dom();
+                    record_operation_finished(&diagnostics, "snapshot_dom", &client, &result);
+                    let _ = reply.send(result);
                 }
                 ApiCommand::Events(since, reply) => {
-                    let _ = reply.send(client.events_since(since));
+                    record_operation_started(&diagnostics, "events", "draining runtime events");
+                    let result = client.events_since(since);
+                    record_operation_finished(&diagnostics, "events", &client, &result);
+                    let _ = reply.send(result);
                 }
                 ApiCommand::EnableTrace(path, reply) => {
+                    record_operation_started(
+                        &diagnostics,
+                        "enable_trace",
+                        "enabling trace recording",
+                    );
                     client.enable_trace_recording(path);
+                    record_operation_finished(&diagnostics, "enable_trace", &client, &Ok(()));
                     let _ = reply.send(Ok(()));
                 }
-                ApiCommand::RuntimeInfo(reply) => {
-                    let _ = reply.send((browser_config.clone(), client.runtime_status()));
+            },
+            Err(mpsc::RecvTimeoutError::Timeout) => match client.pump() {
+                Ok(()) => record_heartbeat(&diagnostics, &client),
+                Err(error) => {
+                    record_operation_failure(
+                        &diagnostics,
+                        "pump",
+                        failure_from_error("pump", "pumping browser event loop", &error),
+                        Some(client.runtime_status()),
+                    );
+                    return Err(error);
                 }
             },
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                client.pump()?;
-            }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
@@ -612,6 +764,8 @@ fn origin_key(url: &str) -> String {
 pub fn router(state: ApiState) -> Router {
     Router::new()
         .route("/healthz", get(health))
+        .route("/readyz", get(readiness))
+        .route("/doctor", get(doctor))
         .route("/runtime", get(runtime_info))
         .route("/session", post(inject_session).get(snapshot_session))
         .route("/session/save", post(save_session_profile))
@@ -624,30 +778,33 @@ pub fn router(state: ApiState) -> Router {
         .with_state(state)
 }
 
-async fn health() -> Json<HealthResponse> {
-    Json(HealthResponse { status: "ok" })
+async fn health(State(state): State<ApiState>) -> Json<HealthResponse> {
+    let diagnostics = read_diagnostics(&state.diagnostics);
+    Json(HealthResponse {
+        control_plane_up: true,
+        runtime_state: diagnostics.state.clone(),
+        command_ready: diagnostics.command_ready,
+        bridge_healthy: diagnostics.bridge_healthy,
+        browser_backend_healthy: diagnostics.browser_backend_healthy,
+        active_operation: diagnostics.active_operation,
+        last_failure: diagnostics.last_failure,
+    })
 }
 
 #[derive(Debug, Serialize)]
 struct RuntimeInfo {
     host_library: PathBuf,
     browser: BrowserConfig,
-    runtime: RuntimeStatus,
+    diagnostics: RuntimeDiagnosticsResponse,
     startup: ServeStartupMetrics,
     profile: SessionProfileInfo,
 }
 
 async fn runtime_info(State(state): State<ApiState>) -> Result<Json<RuntimeInfo>, ApiError> {
-    let (reply_tx, reply_rx) = oneshot::channel();
-    state
-        .tx
-        .send(ApiCommand::RuntimeInfo(reply_tx))
-        .map_err(channel_error)?;
-    let (browser, runtime) = reply_rx.await.map_err(reply_error_config)?;
     Ok(Json(RuntimeInfo {
-        host_library: state.host_library,
-        browser,
-        runtime,
+        host_library: state.host_library.clone(),
+        browser: state.browser.clone(),
+        diagnostics: read_diagnostics(&state.diagnostics),
         profile: state.profile.clone(),
         startup: state
             .startup
@@ -661,6 +818,21 @@ async fn runtime_info(State(state): State<ApiState>) -> Result<Json<RuntimeInfo>
     }))
 }
 
+async fn readiness(
+    State(state): State<ApiState>,
+) -> Result<Json<RuntimeDiagnosticsResponse>, ApiError> {
+    let diagnostics = read_diagnostics(&state.diagnostics);
+    if diagnostics.command_ready {
+        Ok(Json(diagnostics))
+    } else {
+        Err(ApiError::readiness(diagnostics))
+    }
+}
+
+async fn doctor(State(state): State<ApiState>) -> Json<RuntimeDiagnosticsResponse> {
+    Json(read_diagnostics(&state.diagnostics))
+}
+
 async fn save_session_profile(
     State(state): State<ApiState>,
 ) -> Result<Json<SessionProfileInfo>, ApiError> {
@@ -669,7 +841,7 @@ async fn save_session_profile(
         .tx
         .send(ApiCommand::SaveSessionProfile(reply_tx))
         .map_err(channel_error)?;
-    let profile = reply_rx.await.map_err(reply_error)??;
+    let profile = await_command("save_session_profile", &state.diagnostics, reply_rx).await??;
     Ok(Json(profile))
 }
 
@@ -681,7 +853,7 @@ async fn load_session_profile(
         .tx
         .send(ApiCommand::LoadSessionProfile(reply_tx))
         .map_err(channel_error)?;
-    let profile = reply_rx.await.map_err(reply_error)??;
+    let profile = await_command("load_session_profile", &state.diagnostics, reply_rx).await??;
     Ok(Json(profile))
 }
 
@@ -694,7 +866,7 @@ async fn inject_session(
         .tx
         .send(ApiCommand::InjectSession(body, reply_tx))
         .map_err(channel_error)?;
-    reply_rx.await.map_err(reply_error)??;
+    await_command("inject_session", &state.diagnostics, reply_rx).await??;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -704,7 +876,9 @@ async fn snapshot_session(State(state): State<ApiState>) -> Result<Json<SessionS
         .tx
         .send(ApiCommand::SnapshotSession(reply_tx))
         .map_err(channel_error)?;
-    Ok(Json(reply_rx.await.map_err(reply_error)??))
+    Ok(Json(
+        await_command("snapshot_session", &state.diagnostics, reply_rx).await??,
+    ))
 }
 
 async fn navigate(
@@ -716,7 +890,9 @@ async fn navigate(
         .tx
         .send(ApiCommand::Navigate(body.url, reply_tx))
         .map_err(channel_error)?;
-    Ok(Json(reply_rx.await.map_err(reply_error)??))
+    Ok(Json(
+        await_command("navigate", &state.diagnostics, reply_rx).await??,
+    ))
 }
 
 async fn execute(
@@ -728,7 +904,9 @@ async fn execute(
         .tx
         .send(ApiCommand::Execute(body.commands, reply_tx))
         .map_err(channel_error)?;
-    Ok(Json(reply_rx.await.map_err(reply_error)??))
+    Ok(Json(
+        await_command("execute", &state.diagnostics, reply_rx).await??,
+    ))
 }
 
 async fn snapshot_dom(State(state): State<ApiState>) -> Result<Json<DomSnapshot>, ApiError> {
@@ -737,7 +915,9 @@ async fn snapshot_dom(State(state): State<ApiState>) -> Result<Json<DomSnapshot>
         .tx
         .send(ApiCommand::SnapshotDom(reply_tx))
         .map_err(channel_error)?;
-    Ok(Json(reply_rx.await.map_err(reply_error)??))
+    Ok(Json(
+        await_command("snapshot_dom", &state.diagnostics, reply_rx).await??,
+    ))
 }
 
 async fn events(
@@ -749,7 +929,9 @@ async fn events(
         .tx
         .send(ApiCommand::Events(query.since, reply_tx))
         .map_err(channel_error)?;
-    Ok(Json(reply_rx.await.map_err(reply_error)??))
+    Ok(Json(
+        await_command("events", &state.diagnostics, reply_rx).await??,
+    ))
 }
 
 async fn enable_trace(
@@ -761,35 +943,401 @@ async fn enable_trace(
         .tx
         .send(ApiCommand::EnableTrace(body.path, reply_tx))
         .map_err(channel_error)?;
-    reply_rx.await.map_err(reply_error)??;
+    await_command("enable_trace", &state.diagnostics, reply_rx).await??;
     Ok(StatusCode::NO_CONTENT)
 }
 
 fn channel_error(error: mpsc::SendError<ApiCommand>) -> ApiError {
-    ApiError(AegisError::Bridge(error.to_string()))
+    ApiError::from(AegisError::Bridge(error.to_string()))
 }
 
-fn reply_error(error: oneshot::error::RecvError) -> ApiError {
-    ApiError(AegisError::Bridge(error.to_string()))
+struct ApiError {
+    status: StatusCode,
+    body: ApiErrorBody,
 }
 
-fn reply_error_config(error: oneshot::error::RecvError) -> ApiError {
-    ApiError(AegisError::Bridge(error.to_string()))
-}
+impl ApiError {
+    fn timeout(operation: &str) -> Self {
+        Self {
+            status: StatusCode::GATEWAY_TIMEOUT,
+            body: ApiErrorBody {
+                error: format!(
+                    "operation `{operation}` exceeded the server timeout and the runtime is now marked wedged"
+                ),
+                code: "operation_timeout".into(),
+                operation: Some(operation.to_string()),
+                stage: Some("awaiting_control_plane_reply".into()),
+                elapsed_ms: Some(COMMAND_TIMEOUT.as_millis() as u64),
+                timed_out: true,
+                restart_recommended: true,
+            },
+        }
+    }
 
-struct ApiError(AegisError);
+    fn readiness(diagnostics: RuntimeDiagnosticsResponse) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            body: ApiErrorBody {
+                error: "runtime is not command-ready".into(),
+                code: "not_ready".into(),
+                operation: diagnostics
+                    .active_operation
+                    .as_ref()
+                    .map(|op| op.name.clone()),
+                stage: diagnostics
+                    .active_operation
+                    .as_ref()
+                    .map(|op| op.stage.clone()),
+                elapsed_ms: diagnostics
+                    .active_operation
+                    .as_ref()
+                    .map(|op| op.elapsed_ms),
+                timed_out: diagnostics
+                    .active_operation
+                    .as_ref()
+                    .is_some_and(|op| op.timed_out),
+                restart_recommended: diagnostics
+                    .last_failure
+                    .as_ref()
+                    .is_some_and(|failure| failure.restart_recommended),
+            },
+        }
+    }
+}
 
 impl From<AegisError> for ApiError {
     fn from(value: AegisError) -> Self {
-        Self(value)
+        let message = value.to_string();
+        if let Some(native) = parse_native_operation_error(&message) {
+            return Self {
+                status: if native.timed_out {
+                    StatusCode::GATEWAY_TIMEOUT
+                } else {
+                    StatusCode::BAD_GATEWAY
+                },
+                body: ApiErrorBody {
+                    error: native.message,
+                    code: "native_operation_error".into(),
+                    operation: Some(native.operation),
+                    stage: Some(native.stage),
+                    elapsed_ms: Some(native.elapsed_ms),
+                    timed_out: native.timed_out,
+                    restart_recommended: native.restart_recommended,
+                },
+            };
+        }
+
+        let status = match value {
+            AegisError::InvalidSession(_) => StatusCode::BAD_REQUEST,
+            AegisError::Serialize(_)
+            | AegisError::Deserialize(_)
+            | AegisError::Io(_)
+            | AegisError::Utf8(_)
+            | AegisError::Protocol(_)
+            | AegisError::Bridge(_) => StatusCode::BAD_GATEWAY,
+        };
+        Self {
+            status,
+            body: ApiErrorBody {
+                error: message,
+                code: "aegis_error".into(),
+                operation: None,
+                stage: None,
+                elapsed_ms: None,
+                timed_out: false,
+                restart_recommended: false,
+            },
+        }
     }
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
-        let body = Json(ApiErrorBody {
-            error: self.0.to_string(),
-        });
-        (StatusCode::BAD_REQUEST, body).into_response()
+        (self.status, Json(self.body)).into_response()
     }
+}
+
+#[derive(Debug, Serialize)]
+pub struct ApiErrorBody {
+    pub error: String,
+    pub code: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stage: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub elapsed_ms: Option<u64>,
+    pub timed_out: bool,
+    pub restart_recommended: bool,
+}
+
+async fn await_command<T>(
+    operation: &str,
+    diagnostics: &Arc<Mutex<ServeDiagnostics>>,
+    reply_rx: oneshot::Receiver<Result<T, AegisError>>,
+) -> Result<Result<T, AegisError>, ApiError> {
+    match timeout(COMMAND_TIMEOUT, reply_rx).await {
+        Ok(result) => result.map_err(reply_error),
+        Err(_) => {
+            mark_operation_timeout(diagnostics, operation);
+            Err(ApiError::timeout(operation))
+        }
+    }
+}
+
+fn reply_error(error: oneshot::error::RecvError) -> ApiError {
+    ApiError::from(AegisError::Bridge(error.to_string()))
+}
+
+fn record_operation_started(
+    diagnostics: &Arc<Mutex<ServeDiagnostics>>,
+    operation: &str,
+    stage: &str,
+) {
+    if let Ok(mut diagnostics) = diagnostics.lock() {
+        diagnostics.begin_operation(operation, stage);
+    }
+}
+
+fn record_operation_finished<T>(
+    diagnostics: &Arc<Mutex<ServeDiagnostics>>,
+    operation: &str,
+    client: &LoadedAegisClient,
+    result: &Result<T, AegisError>,
+) {
+    let runtime = client.runtime_status();
+    match result {
+        Ok(_) => {
+            if let Ok(mut diagnostics) = diagnostics.lock() {
+                diagnostics.complete_success(operation, runtime);
+            }
+        }
+        Err(error) => record_operation_failure(
+            diagnostics,
+            operation,
+            failure_from_error(operation, "native operation failed", error),
+            Some(runtime),
+        ),
+    }
+}
+
+fn record_operation_failure(
+    diagnostics: &Arc<Mutex<ServeDiagnostics>>,
+    operation: &str,
+    failure: FailureSnapshot,
+    runtime: Option<RuntimeStatus>,
+) {
+    if let Ok(mut diagnostics) = diagnostics.lock() {
+        diagnostics.complete_failure(operation, failure, runtime);
+    }
+}
+
+fn record_heartbeat(diagnostics: &Arc<Mutex<ServeDiagnostics>>, client: &LoadedAegisClient) {
+    if let Ok(mut diagnostics) = diagnostics.lock() {
+        diagnostics.record_runtime_snapshot(client.runtime_status());
+    }
+}
+
+fn mark_operation_timeout(diagnostics: &Arc<Mutex<ServeDiagnostics>>, operation: &str) {
+    if let Ok(mut diagnostics) = diagnostics.lock() {
+        diagnostics.mark_timeout(operation, COMMAND_TIMEOUT.as_millis() as u64);
+    }
+}
+
+fn read_diagnostics(diagnostics: &Arc<Mutex<ServeDiagnostics>>) -> RuntimeDiagnosticsResponse {
+    diagnostics
+        .lock()
+        .map(|diagnostics| diagnostics.snapshot())
+        .unwrap_or_else(|_| {
+            ServeDiagnostics::new(RuntimeStatus {
+                bootstrapped: false,
+                bootstrap_duration_ms: None,
+                dom_nodes: 0,
+                dom_snapshot_available: false,
+                latest_event_sequence: 0,
+                current_url: None,
+                last_dom_refresh_at_ms: None,
+                last_event_at_ms: None,
+                last_successful_command_at_ms: None,
+                last_successful_bridge_roundtrip_at_ms: None,
+            })
+            .snapshot()
+        })
+}
+
+fn failure_from_error(operation: &str, stage: &str, error: &AegisError) -> FailureSnapshot {
+    if let Some(native) = parse_native_operation_error(&error.to_string()) {
+        return FailureSnapshot {
+            operation: native.operation,
+            stage: native.stage,
+            message: native.message,
+            elapsed_ms: native.elapsed_ms,
+            timed_out: native.timed_out,
+            restart_recommended: native.restart_recommended,
+            first_seen_at_ms: now_ms(),
+            last_seen_at_ms: now_ms(),
+        };
+    }
+
+    FailureSnapshot {
+        operation: operation.to_string(),
+        stage: stage.to_string(),
+        message: error.to_string(),
+        elapsed_ms: 0,
+        timed_out: false,
+        restart_recommended: false,
+        first_seen_at_ms: now_ms(),
+        last_seen_at_ms: now_ms(),
+    }
+}
+
+fn parse_native_operation_error(message: &str) -> Option<NativeOperationError> {
+    let payload = message.strip_prefix("bridge error: ").unwrap_or(message);
+    let parsed: NativeOperationError = serde_json::from_str(payload).ok()?;
+    (parsed.kind == "operation_error").then_some(parsed)
+}
+
+impl ServeDiagnostics {
+    fn new(runtime: RuntimeStatus) -> Self {
+        Self {
+            runtime,
+            active_operation: None,
+            last_failure: None,
+            total_operations: 0,
+            successful_operations: 0,
+            timed_out_operations: 0,
+            next_operation_id: 1,
+        }
+    }
+
+    fn begin_operation(&mut self, name: &str, stage: &str) {
+        self.total_operations += 1;
+        self.active_operation = Some(ActiveOperation {
+            id: self.next_operation_id,
+            name: name.to_string(),
+            stage: stage.to_string(),
+            started_at_ms: now_ms(),
+            started_at: Instant::now(),
+            timed_out: false,
+        });
+        self.next_operation_id += 1;
+    }
+
+    fn complete_success(&mut self, _name: &str, runtime: RuntimeStatus) {
+        self.successful_operations += 1;
+        self.runtime = runtime;
+        self.active_operation = None;
+        self.last_failure = None;
+    }
+
+    fn complete_failure(
+        &mut self,
+        _name: &str,
+        mut failure: FailureSnapshot,
+        runtime: Option<RuntimeStatus>,
+    ) {
+        if let Some(runtime) = runtime {
+            self.runtime = runtime;
+        }
+        if let Some(previous) = self.last_failure.as_ref() {
+            failure.first_seen_at_ms = previous.first_seen_at_ms;
+        }
+        self.last_failure = Some(failure);
+        self.active_operation = None;
+    }
+
+    fn mark_timeout(&mut self, operation: &str, elapsed_ms: u64) {
+        self.timed_out_operations += 1;
+        if let Some(active) = self.active_operation.as_mut() {
+            active.timed_out = true;
+            active.stage = "awaiting_control_plane_reply".into();
+        }
+        let now = now_ms();
+        self.last_failure = Some(FailureSnapshot {
+            operation: operation.to_string(),
+            stage: "awaiting_control_plane_reply".into(),
+            message: "the API timed out waiting for the runtime owner thread to reply".into(),
+            elapsed_ms,
+            timed_out: true,
+            restart_recommended: true,
+            first_seen_at_ms: self
+                .last_failure
+                .as_ref()
+                .map(|failure| failure.first_seen_at_ms)
+                .unwrap_or(now),
+            last_seen_at_ms: now,
+        });
+    }
+
+    fn record_runtime_snapshot(&mut self, runtime: RuntimeStatus) {
+        self.runtime = runtime;
+    }
+
+    fn snapshot(&self) -> RuntimeDiagnosticsResponse {
+        let active_operation = self
+            .active_operation
+            .as_ref()
+            .map(|operation| OperationSnapshot {
+                id: operation.id,
+                name: operation.name.clone(),
+                stage: operation.stage.clone(),
+                started_at_ms: operation.started_at_ms,
+                elapsed_ms: operation.started_at.elapsed().as_millis() as u64,
+                timed_out: operation.timed_out,
+            });
+        let state = if active_operation.as_ref().is_some_and(|op| op.timed_out) {
+            RuntimeOperationalState::Wedged
+        } else if active_operation.is_some() {
+            RuntimeOperationalState::Busy
+        } else if self
+            .last_failure
+            .as_ref()
+            .is_some_and(|failure| failure.timed_out || failure.restart_recommended)
+        {
+            RuntimeOperationalState::Wedged
+        } else if self.last_failure.is_some() {
+            RuntimeOperationalState::Degraded
+        } else if self
+            .runtime
+            .last_successful_bridge_roundtrip_at_ms
+            .is_some()
+        {
+            RuntimeOperationalState::Ready
+        } else {
+            RuntimeOperationalState::Starting
+        };
+        let command_ready = state == RuntimeOperationalState::Ready;
+        RuntimeDiagnosticsResponse {
+            state,
+            control_plane_up: true,
+            command_ready,
+            bridge_healthy: self
+                .runtime
+                .last_successful_bridge_roundtrip_at_ms
+                .is_some()
+                && self
+                    .last_failure
+                    .as_ref()
+                    .is_none_or(|failure| !failure.timed_out),
+            browser_backend_healthy: self.runtime.bootstrapped
+                && self
+                    .last_failure
+                    .as_ref()
+                    .is_none_or(|failure| !failure.restart_recommended),
+            dom_snapshot_available: self.runtime.dom_snapshot_available,
+            active_operation,
+            last_failure: self.last_failure.clone(),
+            total_operations: self.total_operations,
+            successful_operations: self.successful_operations,
+            timed_out_operations: self.timed_out_operations,
+            runtime: self.runtime.clone(),
+        }
+    }
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }

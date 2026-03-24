@@ -1,5 +1,6 @@
 use crate::browser::BrowserConfig;
 use serde::{Deserialize, Serialize};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::commands::command::{Command, CommandResult};
 use crate::dom::diff::DomMutation;
@@ -18,8 +19,13 @@ pub struct RuntimeStatus {
     pub bootstrapped: bool,
     pub bootstrap_duration_ms: Option<u64>,
     pub dom_nodes: usize,
+    pub dom_snapshot_available: bool,
     pub latest_event_sequence: u64,
     pub current_url: Option<String>,
+    pub last_dom_refresh_at_ms: Option<u64>,
+    pub last_event_at_ms: Option<u64>,
+    pub last_successful_command_at_ms: Option<u64>,
+    pub last_successful_bridge_roundtrip_at_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,6 +46,10 @@ pub struct AegisRuntime {
     bootstrap_duration_ms: Option<u64>,
     dom_snapshot_valid: bool,
     current_url: Option<String>,
+    last_dom_refresh_at_ms: Option<u64>,
+    last_event_at_ms: Option<u64>,
+    last_successful_command_at_ms: Option<u64>,
+    last_successful_bridge_roundtrip_at_ms: Option<u64>,
 }
 
 impl AegisRuntime {
@@ -59,6 +69,10 @@ impl AegisRuntime {
             bootstrap_duration_ms,
             dom_snapshot_valid: false,
             current_url: None,
+            last_dom_refresh_at_ms: None,
+            last_event_at_ms: None,
+            last_successful_command_at_ms: None,
+            last_successful_bridge_roundtrip_at_ms: None,
         })
     }
 
@@ -72,6 +86,7 @@ impl AegisRuntime {
         let response = self.bridge.send_batch(&request)?;
         let results = response.results.clone();
         let emitted_events = self.apply_response(response.clone())?;
+        self.mark_successful_roundtrip();
         self.record_trace(request, response, &emitted_events)?;
 
         Ok(ExecutionReport {
@@ -89,6 +104,7 @@ impl AegisRuntime {
             commands: Vec::new(),
         };
         let emitted_events = self.apply_response(response.clone())?;
+        self.mark_successful_roundtrip();
         self.record_trace(request, response, &emitted_events)?;
         Ok(emitted_events)
     }
@@ -104,6 +120,7 @@ impl AegisRuntime {
         if let Some(snapshot) = response.snapshot.clone() {
             self.dom.replace_snapshot(snapshot);
             self.dom_snapshot_valid = true;
+            self.last_dom_refresh_at_ms = Some(now_ms());
         } else if has_navigation {
             self.dom.replace_snapshot(DomSnapshot::default());
             self.dom_snapshot_valid = false;
@@ -130,6 +147,9 @@ impl AegisRuntime {
             .into_iter()
             .map(|event| self.sequence_event(event))
             .collect::<Vec<_>>();
+        if !events.is_empty() {
+            self.last_event_at_ms = Some(now_ms());
+        }
         self.events.push_all(events.clone());
         events
     }
@@ -171,7 +191,9 @@ impl AegisRuntime {
 
     pub fn snapshot_session(&mut self) -> Result<SessionState, AegisError> {
         self.ensure_runtime_bootstrapped(false)?;
-        self.bridge.snapshot_session()
+        let session = self.bridge.snapshot_session()?;
+        self.mark_successful_roundtrip();
+        Ok(session)
     }
 
     pub fn pump(&mut self) -> Result<(), AegisError> {
@@ -180,6 +202,7 @@ impl AegisRuntime {
 
     pub fn snapshot_dom(&mut self) -> Result<crate::dom::node::DomSnapshot, AegisError> {
         self.ensure_runtime_bootstrapped(true)?;
+        self.mark_successful_roundtrip();
         Ok(self.dom.snapshot())
     }
 
@@ -189,6 +212,7 @@ impl AegisRuntime {
 
     pub fn drain_pending_events(&mut self) -> Result<Vec<SequencedEvent>, AegisError> {
         let raw_events = self.bridge.drain_events()?;
+        self.mark_successful_roundtrip();
         Ok(self.apply_event_batch(raw_events))
     }
 
@@ -209,8 +233,13 @@ impl AegisRuntime {
             bootstrapped: self.runtime_bootstrapped,
             bootstrap_duration_ms: self.bootstrap_duration_ms,
             dom_nodes: self.dom.snapshot().nodes.len(),
+            dom_snapshot_available: self.dom_snapshot_valid,
             latest_event_sequence: self.events.latest_sequence(),
             current_url: self.current_url.clone(),
+            last_dom_refresh_at_ms: self.last_dom_refresh_at_ms,
+            last_event_at_ms: self.last_event_at_ms,
+            last_successful_command_at_ms: self.last_successful_command_at_ms,
+            last_successful_bridge_roundtrip_at_ms: self.last_successful_bridge_roundtrip_at_ms,
         }
     }
 
@@ -236,6 +265,8 @@ impl AegisRuntime {
             let snapshot = self.bridge.snapshot_dom()?;
             self.dom.replace_snapshot(snapshot);
             self.dom_snapshot_valid = true;
+            self.last_dom_refresh_at_ms = Some(now_ms());
+            self.mark_successful_roundtrip();
         }
         Ok(())
     }
@@ -245,4 +276,17 @@ impl AegisRuntime {
             .iter()
             .any(|command| matches!(command, Command::Click { .. } | Command::SetValue { .. }))
     }
+
+    fn mark_successful_roundtrip(&mut self) {
+        let now = now_ms();
+        self.last_successful_bridge_roundtrip_at_ms = Some(now);
+        self.last_successful_command_at_ms = Some(now);
+    }
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }

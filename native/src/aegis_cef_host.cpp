@@ -56,6 +56,38 @@ constexpr char kBootstrapUrl[] =
 
 void AppendDebugLog(const std::string& message);
 
+std::string EscapeJsonString(const std::string& input) {
+  std::string output;
+  output.reserve(input.size());
+  for (char ch : input) {
+    switch (ch) {
+      case '\\':
+        output += "\\\\";
+        break;
+      case '"':
+        output += "\\\"";
+        break;
+      case '\n':
+        output += "\\n";
+        break;
+      case '\r':
+        output += "\\r";
+        break;
+      case '\t':
+        output += "\\t";
+        break;
+      default:
+        output.push_back(ch);
+        break;
+    }
+  }
+  return output;
+}
+
+bool IsStructuredOperationError(const std::string& message) {
+  return message.find("\"kind\":\"operation_error\"") != std::string::npos;
+}
+
 void ApplyBooleanPreference(CefRefPtr<CefPreferenceManager> manager,
                             const char* name,
                             bool value) {
@@ -524,6 +556,15 @@ struct RendererReply {
 
 class AegisCefHost;
 
+class OperationScope {
+ public:
+  OperationScope(AegisCefHost* host, std::string name);
+  ~OperationScope();
+
+ private:
+  AegisCefHost* host_;
+};
+
 class AegisHostClient final : public AegisClient {
  public:
   AegisHostClient(bool headless,
@@ -544,6 +585,8 @@ class AegisHostClient final : public AegisClient {
 
 class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
  public:
+  friend class OperationScope;
+
   explicit AegisCefHost(BrowserOptions options, bool manage_cef_lifecycle = true)
       : options_(std::move(options)),
         paths_(ResolveHostPaths()),
@@ -583,119 +626,181 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
 
   std::vector<std::uint8_t> InstallRuntime(const std::vector<std::uint8_t>& request) override {
     static_cast<void>(request);
-    EnsureRuntimeInstalled();
-    return {};
+    OperationScope scope(this, "install_runtime");
+    try {
+      SetOperationStage("ensuring runtime is installed");
+      EnsureRuntimeInstalled();
+      return {};
+    } catch (const std::exception& error) {
+      throw std::runtime_error(WrapOperationError(error.what()));
+    }
   }
 
   std::vector<std::uint8_t> EvalJs(const std::vector<std::uint8_t>& request) override {
-    auto payload = RequireDictionary(
-        DecodeEnvelope(MessageKind::EvalJs, request), "eval request must be a dictionary");
-    const auto result = InvokeRenderer(aegis::kOpEvalJs, payload->GetString("script").ToString());
+    OperationScope scope(this, "eval_js");
+    try {
+      SetOperationStage("decoding eval request");
+      auto payload = RequireDictionary(
+          DecodeEnvelope(MessageKind::EvalJs, request), "eval request must be a dictionary");
+      SetOperationStage("evaluating javascript");
+      const auto result =
+          InvokeRenderer(aegis::kOpEvalJs, payload->GetString("script").ToString());
 
-    auto response = CefDictionaryValue::Create();
-    auto bytes = CefListValue::Create();
-    for (std::size_t index = 0; index < result.size(); ++index) {
-      bytes->SetInt(static_cast<int>(index),
-                    static_cast<unsigned char>(result[static_cast<std::size_t>(index)]));
+      auto response = CefDictionaryValue::Create();
+      auto bytes = CefListValue::Create();
+      for (std::size_t index = 0; index < result.size(); ++index) {
+        bytes->SetInt(static_cast<int>(index),
+                      static_cast<unsigned char>(result[static_cast<std::size_t>(index)]));
+      }
+      response->SetList("value", bytes);
+      return EncodeEnvelope(MessageKind::EvalJs, response);
+    } catch (const std::exception& error) {
+      throw std::runtime_error(WrapOperationError(error.what()));
     }
-    response->SetList("value", bytes);
-    return EncodeEnvelope(MessageKind::EvalJs, response);
   }
 
   std::vector<std::uint8_t> SendBatch(const std::vector<std::uint8_t>& request) override {
-    EnsureRuntimeInstalled();
-    auto payload =
-        RequireDictionary(DecodeEnvelope(MessageKind::SendBatch, request),
-                          "batch request must be a dictionary");
-    const auto body = WriteJson(payload);
-    auto response = RequireDictionary(
-        ParseJsonValue(InvokeRendererReady(aegis::kOpSendBatch, body),
-                       "batch response is not valid json"),
-        "batch response must be a dictionary");
-    MergeLocalEventsIntoResponse(response);
-    return EncodeEnvelope(MessageKind::SendBatch, response);
+    OperationScope scope(this, "send_batch");
+    try {
+      SetOperationStage("ensuring runtime is installed");
+      EnsureRuntimeInstalled();
+      SetOperationStage("decoding batch request");
+      auto payload =
+          RequireDictionary(DecodeEnvelope(MessageKind::SendBatch, request),
+                            "batch request must be a dictionary");
+      SetOperationStage("dispatching batch to renderer");
+      const auto body = WriteJson(payload);
+      auto response = RequireDictionary(
+          ParseJsonValue(InvokeRendererReady(aegis::kOpSendBatch, body),
+                         "batch response is not valid json"),
+          "batch response must be a dictionary");
+      MergeLocalEventsIntoResponse(response);
+      return EncodeEnvelope(MessageKind::SendBatch, response);
+    } catch (const std::exception& error) {
+      throw std::runtime_error(WrapOperationError(error.what()));
+    }
   }
 
   std::vector<std::uint8_t> SnapshotDom(const std::vector<std::uint8_t>& request) override {
     static_cast<void>(request);
-    EnsureRuntimeInstalled();
-    return EncodeJsonEnvelope(MessageKind::SnapshotDom,
-                              InvokeRendererReady(aegis::kOpSnapshotDom, "{}"));
+    OperationScope scope(this, "snapshot_dom");
+    try {
+      SetOperationStage("ensuring runtime is installed");
+      EnsureRuntimeInstalled();
+      SetOperationStage("capturing DOM snapshot");
+      return EncodeJsonEnvelope(MessageKind::SnapshotDom,
+                                InvokeRendererReady(aegis::kOpSnapshotDom, "{}"));
+    } catch (const std::exception& error) {
+      throw std::runtime_error(WrapOperationError(error.what()));
+    }
   }
 
   std::vector<std::uint8_t> InjectSession(const std::vector<std::uint8_t>& request) override {
-    auto payload = RequireDictionary(
-        DecodeEnvelope(MessageKind::InjectSession, request),
-        "session request must be a dictionary");
+    OperationScope scope(this, "inject_session");
+    try {
+      SetOperationStage("decoding session request");
+      auto payload = RequireDictionary(
+          DecodeEnvelope(MessageKind::InjectSession, request),
+          "session request must be a dictionary");
 
-    ReplaceNetworkOverrides(payload);
-    ReplaceCookies(payload);
-    EnsureRuntimeInstalled();
-    InvokeRendererReady(aegis::kOpInjectStorage, WriteJson(payload));
-    return {};
+      SetOperationStage("replacing network overrides");
+      ReplaceNetworkOverrides(payload);
+      SetOperationStage("replacing cookies");
+      ReplaceCookies(payload);
+      SetOperationStage("ensuring runtime is installed");
+      EnsureRuntimeInstalled();
+      SetOperationStage("injecting storage");
+      InvokeRendererReady(aegis::kOpInjectStorage, WriteJson(payload));
+      return {};
+    } catch (const std::exception& error) {
+      throw std::runtime_error(WrapOperationError(error.what()));
+    }
   }
 
   std::vector<std::uint8_t> SnapshotSession(const std::vector<std::uint8_t>& request) override {
     static_cast<void>(request);
-    EnsureRuntimeInstalled();
-    CaptureDocumentCookiesFromActivePage();
+    OperationScope scope(this, "snapshot_session");
+    try {
+      SetOperationStage("ensuring runtime is installed");
+      EnsureRuntimeInstalled();
+      SetOperationStage("capturing document cookies");
+      CaptureDocumentCookiesFromActivePage();
 
-    auto storage = RequireDictionary(
-        ParseJsonValue(InvokeRendererReady(aegis::kOpSnapshotStorage, "{}"),
-                       "storage snapshot is not valid json"),
-        "storage snapshot must be a dictionary");
-    storage->SetList("cookies", SnapshotCookies());
-    storage->SetList("network_overrides", SnapshotNetworkOverrides());
-    return EncodeEnvelope(MessageKind::SnapshotSession, storage);
+      SetOperationStage("capturing storage snapshot");
+      auto storage = RequireDictionary(
+          ParseJsonValue(InvokeRendererReady(aegis::kOpSnapshotStorage, "{}"),
+                         "storage snapshot is not valid json"),
+          "storage snapshot must be a dictionary");
+      storage->SetList("cookies", SnapshotCookies());
+      storage->SetList("network_overrides", SnapshotNetworkOverrides());
+      return EncodeEnvelope(MessageKind::SnapshotSession, storage);
+    } catch (const std::exception& error) {
+      throw std::runtime_error(WrapOperationError(error.what()));
+    }
   }
 
   std::vector<std::uint8_t> DrainEvents(const std::vector<std::uint8_t>& request) override {
     static_cast<void>(request);
-    EnsureRuntimeInstalled();
+    OperationScope scope(this, "drain_events");
+    try {
+      SetOperationStage("ensuring runtime is installed");
+      EnsureRuntimeInstalled();
 
-    const auto renderer_response = InvokeRendererReady(aegis::kOpDrainEvents, "{}");
-    AppendDebugLog("host: drain_events renderer_response bytes=" +
-                   std::to_string(renderer_response.size()));
-    auto response = RequireDictionary(
-        ParseJsonValue(renderer_response,
-                       "drain events response is not valid json"),
-        "drain events response must be a dictionary");
-    AppendDebugLog("host: drain_events parsed_response");
-    auto existing_events =
-        response->HasKey("events") ? response->GetList("events") : CefListValue::Create();
-    AppendDebugLog("host: drain_events existing_events=" +
-                   std::to_string(existing_events ? existing_events->GetSize() : 0));
-    auto local_events = DrainLocalEvents();
-    AppendDebugLog("host: drain_events local_events=" + std::to_string(local_events.size()));
-    for (const auto& json : local_events) {
-      AppendDebugLog("host: drain_events merge_local_event bytes=" +
-                     std::to_string(json.size()));
+      SetOperationStage("draining renderer events");
+      const auto renderer_response = InvokeRendererReady(aegis::kOpDrainEvents, "{}");
+      AppendDebugLog("host: drain_events renderer_response bytes=" +
+                     std::to_string(renderer_response.size()));
+      auto response = RequireDictionary(
+          ParseJsonValue(renderer_response,
+                         "drain events response is not valid json"),
+          "drain events response must be a dictionary");
+      AppendDebugLog("host: drain_events parsed_response");
+      auto existing_events =
+          response->HasKey("events") ? response->GetList("events") : CefListValue::Create();
+      AppendDebugLog("host: drain_events existing_events=" +
+                     std::to_string(existing_events ? existing_events->GetSize() : 0));
+      auto local_events = DrainLocalEvents();
+      AppendDebugLog("host: drain_events local_events=" + std::to_string(local_events.size()));
+      for (const auto& json : local_events) {
+        AppendDebugLog("host: drain_events merge_local_event bytes=" +
+                       std::to_string(json.size()));
+      }
+      MergeEventsIntoResponse(response, std::move(local_events));
+      AppendDebugLog("host: drain_events encode_response");
+      auto encoded = EncodeEnvelope(MessageKind::DrainEvents, response);
+      AppendDebugLog("host: drain_events encoded");
+      return encoded;
+    } catch (const std::exception& error) {
+      throw std::runtime_error(WrapOperationError(error.what()));
     }
-    MergeEventsIntoResponse(response, std::move(local_events));
-    AppendDebugLog("host: drain_events encode_response");
-    auto encoded = EncodeEnvelope(MessageKind::DrainEvents, response);
-    AppendDebugLog("host: drain_events encoded");
-    return encoded;
   }
 
   std::vector<std::uint8_t> Navigate(const std::vector<std::uint8_t>& request) override {
-    auto payload = RequireDictionary(
-        DecodeEnvelope(MessageKind::Navigate, request), "navigate request must be a dictionary");
-    const auto target_url = payload->GetString("url").ToString();
-    NavigateTo(target_url);
-    EnsureRuntimeInstalled();
+    OperationScope scope(this, "navigate");
+    try {
+      SetOperationStage("decoding navigate request");
+      auto payload = RequireDictionary(
+          DecodeEnvelope(MessageKind::Navigate, request), "navigate request must be a dictionary");
+      const auto target_url = payload->GetString("url").ToString();
+      SetOperationStage("starting browser navigation");
+      NavigateTo(target_url);
+      SetOperationStage("waiting for runtime installation after navigation");
+      EnsureRuntimeInstalled();
 
-    auto response = CefDictionaryValue::Create();
-    response->SetString("url", CurrentUrl());
+      auto response = CefDictionaryValue::Create();
+      response->SetString("url", CurrentUrl());
 
-    auto events = CefListValue::Create();
-    events->SetValue(0, NavigationEvent(CurrentUrl()));
-    response->SetList("events", events);
-    MergeLocalEventsIntoResponse(response);
-    AppendDebugLog("host: navigate encode_response");
-    auto encoded = EncodeEnvelope(MessageKind::Navigate, response);
-    AppendDebugLog("host: navigate encoded");
-    return encoded;
+      auto events = CefListValue::Create();
+      events->SetValue(0, NavigationEvent(CurrentUrl()));
+      response->SetList("events", events);
+      MergeLocalEventsIntoResponse(response);
+      AppendDebugLog("host: navigate encode_response");
+      auto encoded = EncodeEnvelope(MessageKind::Navigate, response);
+      AppendDebugLog("host: navigate encoded");
+      return encoded;
+    } catch (const std::exception& error) {
+      throw std::runtime_error(WrapOperationError(error.what()));
+    }
   }
 
   std::vector<std::uint8_t> Pump(const std::vector<std::uint8_t>& request) override {
@@ -877,6 +982,41 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
   }
 
  private:
+  void BeginOperation(const std::string& name) {
+    current_operation_name_ = name;
+    current_operation_stage_ = "starting";
+    current_operation_started_at_ = std::chrono::steady_clock::now();
+  }
+
+  void EndOperation() {
+    current_operation_name_.clear();
+    current_operation_stage_.clear();
+  }
+
+  void SetOperationStage(const std::string& stage) { current_operation_stage_ = stage; }
+
+  std::string WrapOperationError(const std::string& message) const {
+    if (current_operation_name_.empty() || IsStructuredOperationError(message)) {
+      return message;
+    }
+    const auto elapsed_ms = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - current_operation_started_at_)
+            .count());
+    const bool timed_out = message.find("timed out") != std::string::npos;
+    const bool restart_recommended =
+        timed_out || message.find("browser window closed by user") != std::string::npos ||
+        message.find("browser is not available") != std::string::npos;
+    return std::string("{") + "\"kind\":\"operation_error\"," + "\"operation\":\"" +
+           EscapeJsonString(current_operation_name_) + "\"," + "\"stage\":\"" +
+           EscapeJsonString(current_operation_stage_.empty() ? "unknown"
+                                                             : current_operation_stage_) +
+           "\"," + "\"message\":\"" + EscapeJsonString(message) + "\"," +
+           "\"elapsed_ms\":" + std::to_string(elapsed_ms) + "," + "\"timed_out\":" +
+           (timed_out ? "true" : "false") + "," + "\"restart_recommended\":" +
+           (restart_recommended ? "true" : "false") + "}";
+  }
+
   void RequireOwnerThread() const {
     if (std::this_thread::get_id() != owner_thread_id_) {
       throw std::runtime_error("aegis CEF host methods must run on the owner thread");
@@ -1196,6 +1336,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
 
   std::string CurrentUrl() {
     RequireOwnerThread();
+    SetOperationStage("reading current browser url");
     AegisPumpBrowserHostWindow();
     CefDoMessageLoopWork();
     std::lock_guard lock(mutex_);
@@ -1203,6 +1344,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
   }
 
   void NavigateTo(const std::string& url) {
+    SetOperationStage("preparing browser navigation");
     {
       std::lock_guard lock(mutex_);
       if (browser_.get() != nullptr && page_ready_ && current_url_ == url) {
@@ -1215,6 +1357,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       page_ready_ = false;
       renderer_ready_ = false;
     }
+    SetOperationStage("dispatching LoadURL on UI thread");
     RunOnUiThreadSync([this, url]() {
       CEF_REQUIRE_UI_THREAD();
       if (!browser_.get()) {
@@ -1231,6 +1374,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
         return;
       }
     }
+    SetOperationStage("waiting for ready browser page");
     EnsurePageReady();
     std::lock_guard lock(mutex_);
     runtime_installed_ = true;
@@ -1238,6 +1382,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
 
   std::string InvokeRendererReady(const std::string& operation, const std::string& body) {
     AppendDebugLog("host: invoke_renderer " + operation);
+    SetOperationStage(std::string("dispatching renderer operation: ") + operation);
 
     const int request_id = [this] {
       std::lock_guard lock(mutex_);
@@ -1263,6 +1408,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
     });
 
     const auto deadline = std::chrono::steady_clock::now() + kRendererTimeout;
+    SetOperationStage(std::string("waiting for renderer reply: ") + operation);
     PumpUntil([this, request_id]() {
       return renderer_replies_.contains(request_id) || !startup_error_.empty();
     }, deadline, "timed out waiting for renderer response");
@@ -1424,6 +1570,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
   }
 
   void CaptureDocumentCookiesFromActivePage() {
+    SetOperationStage("capturing document.cookie from active page");
     std::string url;
     {
       std::lock_guard lock(mutex_);
@@ -1477,6 +1624,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
   }
 
   void ReplaceCookies(CefRefPtr<CefDictionaryValue> session) {
+    SetOperationStage("replacing browser cookies");
     auto manager = request_context_->GetCookieManager(nullptr);
 
     auto clear_event = CefWaitableEvent::CreateWaitableEvent(true, false);
@@ -1578,10 +1726,26 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
   std::vector<ManagedCookie> cookie_jar_;
   std::vector<std::string> local_events_;
   std::map<int, RendererReply> renderer_replies_;
+  std::string current_operation_name_;
+  std::string current_operation_stage_;
+  std::chrono::steady_clock::time_point current_operation_started_at_ =
+      std::chrono::steady_clock::now();
 
   CefRefPtr<CefBrowser> browser_;
   CefRefPtr<CefRequestContext> request_context_;
 };
+
+OperationScope::OperationScope(AegisCefHost* host, std::string name) : host_(host) {
+  if (host_ != nullptr) {
+    host_->BeginOperation(name);
+  }
+}
+
+OperationScope::~OperationScope() {
+  if (host_ != nullptr) {
+    host_->EndOperation();
+  }
+}
 
 bool AegisHostClient::OnProcessMessageReceived(
     CefRefPtr<CefBrowser> browser,
