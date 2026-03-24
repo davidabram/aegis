@@ -44,21 +44,15 @@ def main() -> int:
     parser.add_argument("--mode", choices=("headless", "headful"), default="headless")
     parser.add_argument("--start-url", default="https://example.com")
     parser.add_argument("--host-lib", default="native/build-xcode/Debug/libaegis_host.dylib")
-    parser.add_argument(
-        "--binary",
-        default="target/aarch64-apple-darwin/debug/aegis",
-        help="Path to the Aegis CLI binary to launch",
-    )
     parser.add_argument("--timeout", type=float, default=20.0)
     parser.add_argument("--debug-log", default="/tmp/aegis-measure-startup.log")
     args = parser.parse_args()
 
     root = Path(__file__).resolve().parents[1]
-    binary = root / args.binary
+    binary = root / "native/build-xcode/Debug/aegis_native.app/Contents/MacOS/aegis_cli"
     base_url = f"http://{args.addr}"
 
     env = os.environ.copy()
-    env["AEGIS_BUNDLED_CLI"] = "1"
     env["AEGIS_DEBUG_LOG"] = args.debug_log
 
     command = [
