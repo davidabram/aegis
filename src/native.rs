@@ -20,6 +20,10 @@ const DEFAULT_BUNDLED_CLI_NAME: &str = "aegis_cli";
 const DEFAULT_BUNDLED_HOST_LIBRARY_NAME: &str = "libaegis_host.dylib";
 #[cfg(target_os = "macos")]
 const LOCAL_INSTALL_APP_NAME: &str = "Aegis.app";
+#[cfg(target_os = "macos")]
+const DEFAULT_CODESIGN_IDENTITY: &str = "-";
+#[cfg(target_os = "macos")]
+const DEFAULT_CODESIGN_OPTIONS: &str = "runtime";
 const CEF_SDK_DIR: &str =
     "third_party/cef/cef_binary_146.0.6+g68649e2+chromium-146.0.7680.154_macosarm64";
 
@@ -41,6 +45,14 @@ pub struct NativeStatus {
 pub enum NativeConfiguration {
     Debug,
     Release,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone)]
+struct CodeSigningConfig {
+    identity: String,
+    options: Option<String>,
+    entitlements: Option<PathBuf>,
 }
 
 impl NativeConfiguration {
@@ -115,7 +127,8 @@ pub fn install_local_release(
     fs::set_permissions(&bundled_host_library, fs::Permissions::from_mode(host_mode))?;
 
     clear_quarantine_attribute(&install_bundle);
-    ad_hoc_sign_bundle(&install_bundle)?;
+    sign_bundle_for_distribution(&install_bundle)?;
+    verify_signed_bundle(&install_bundle)?;
 
     Ok(install_bundle)
 }
@@ -288,18 +301,125 @@ fn clear_quarantine_attribute(bundle: &Path) {
 }
 
 #[cfg(target_os = "macos")]
-fn ad_hoc_sign_bundle(bundle: &Path) -> Result<(), AegisError> {
+fn load_code_signing_config() -> CodeSigningConfig {
+    let identity = env::var("AEGIS_CODESIGN_IDENTITY")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_CODESIGN_IDENTITY.to_string());
+    let options = env::var("AEGIS_CODESIGN_OPTIONS")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            (identity != DEFAULT_CODESIGN_IDENTITY).then(|| DEFAULT_CODESIGN_OPTIONS.into())
+        });
+    let entitlements = env::var_os("AEGIS_CODESIGN_ENTITLEMENTS")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+
+    CodeSigningConfig {
+        identity,
+        options,
+        entitlements,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn sign_bundle_for_distribution(bundle: &Path) -> Result<(), AegisError> {
+    let config = load_code_signing_config();
+    for nested_code in nested_code_targets(bundle)? {
+        sign_path(&nested_code, &config, false)?;
+    }
+    sign_path(bundle, &config, true)
+}
+
+#[cfg(target_os = "macos")]
+fn nested_code_targets(bundle: &Path) -> Result<Vec<PathBuf>, AegisError> {
+    let frameworks_dir = bundle.join("Contents").join("Frameworks");
+    let macos_dir = bundle.join("Contents").join("MacOS");
+    let mut targets = Vec::new();
+
+    if frameworks_dir.exists() {
+        for entry in fs::read_dir(&frameworks_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let is_nested_bundle =
+                path.is_dir() && (name.ends_with(".app") || name.ends_with(".framework"));
+            let is_nested_library = path.is_file() && name.ends_with(".dylib");
+            if is_nested_bundle || is_nested_library {
+                targets.push(path);
+            }
+        }
+    }
+
+    let bundled_cli = macos_dir.join(DEFAULT_BUNDLED_CLI_NAME);
+    if bundled_cli.exists() {
+        targets.push(bundled_cli);
+    }
+
+    Ok(targets)
+}
+
+#[cfg(target_os = "macos")]
+fn sign_path(
+    path: &Path,
+    config: &CodeSigningConfig,
+    apply_entitlements: bool,
+) -> Result<(), AegisError> {
+    let mut args = vec![
+        "--force".to_string(),
+        "--sign".to_string(),
+        config.identity.clone(),
+        "--timestamp=none".to_string(),
+    ];
+    if let Some(options) = &config.options {
+        args.push("--options".to_string());
+        args.push(options.clone());
+    }
+    if apply_entitlements && let Some(entitlements) = &config.entitlements {
+        args.push("--entitlements".to_string());
+        args.push(
+            entitlements
+                .to_str()
+                .ok_or_else(path_encoding_error)?
+                .to_string(),
+        );
+    }
+    args.push(path.to_str().ok_or_else(path_encoding_error)?.to_string());
+    let borrowed = args.iter().map(String::as_str).collect::<Vec<_>>();
+    run_checked("codesign", &borrowed, Path::new("/"))
+}
+
+#[cfg(target_os = "macos")]
+fn verify_signed_bundle(bundle: &Path) -> Result<(), AegisError> {
     run_checked(
         "codesign",
         &[
-            "--force",
-            "--deep",
-            "--sign",
-            "-",
+            "--verify",
+            "--strict",
+            "--verbose=2",
             bundle.to_str().ok_or_else(path_encoding_error)?,
         ],
         Path::new("/"),
-    )
+    )?;
+
+    let signing = load_code_signing_config();
+    if signing.identity != DEFAULT_CODESIGN_IDENTITY {
+        run_checked(
+            "spctl",
+            &[
+                "--assess",
+                "--type",
+                "execute",
+                "--verbose=4",
+                bundle.to_str().ok_or_else(path_encoding_error)?,
+            ],
+            Path::new("/"),
+        )?;
+    }
+
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]

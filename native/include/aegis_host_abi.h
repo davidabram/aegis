@@ -42,6 +42,7 @@ typedef struct AegisHostFunctionTable {
 } AegisHostFunctionTable;
 
 AegisHostHandle aegis_create_host(const uint8_t* input_ptr, size_t input_len);
+const char* aegis_last_error_message(void);
 void aegis_destroy_host(AegisHostHandle handle);
 AegisHostFunctionTable aegis_get_function_table(void);
 

@@ -30,7 +30,9 @@ pub fn resolve_command_target<'a>(
 ) -> Option<&'a DomNode> {
     match target {
         CommandTarget::Id { id } => snapshot.nodes.iter().find(|node| node.id == *id),
-        CommandTarget::Match { matcher } => best_match(snapshot, matcher, desired_action).map(|c| c.node),
+        CommandTarget::Match { matcher } => {
+            best_match(snapshot, matcher, desired_action).map(|c| c.node)
+        }
     }
 }
 
@@ -66,6 +68,10 @@ fn score_candidate<'a>(
     let semantic = node.semantic.as_ref().cloned().unwrap_or_default();
     let actionable_for_action = is_actionable_for_action(node, &semantic, desired_action);
     if desired_action.is_some() && !actionable_for_action {
+        return None;
+    }
+
+    if matcher.exact.unwrap_or(false) && !exact_match(node, matcher, &semantic) {
         return None;
     }
 
@@ -114,9 +120,9 @@ fn score_candidate<'a>(
         matcher.exact.unwrap_or(false),
         &mut fields,
     )?;
-    score += score_string_field(
-        "placeholder",
-        placeholder_haystack(node, &semantic).as_deref(),
+    score += score_placeholder_field(
+        node,
+        &semantic,
         matcher.placeholder.as_deref(),
         matcher.exact.unwrap_or(false),
         &mut fields,
@@ -135,7 +141,10 @@ fn score_candidate<'a>(
     {
         return None;
     }
-    if matcher.disabled.is_some_and(|value| semantic.disabled != value) {
+    if matcher
+        .disabled
+        .is_some_and(|value| semantic.disabled != value)
+    {
         return None;
     }
 
@@ -190,7 +199,51 @@ fn score_string_field(
     Some(60)
 }
 
-fn placeholder_haystack(node: &DomNode, semantic: &DomNodeSemantics) -> Option<String> {
+fn exact_match(node: &DomNode, matcher: &CommandMatcher, semantic: &DomNodeSemantics) -> bool {
+    exact_string_field(semantic.role.as_deref(), matcher.role.as_deref())
+        && exact_string_field(semantic.name.as_deref(), matcher.name.as_deref())
+        && exact_string_field(semantic.label.as_deref(), matcher.label.as_deref())
+        && exact_string_field(
+            semantic.control_type.as_deref(),
+            matcher.control_type.as_deref(),
+        )
+        && exact_string_field(Some(node.tag.as_str()), matcher.tag.as_deref())
+        && exact_string_field(node.text.as_deref(), matcher.text.as_deref())
+        && exact_placeholder_field(node, semantic, matcher.placeholder.as_deref())
+        && exact_string_field(
+            node.attrs.get("href").map(String::as_str),
+            matcher.href_contains.as_deref(),
+        )
+}
+
+fn exact_string_field(actual: Option<&str>, expected: Option<&str>) -> bool {
+    let Some(expected) = expected else {
+        return true;
+    };
+    let actual_normalized = normalize_text(actual.unwrap_or_default());
+    let expected_normalized = normalize_text(expected);
+    !actual_normalized.is_empty()
+        && !expected_normalized.is_empty()
+        && actual_normalized == expected_normalized
+}
+
+fn exact_placeholder_field(
+    node: &DomNode,
+    semantic: &DomNodeSemantics,
+    expected: Option<&str>,
+) -> bool {
+    let Some(expected) = expected else {
+        return true;
+    };
+    let expected_normalized = normalize_text(expected);
+    !expected_normalized.is_empty()
+        && placeholder_candidates(node, semantic)
+            .into_iter()
+            .map(normalize_text)
+            .any(|candidate| candidate == expected_normalized)
+}
+
+fn placeholder_candidates<'a>(node: &'a DomNode, semantic: &'a DomNodeSemantics) -> Vec<&'a str> {
     let mut parts = Vec::new();
     if let Some(value) = node.attrs.get("placeholder") {
         parts.push(value.as_str());
@@ -204,7 +257,38 @@ fn placeholder_haystack(node: &DomNode, semantic: &DomNodeSemantics) -> Option<S
     if let Some(value) = semantic.label.as_deref() {
         parts.push(value);
     }
-    (!parts.is_empty()).then(|| parts.join(" "))
+    parts
+}
+
+fn score_placeholder_field(
+    node: &DomNode,
+    semantic: &DomNodeSemantics,
+    expected: Option<&str>,
+    exact_only: bool,
+    fields: &mut Vec<MatchFieldDebug>,
+) -> Option<i64> {
+    let Some(expected) = expected else {
+        return Some(0);
+    };
+    let candidates = placeholder_candidates(node, semantic);
+    if candidates.is_empty() {
+        return None;
+    }
+
+    let mut best: Option<i64> = None;
+    for candidate in candidates {
+        if let Some(score) = score_string_field(
+            "placeholder",
+            Some(candidate),
+            Some(expected),
+            exact_only,
+            fields,
+        ) {
+            best = Some(best.map_or(score, |current| current.max(score)));
+        }
+    }
+
+    best
 }
 
 fn is_actionable_for_action(
@@ -213,13 +297,15 @@ fn is_actionable_for_action(
     desired_action: Option<DesiredAction>,
 ) -> bool {
     match desired_action {
-        Some(DesiredAction::Click) | Some(DesiredAction::Hover) => {
-            semantic.actionable
-                || semantic
-                    .actions
-                    .iter()
-                    .any(|action| matches!(action.as_str(), "click" | "open" | "submit"))
+        Some(DesiredAction::Click) => {
+            semantic
+                .actions
+                .iter()
+                .any(|action| matches!(action.as_str(), "click" | "open" | "submit"))
                 || node.tag == "label"
+        }
+        Some(DesiredAction::Hover) => {
+            semantic.actionable || semantic.actions.iter().any(|action| action == "hover")
         }
         Some(DesiredAction::Type) => semantic.actions.iter().any(|action| action == "type"),
         None => true,

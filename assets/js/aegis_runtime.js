@@ -454,13 +454,31 @@
     };
   }
 
-  function placeholderHaystack(descriptor) {
+  function placeholderCandidates(descriptor) {
     return [
       descriptor.attrs.placeholder || "",
       descriptor.attrs["aria-label"] || "",
       descriptor.semantic.name || "",
       descriptor.semantic.label || ""
-    ].join(" ");
+    ].filter(Boolean);
+  }
+
+  function scorePlaceholderField(descriptor, expected, exactOnly, fields) {
+    if (!expected) {
+      return 0;
+    }
+    const candidates = placeholderCandidates(descriptor);
+    if (candidates.length === 0) {
+      return null;
+    }
+    let best = null;
+    for (const candidate of candidates) {
+      const score = scoreStringField("placeholder", candidate, expected, exactOnly, fields);
+      if (score != null) {
+        best = best == null ? score : Math.max(best, score);
+      }
+    }
+    return best;
   }
 
   function isTargetableForAction(descriptor, action) {
@@ -507,6 +525,39 @@
     return 60;
   }
 
+  function exactStringField(actual, expected) {
+    if (!expected) {
+      return true;
+    }
+    const left = normalizeText(actual || "");
+    const right = normalizeText(expected || "");
+    return !!left && !!right && left.toLowerCase() === right.toLowerCase();
+  }
+
+  function exactPlaceholderField(descriptor, expected) {
+    if (!expected) {
+      return true;
+    }
+    const right = normalizeText(expected || "").toLowerCase();
+    if (!right) {
+      return false;
+    }
+    return placeholderCandidates(descriptor)
+      .map((candidate) => normalizeText(candidate).toLowerCase())
+      .some((candidate) => candidate === right);
+  }
+
+  function exactMatch(descriptor, matcher) {
+    return exactStringField(descriptor.semantic.role, matcher.role) &&
+      exactStringField(descriptor.semantic.name, matcher.name) &&
+      exactStringField(descriptor.semantic.label, matcher.label) &&
+      exactStringField(descriptor.semantic.control_type, matcher.control_type) &&
+      exactStringField(descriptor.tag, matcher.tag) &&
+      exactStringField(descriptor.text, matcher.text) &&
+      exactPlaceholderField(descriptor, matcher.placeholder) &&
+      exactStringField(descriptor.attrs.href, matcher.href_contains);
+  }
+
   function scoreCandidate(descriptor, matcher, action) {
     if (typeof matcher.actionable === "boolean" && !!descriptor.semantic.actionable !== matcher.actionable) {
       return null;
@@ -516,6 +567,10 @@
     }
 
     if (action && !isTargetableForAction(descriptor, action)) {
+      return null;
+    }
+
+    if (matcher.exact && !exactMatch(descriptor, matcher)) {
       return null;
     }
 
@@ -529,7 +584,6 @@
       ["control_type", descriptor.semantic.control_type, matcher.control_type],
       ["tag", descriptor.tag, matcher.tag],
       ["text", descriptor.text, matcher.text],
-      ["placeholder", placeholderHaystack(descriptor), matcher.placeholder],
       ["href_contains", descriptor.attrs.href, matcher.href_contains]
     ];
 
@@ -540,6 +594,11 @@
       }
       score += fieldScore;
     }
+    const placeholderScore = scorePlaceholderField(descriptor, matcher.placeholder, exactOnly, fields);
+    if (placeholderScore == null) {
+      return null;
+    }
+    score += placeholderScore;
 
     if (descriptor.semantic.visible) {
       score += 40;

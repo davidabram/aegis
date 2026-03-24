@@ -253,7 +253,8 @@ Inspect native paths:
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let _state_paths = AegisStatePaths::detect()?;
-    let workspace_root = resolve_workspace_root()?;
+    let current_exe = std::env::current_exe()?;
+    let workspace_root = resolve_workspace_root(&current_exe)?;
     let command = resolved_command(&cli);
     let browser_config = BrowserConfig {
         mode: match effective_mode(&cli) {
@@ -344,11 +345,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn resolve_workspace_root() -> Result<PathBuf, Box<dyn std::error::Error>> {
+fn resolve_workspace_root(current_exe: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
     if let Some(root) = std::env::var_os("AEGIS_WORKSPACE_ROOT") {
         return Ok(PathBuf::from(root));
     }
-    Ok(std::env::current_dir()?)
+    let cwd = std::env::current_dir()?;
+    if is_aegis_workspace_root(&cwd) {
+        return Ok(cwd);
+    }
+    if let Some(root) = find_aegis_workspace_root(current_exe) {
+        return Ok(root);
+    }
+    Ok(cwd)
+}
+
+fn is_aegis_workspace_root(path: &Path) -> bool {
+    path.join("Cargo.toml").exists() && path.join("native").join("CMakeLists.txt").exists()
+}
+
+fn find_aegis_workspace_root(path: &Path) -> Option<PathBuf> {
+    for ancestor in path.ancestors() {
+        if is_aegis_workspace_root(ancestor) {
+            return Some(ancestor.to_path_buf());
+        }
+    }
+    None
 }
 
 fn resolved_command(cli: &Cli) -> Commands {
@@ -593,5 +614,18 @@ mod tests {
             resolved_command_for_shortcut(&cli, false),
             Commands::Serve { .. }
         ));
+    }
+
+    #[test]
+    fn detects_workspace_root_shape() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        assert!(is_aegis_workspace_root(root));
+    }
+
+    #[test]
+    fn finds_workspace_root_from_built_binary_path() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let binary = root.join("target/aarch64-apple-darwin/debug/aegis");
+        assert_eq!(find_aegis_workspace_root(&binary).as_deref(), Some(root));
     }
 }

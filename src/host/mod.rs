@@ -1,3 +1,4 @@
+use std::ffi::CStr;
 use std::ops::{Deref, DerefMut};
 use std::path::Path;
 use std::time::Instant;
@@ -15,6 +16,7 @@ use crate::session::cookies::SessionState;
 use crate::transport::bridge::{AegisError, CefBridge, HostFunctionTable, HostHandle};
 
 type CreateHost = unsafe extern "C" fn(input_ptr: *const u8, input_len: usize) -> HostHandle;
+type LastErrorMessage = unsafe extern "C" fn() -> *const std::ffi::c_char;
 type DestroyHost = unsafe extern "C" fn(HostHandle);
 type GetFunctionTable = unsafe extern "C" fn() -> HostFunctionTable;
 
@@ -40,6 +42,12 @@ impl LoadedHost {
                 .map_err(|error| AegisError::Bridge(error.to_string()))?;
             *symbol
         };
+        let last_error = {
+            let symbol: Symbol<'_, LastErrorMessage> =
+                unsafe { library.get(b"aegis_last_error_message") }
+                    .map_err(|error| AegisError::Bridge(error.to_string()))?;
+            *symbol
+        };
         let table = {
             let symbol: Symbol<'_, GetFunctionTable> =
                 unsafe { library.get(b"aegis_get_function_table") }
@@ -50,9 +58,16 @@ impl LoadedHost {
         let config_bytes = to_vec(config).map_err(AegisError::Serialize)?;
         let handle = unsafe { create(config_bytes.as_ptr(), config_bytes.len()) };
         if handle.is_null() {
-            return Err(AegisError::Bridge(
-                "native host returned null handle".into(),
-            ));
+            let message = unsafe { last_error() };
+            let message = if message.is_null() {
+                "native host returned null handle".to_string()
+            } else {
+                unsafe { CStr::from_ptr(message) }
+                    .to_string_lossy()
+                    .trim()
+                    .to_string()
+            };
+            return Err(AegisError::Bridge(message));
         }
 
         Ok(Self {
@@ -87,7 +102,8 @@ impl LoadedAegisClient {
         let host = LoadedHost::open(path, &config)?;
         let bridge = host.bridge()?;
         let bootstrap_duration_ms = Some(started.elapsed().as_millis() as u64);
-        let client = AegisClient::connect(bridge, config, bootstrap_duration_ms)?;
+        let mut client = AegisClient::connect(bridge, config, bootstrap_duration_ms)?;
+        client.runtime_mut().establish_command_bridge()?;
         Ok(Self {
             _host: host,
             client,
