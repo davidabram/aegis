@@ -65,6 +65,12 @@ aegis \
   serve --addr 127.0.0.1:7878
 ```
 
+Measure cold-start and first-command latency:
+
+```bash
+python3 scripts/measure_startup.py --mode headful
+```
+
 ## Session Shape
 
 `SessionState` shape:
