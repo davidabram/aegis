@@ -18,6 +18,8 @@ use clap::{Parser, Subcommand};
 struct Cli {
     #[arg(long, global = true)]
     host_lib: Option<PathBuf>,
+    #[arg(long, global = true, default_value = "default")]
+    profile: String,
     #[arg(long, global = true, default_value = "headless")]
     mode: BrowserModeArg,
     #[arg(long, global = true)]
@@ -122,7 +124,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
                 .into());
             }
-            server::serve(addr, host_lib, browser_config).await?;
+            server::serve(addr, host_lib, browser_config, cli.profile.clone()).await?;
         }
         Commands::Trace { command } => match command {
             TraceCommands::Replay { .. } => unreachable!("handled before host init"),

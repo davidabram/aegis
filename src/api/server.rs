@@ -20,6 +20,7 @@ use crate::events::stream::SequencedEvent;
 use crate::host::LoadedAegisClient;
 use crate::runtime::executor::{ExecutionReport, RuntimeStatus};
 use crate::session::cookies::SessionState;
+use crate::session::profile::{SessionProfileInfo, SessionProfileStore};
 use crate::transport::bridge::AegisError;
 
 const IDLE_PUMP_INTERVAL: Duration = Duration::from_millis(10);
@@ -29,6 +30,7 @@ pub struct ApiState {
     tx: mpsc::Sender<ApiCommand>,
     host_library: PathBuf,
     startup: Arc<Mutex<ServeStartupMetrics>>,
+    profile: SessionProfileInfo,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -72,6 +74,8 @@ pub struct ApiErrorBody {
 enum ApiCommand {
     InjectSession(SessionState, oneshot::Sender<Result<(), AegisError>>),
     SnapshotSession(oneshot::Sender<Result<SessionState, AegisError>>),
+    SaveSessionProfile(oneshot::Sender<Result<SessionProfileInfo, AegisError>>),
+    LoadSessionProfile(oneshot::Sender<Result<SessionProfileInfo, AegisError>>),
     Navigate(String, oneshot::Sender<Result<Vec<SequencedEvent>, AegisError>>),
     Execute(
         Vec<Command>,
@@ -87,10 +91,15 @@ pub async fn serve(
     addr: SocketAddr,
     host_library: PathBuf,
     browser_config: BrowserConfig,
+    profile_name: String,
 ) -> Result<(), AegisError> {
     let serve_started = std::time::Instant::now();
     let client_connect_started = std::time::Instant::now();
     let mut client = LoadedAegisClient::connect(host_library.clone(), browser_config.clone())?;
+    let profile_store = SessionProfileStore::new(profile_name).map_err(AegisError::Bridge)?;
+    if let Some(session) = profile_store.load().map_err(AegisError::Bridge)? {
+        client.inject_session(session)?;
+    }
     let client_connect_ms = client_connect_started.elapsed().as_millis() as u64;
     let api_bind_started = std::time::Instant::now();
     let (tx, rx) = mpsc::channel::<ApiCommand>();
@@ -104,6 +113,7 @@ pub async fn serve(
         tx,
         host_library,
         startup: startup.clone(),
+        profile: profile_store.info(),
     };
     let startup_host_library = state.host_library.clone();
 
@@ -162,10 +172,36 @@ pub async fn serve(
         match rx.recv_timeout(IDLE_PUMP_INTERVAL) {
             Ok(command) => match command {
                 ApiCommand::InjectSession(session, reply) => {
-                    let _ = reply.send(client.inject_session(session));
+                    let result = client
+                        .inject_session(session.clone())
+                        .and_then(|_| profile_store.save(&session).map(|_| ()).map_err(AegisError::Bridge));
+                    let _ = reply.send(result);
                 }
                 ApiCommand::SnapshotSession(reply) => {
                     let _ = reply.send(client.snapshot_session());
+                }
+                ApiCommand::SaveSessionProfile(reply) => {
+                    let result = client
+                        .snapshot_session()
+                        .and_then(|session| {
+                            profile_store
+                                .save(&session)
+                                .map(|_| profile_store.info())
+                                .map_err(AegisError::Bridge)
+                        });
+                    let _ = reply.send(result);
+                }
+                ApiCommand::LoadSessionProfile(reply) => {
+                    let result = profile_store
+                        .load()
+                        .map_err(AegisError::Bridge)
+                        .and_then(|maybe_session| match maybe_session {
+                            Some(session) => client
+                                .inject_session(session)
+                                .map(|_| profile_store.info()),
+                            None => Ok(profile_store.info()),
+                        });
+                    let _ = reply.send(result);
                 }
                 ApiCommand::Navigate(url, reply) => {
                     let result = client.navigate(url);
@@ -195,6 +231,10 @@ pub async fn serve(
         }
     }
 
+    if let Ok(session) = client.snapshot_session() {
+        let _ = profile_store.save(&session);
+    }
+
     Ok(())
 }
 
@@ -203,6 +243,8 @@ pub fn router(state: ApiState) -> Router {
         .route("/healthz", get(health))
         .route("/runtime", get(runtime_info))
         .route("/session", post(inject_session).get(snapshot_session))
+        .route("/session/save", post(save_session_profile))
+        .route("/session/load", post(load_session_profile))
         .route("/navigate", post(navigate))
         .route("/execute", post(execute))
         .route("/dom", get(snapshot_dom))
@@ -221,6 +263,7 @@ struct RuntimeInfo {
     browser: BrowserConfig,
     runtime: RuntimeStatus,
     startup: ServeStartupMetrics,
+    profile: SessionProfileInfo,
 }
 
 async fn runtime_info(State(state): State<ApiState>) -> Result<Json<RuntimeInfo>, ApiError> {
@@ -234,6 +277,7 @@ async fn runtime_info(State(state): State<ApiState>) -> Result<Json<RuntimeInfo>
         host_library: state.host_library,
         browser,
         runtime,
+        profile: state.profile.clone(),
         startup: state
             .startup
             .lock()
@@ -244,6 +288,26 @@ async fn runtime_info(State(state): State<ApiState>) -> Result<Json<RuntimeInfo>
                 total_ready_ms: 0,
             }),
     }))
+}
+
+async fn save_session_profile(State(state): State<ApiState>) -> Result<Json<SessionProfileInfo>, ApiError> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    state
+        .tx
+        .send(ApiCommand::SaveSessionProfile(reply_tx))
+        .map_err(channel_error)?;
+    let profile = reply_rx.await.map_err(reply_error)??;
+    Ok(Json(profile))
+}
+
+async fn load_session_profile(State(state): State<ApiState>) -> Result<Json<SessionProfileInfo>, ApiError> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    state
+        .tx
+        .send(ApiCommand::LoadSessionProfile(reply_tx))
+        .map_err(channel_error)?;
+    let profile = reply_rx.await.map_err(reply_error)??;
+    Ok(Json(profile))
 }
 
 async fn inject_session(

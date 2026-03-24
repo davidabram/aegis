@@ -128,134 +128,68 @@ std::filesystem::path LibraryDirectory() {
   return std::filesystem::path(info.dli_fname).parent_path();
 }
 
-std::filesystem::path HostSupportDir() {
-  const char* home = std::getenv("HOME");
-  if (home == nullptr || *home == '\0') {
-    throw std::runtime_error("HOME is not set");
-  }
-  return std::filesystem::path(home) / "Library" / "Application Support" / "aegis_native";
-}
-
-std::filesystem::path HostRootCacheDir() {
-  return HostSupportDir() / "agent-runtime";
-}
-
-std::filesystem::path HostInstancesDir() {
-  return HostRootCacheDir() / "instances";
-}
-
-struct HostRuntimePaths {
-  std::filesystem::path root_cache_dir;
-  std::filesystem::path profile_dir;
+struct ManagedCookie {
+  std::string name;
+  std::string value;
+  std::string domain;
+  std::string path = "/";
+  std::optional<std::uint64_t> expires_unix;
+  bool secure = false;
+  bool http_only = false;
 };
 
-std::string HostRuntimeInstanceId() {
-  const auto now = std::chrono::system_clock::now().time_since_epoch();
-  const auto nanos =
-      std::chrono::duration_cast<std::chrono::nanoseconds>(now).count();
-  return std::to_string(static_cast<long long>(::getpid())) + "-" +
-         std::to_string(static_cast<long long>(nanos));
+
+std::string TrimAscii(std::string value) {
+  while (!value.empty() &&
+         std::isspace(static_cast<unsigned char>(value.front())) != 0) {
+    value.erase(value.begin());
+  }
+  while (!value.empty() &&
+         std::isspace(static_cast<unsigned char>(value.back())) != 0) {
+    value.pop_back();
+  }
+  return value;
 }
 
-HostRuntimePaths CreateHostRuntimePaths() {
-  const auto instance_root = HostInstancesDir() / HostRuntimeInstanceId();
-  const auto profile_dir = instance_root / "profile";
-  std::filesystem::create_directories(profile_dir);
-  return {
-      .root_cache_dir = instance_root,
-      .profile_dir = profile_dir,
-  };
-}
-
-bool ProcessExists(pid_t pid) {
-  if (pid <= 0) {
+bool CaseEqualAscii(const std::string& left, const std::string& right) {
+  if (left.size() != right.size()) {
     return false;
   }
-  if (::kill(pid, 0) == 0) {
-    return true;
+  for (std::size_t index = 0; index < left.size(); ++index) {
+    if (std::tolower(static_cast<unsigned char>(left[index])) !=
+        std::tolower(static_cast<unsigned char>(right[index]))) {
+      return false;
+    }
   }
-  return errno == EPERM;
+  return true;
 }
 
-std::optional<pid_t> ParseInstancePid(const std::filesystem::path& path) {
-  const auto name = path.filename().string();
-  const auto dash = name.find('-');
-  const auto pid_text = dash == std::string::npos ? name : name.substr(0, dash);
-  if (pid_text.empty()) {
+std::optional<std::string> UrlScheme(const std::string& url) {
+  CefURLParts parts;
+  if (!CefParseURL(url, parts)) {
     return std::nullopt;
   }
-  for (const char ch : pid_text) {
-    if (!std::isdigit(static_cast<unsigned char>(ch))) {
-      return std::nullopt;
-    }
-  }
-  try {
-    return static_cast<pid_t>(std::stoll(pid_text));
-  } catch (...) {
+  return CefString(&parts.scheme).ToString();
+}
+
+std::optional<std::string> UrlHost(const std::string& url) {
+  CefURLParts parts;
+  if (!CefParseURL(url, parts)) {
     return std::nullopt;
   }
+  return CefString(&parts.host).ToString();
 }
 
-void RemoveTreeIfExists(const std::filesystem::path& path) {
-  std::error_code error;
-  std::filesystem::remove_all(path, error);
-}
-
-void CleanupLegacyRuntimeRoot() {
-  const auto root = HostRootCacheDir();
-  std::error_code error;
-  std::filesystem::create_directories(root, error);
-  if (error) {
-    return;
+std::optional<std::string> UrlPath(const std::string& url) {
+  CefURLParts parts;
+  if (!CefParseURL(url, parts)) {
+    return std::nullopt;
   }
-
-  for (const auto& entry : std::filesystem::directory_iterator(root, error)) {
-    if (error) {
-      return;
-    }
-    if (entry.path().filename() == "instances") {
-      continue;
-    }
-    RemoveTreeIfExists(entry.path());
+  const auto path = CefString(&parts.path).ToString();
+  if (path.empty()) {
+    return std::string("/");
   }
-}
-
-void CleanupStaleRuntimeInstances() {
-  const auto instances_dir = HostInstancesDir();
-  std::error_code error;
-  std::filesystem::create_directories(instances_dir, error);
-  if (error) {
-    return;
-  }
-
-  for (const auto& entry : std::filesystem::directory_iterator(instances_dir, error)) {
-    if (error) {
-      return;
-    }
-    const auto pid = ParseInstancePid(entry.path());
-    if (!pid.has_value() || ProcessExists(*pid)) {
-      continue;
-    }
-    RemoveTreeIfExists(entry.path());
-  }
-}
-
-void StartRuntimeCleanupAsync() {
-  static std::once_flag once;
-  std::call_once(once, []() {
-    std::thread([]() {
-      const auto started = std::chrono::steady_clock::now();
-      AppendDebugLog("host: async runtime cleanup begin");
-      CleanupLegacyRuntimeRoot();
-      CleanupStaleRuntimeInstances();
-      const auto elapsed_ms =
-          std::chrono::duration_cast<std::chrono::milliseconds>(
-              std::chrono::steady_clock::now() - started)
-              .count();
-      AppendDebugLog("host: async runtime cleanup complete ms=" +
-                     std::to_string(elapsed_ms));
-    }).detach();
-  });
+  return path;
 }
 
 std::filesystem::path DetectAppBundle(const std::filesystem::path& anchor) {
@@ -584,14 +518,12 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
   explicit AegisCefHost(BrowserOptions options, bool manage_cef_lifecycle = true)
       : options_(std::move(options)),
         paths_(ResolveHostPaths()),
-        runtime_paths_(CreateHostRuntimePaths()),
         owner_thread_id_(std::this_thread::get_id()),
         manage_cef_lifecycle_(manage_cef_lifecycle) {
     if (pthread_main_np() == 0) {
       throw std::runtime_error("aegis CEF host must be created on the process main thread");
     }
     AppendDebugLog("host: constructed");
-    StartRuntimeCleanupAsync();
     if (manage_cef_lifecycle_) {
       Start();
     } else {
@@ -672,6 +604,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
   std::vector<std::uint8_t> SnapshotSession(const std::vector<std::uint8_t>& request) override {
     static_cast<void>(request);
     EnsureRuntimeInstalled();
+    CaptureDocumentCookiesFromActivePage();
 
     auto storage = RequireDictionary(
         ParseJsonValue(InvokeRendererReady(aegis::kOpSnapshotStorage, "{}"),
@@ -869,8 +802,9 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
   void OnResourceLoadComplete(CefRefPtr<CefBrowser>,
                               CefRefPtr<CefFrame>,
                               CefRefPtr<CefRequest> request,
-                              CefRefPtr<CefResponse>,
+                              CefRefPtr<CefResponse> response,
                               cef_urlrequest_status_t) override {
+    CaptureResponseCookies(request, response);
     PushLocalEvent(NetworkEvent(request->GetIdentifier(), request->GetURL().ToString()));
   }
 
@@ -1037,11 +971,6 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
         AppendDebugLog("host: initialize_host_application complete");
       }
 
-      CefString(&settings.cache_path) = runtime_paths_.profile_dir.string();
-      CefString(&settings.root_cache_path) = runtime_paths_.root_cache_dir.string();
-      AppendDebugLog("host: runtime root_cache_path=" + runtime_paths_.root_cache_dir.string());
-      AppendDebugLog("host: runtime cache_path=" + runtime_paths_.profile_dir.string());
-
       CefString(&settings.browser_subprocess_path) = paths_.helper_executable.string();
       CefString(&settings.framework_dir_path) = paths_.framework_dir.string();
       CefString(&settings.main_bundle_path) = paths_.app_bundle.string();
@@ -1071,7 +1000,6 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
         cef_unload_library();
         cef_initialized_ = false;
       }
-      RemoveTreeIfExists(runtime_paths_.root_cache_dir);
       std::lock_guard lock(mutex_);
       startup_error_ = error.what();
       cv_.notify_all();
@@ -1104,7 +1032,6 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       CefShutdown();
       cef_unload_library();
       cef_initialized_ = false;
-      RemoveTreeIfExists(runtime_paths_.root_cache_dir);
     } catch (...) {
       cef_initialized_ = false;
     }
@@ -1128,8 +1055,6 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       AppendDebugLog("host: create_browser_on_ui_thread");
 
       CefRequestContextSettings request_context_settings;
-      CefString(&request_context_settings.cache_path) = runtime_paths_.profile_dir.string();
-      request_context_settings.persist_session_cookies = 1;
       request_context_ = CefRequestContext::CreateContext(request_context_settings, nullptr);
       if (!request_context_.get()) {
         throw std::runtime_error("failed to create request context");
@@ -1328,6 +1253,171 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
     cv_.notify_all();
   }
 
+  void UpsertManagedCookie(ManagedCookie cookie) {
+    std::lock_guard lock(mutex_);
+    auto matches = [&](const ManagedCookie& existing) {
+      return existing.name == cookie.name && existing.domain == cookie.domain &&
+             existing.path == cookie.path;
+    };
+
+    const bool remove_cookie =
+        cookie.value.empty() ||
+        (cookie.expires_unix.has_value() && *cookie.expires_unix == 0);
+    auto existing = std::find_if(cookie_jar_.begin(), cookie_jar_.end(), matches);
+    if (remove_cookie) {
+      if (existing != cookie_jar_.end()) {
+        cookie_jar_.erase(existing);
+      }
+      return;
+    }
+    if (existing != cookie_jar_.end()) {
+      *existing = std::move(cookie);
+      return;
+    }
+    cookie_jar_.push_back(std::move(cookie));
+  }
+
+  void ReplaceManagedCookies(CefRefPtr<CefListValue> cookies) {
+    std::vector<ManagedCookie> jar;
+    if (cookies.get()) {
+      for (std::size_t index = 0; index < cookies->GetSize(); ++index) {
+        auto cookie_value = RequireDictionary(
+            cookies->GetValue(static_cast<int>(index)), "cookie must be a dictionary");
+        ManagedCookie cookie{
+            .name = cookie_value->GetString("name").ToString(),
+            .value = cookie_value->GetString("value").ToString(),
+            .domain = cookie_value->GetString("domain").ToString(),
+            .path = cookie_value->HasKey("path")
+                        ? cookie_value->GetString("path").ToString()
+                        : std::string("/"),
+            .expires_unix = cookie_value->HasKey("expires_unix")
+                                ? std::optional<std::uint64_t>(static_cast<std::uint64_t>(
+                                      cookie_value->GetDouble("expires_unix")))
+                                : std::nullopt,
+            .secure = cookie_value->HasKey("secure") && cookie_value->GetBool("secure"),
+            .http_only =
+                cookie_value->HasKey("http_only") && cookie_value->GetBool("http_only"),
+        };
+        jar.push_back(std::move(cookie));
+      }
+    }
+    std::lock_guard lock(mutex_);
+    cookie_jar_ = std::move(jar);
+  }
+
+  std::optional<ManagedCookie> ParseSetCookieHeader(const std::string& url,
+                                                    const std::string& header_value) {
+    auto host = UrlHost(url);
+    if (!host.has_value() || host->empty()) {
+      return std::nullopt;
+    }
+
+    ManagedCookie cookie{
+        .domain = *host,
+        .path = "/",
+        .secure = UrlScheme(url).value_or("") == "https",
+    };
+    bool saw_name_value = false;
+
+    std::size_t start = 0;
+    while (start <= header_value.size()) {
+      const auto delimiter = header_value.find(';', start);
+      auto token = TrimAscii(header_value.substr(start, delimiter - start));
+      start = delimiter == std::string::npos ? header_value.size() + 1 : delimiter + 1;
+      if (token.empty()) {
+        continue;
+      }
+      const auto equals = token.find('=');
+      if (!saw_name_value) {
+        if (equals == std::string::npos) {
+          return std::nullopt;
+        }
+        cookie.name = TrimAscii(token.substr(0, equals));
+        cookie.value = token.substr(equals + 1);
+        saw_name_value = !cookie.name.empty();
+        continue;
+      }
+
+      const auto key = TrimAscii(token.substr(0, equals));
+      const auto value =
+          equals == std::string::npos ? std::string() : TrimAscii(token.substr(equals + 1));
+      if (CaseEqualAscii(key, "domain") && !value.empty()) {
+        cookie.domain = value.front() == '.' ? value.substr(1) : value;
+      } else if (CaseEqualAscii(key, "path") && !value.empty()) {
+        cookie.path = value;
+      } else if (CaseEqualAscii(key, "secure")) {
+        cookie.secure = true;
+      } else if (CaseEqualAscii(key, "httponly")) {
+        cookie.http_only = true;
+      } else if (CaseEqualAscii(key, "max-age")) {
+        try {
+          if (std::stoll(value) <= 0) {
+            cookie.expires_unix = 0;
+          }
+        } catch (...) {
+        }
+      }
+    }
+
+    if (!saw_name_value) {
+      return std::nullopt;
+    }
+    return cookie;
+  }
+
+  void CaptureResponseCookies(CefRefPtr<CefRequest> request, CefRefPtr<CefResponse> response) {
+    if (!request.get() || !response.get()) {
+      return;
+    }
+    CefResponse::HeaderMap headers;
+    response->GetHeaderMap(headers);
+    for (const auto& [header, value] : headers) {
+      if (!CaseEqualAscii(header.ToString(), "set-cookie")) {
+        continue;
+      }
+      auto cookie = ParseSetCookieHeader(request->GetURL().ToString(), value.ToString());
+      if (cookie.has_value()) {
+        UpsertManagedCookie(std::move(*cookie));
+      }
+    }
+  }
+
+  void CaptureDocumentCookiesFromActivePage() {
+    std::string url;
+    {
+      std::lock_guard lock(mutex_);
+      url = current_url_;
+    }
+    auto host = UrlHost(url);
+    if (!host.has_value() || host->empty()) {
+      return;
+    }
+
+    const auto cookie_string = InvokeRendererReady(aegis::kOpEvalJs, "document.cookie");
+    std::size_t start = 0;
+    while (start <= cookie_string.size()) {
+      const auto delimiter = cookie_string.find(';', start);
+      auto token = TrimAscii(cookie_string.substr(start, delimiter - start));
+      start = delimiter == std::string::npos ? cookie_string.size() + 1 : delimiter + 1;
+      if (token.empty()) {
+        continue;
+      }
+      const auto equals = token.find('=');
+      if (equals == std::string::npos) {
+        continue;
+      }
+      UpsertManagedCookie(ManagedCookie{
+          .name = TrimAscii(token.substr(0, equals)),
+          .value = token.substr(equals + 1),
+          .domain = *host,
+          .path = UrlPath(url).value_or("/"),
+          .expires_unix = std::nullopt,
+          .secure = UrlScheme(url).value_or("") == "https",
+          .http_only = false,
+      });
+    }
+  }
+
   void ReplaceNetworkOverrides(CefRefPtr<CefDictionaryValue> session) {
     std::vector<std::pair<std::string, std::string>> overrides;
     if (session->HasKey("network_overrides")) {
@@ -1353,10 +1443,12 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
     clear_event->Wait();
 
     if (!session->HasKey("cookies")) {
+      ReplaceManagedCookies(CefListValue::Create());
       return;
     }
 
     auto cookies = session->GetList("cookies");
+    ReplaceManagedCookies(cookies);
     for (std::size_t index = 0; index < cookies->GetSize(); ++index) {
       auto cookie_value = RequireDictionary(
           cookies->GetValue(static_cast<int>(index)), "cookie must be a dictionary");
@@ -1390,28 +1482,19 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
   }
 
   CefRefPtr<CefListValue> SnapshotCookies() {
-    std::vector<CefCookie> cookies;
-    auto event = CefWaitableEvent::CreateWaitableEvent(true, false);
-    request_context_->GetCookieManager(nullptr)->VisitAllCookies(
-        new CookieCollector(&cookies, event));
-    event->Wait();
-
     auto list = CefListValue::Create();
-    for (std::size_t index = 0; index < cookies.size(); ++index) {
-      const auto& cookie = cookies[index];
+    std::lock_guard lock(mutex_);
+    for (std::size_t index = 0; index < cookie_jar_.size(); ++index) {
+      const auto& cookie = cookie_jar_[index];
       auto entry = CefDictionaryValue::Create();
-      entry->SetString("name", CefString(&cookie.name));
-      entry->SetString("value", CefString(&cookie.value));
-      entry->SetString("domain", CefString(&cookie.domain));
-      entry->SetString("path", CefString(&cookie.path));
-      entry->SetBool("secure", cookie.secure != 0);
-      entry->SetBool("http_only", cookie.httponly != 0);
-      if (cookie.has_expires) {
-        cef_time_t expires{};
-        cef_time_from_basetime(cookie.expires, &expires);
-        time_t expires_unix = 0;
-        cef_time_to_timet(&expires, &expires_unix);
-        entry->SetDouble("expires_unix", static_cast<double>(expires_unix));
+      entry->SetString("name", cookie.name);
+      entry->SetString("value", cookie.value);
+      entry->SetString("domain", cookie.domain);
+      entry->SetString("path", cookie.path);
+      entry->SetBool("secure", cookie.secure);
+      entry->SetBool("http_only", cookie.http_only);
+      if (cookie.expires_unix.has_value()) {
+        entry->SetDouble("expires_unix", static_cast<double>(*cookie.expires_unix));
       }
       list->SetDictionary(static_cast<int>(index), entry);
     }
@@ -1432,7 +1515,6 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
 
   const BrowserOptions options_;
   const HostPaths paths_;
-  const HostRuntimePaths runtime_paths_;
   const std::thread::id owner_thread_id_;
   const bool manage_cef_lifecycle_;
 
@@ -1451,6 +1533,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
   std::string current_url_ = "about:blank";
   int next_request_id_ = 1;
   std::vector<std::pair<std::string, std::string>> network_overrides_;
+  std::vector<ManagedCookie> cookie_jar_;
   std::vector<std::string> local_events_;
   std::map<int, RendererReply> renderer_replies_;
 

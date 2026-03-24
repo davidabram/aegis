@@ -62,30 +62,6 @@ static void InstallModalAlertSuppression(void) {
   });
 }
 
-std::filesystem::path StandaloneSupportDir() {
-  NSArray<NSURL*>* urls = [[NSFileManager defaultManager]
-      URLsForDirectory:NSApplicationSupportDirectory
-             inDomains:NSUserDomainMask];
-  NSURL* base_url = urls.count > 0 ? urls[0] : nil;
-  if (base_url == nil) {
-    throw std::runtime_error("failed to resolve Application Support directory");
-  }
-  const std::string base_path([[base_url path] UTF8String]);
-  return std::filesystem::path(base_path) / "aegis_native";
-}
-
-std::string AegisStandaloneRootCachePath() {
-  const auto root = StandaloneSupportDir() / "cef";
-  std::filesystem::create_directories(root);
-  return root.string();
-}
-
-std::string AegisStandaloneCachePath() {
-  const auto cache = StandaloneSupportDir() / "cef" / "default-profile";
-  std::filesystem::create_directories(cache);
-  return cache.string();
-}
-
 // ═══════════════════════════════════════════════════════════════════════════════
 // ENTRY POINT
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -170,13 +146,6 @@ int main(int argc, char* argv[]) {
     settings.windowless_rendering_enabled = true;
     settings.command_line_args_disabled = false;
     settings.external_message_pump = embedded_command_mode;
-
-    if (!embedded_command_mode) {
-      const auto root_cache_path = AegisStandaloneRootCachePath();
-      const auto cache_path = AegisStandaloneCachePath();
-      CefString(&settings.root_cache_path) = root_cache_path;
-      CefString(&settings.cache_path) = cache_path;
-    }
 
     CefRefPtr<AegisApp> app(new AegisApp(!embedded_command_mode, startup_url));
     append_debug("main: before CefExecuteProcess");

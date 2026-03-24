@@ -45,8 +45,11 @@ Local release rule:
 
 Runtime state rules:
 
-- browser profiles are instance-local
-- session persistence goes through `GET/POST /session`
+- Chromium browser profiles are not a persistence API
+- persistent agent state lives under `~/.aegis` by default, or `$AEGIS_HOME` if set
+- session persistence goes through `GET /session`, `POST /session`, `POST /session/save`, and `POST /session/load`
+- `--profile <name>` selects `~/.aegis/profiles/<name>/session.json`
+- `~/.aegis/settings/*.json` is the canonical home for concern-specific local settings
 - trace persistence goes through `POST /trace/enable`
 - if `--start-url` is omitted, the runtime boots into a local no-network bootstrap page
 
@@ -74,6 +77,7 @@ Global runtime flags:
 - `--mode headless|headful`
 - `--start-url <url>`
 - `--host-lib <path>`
+- `--profile <name>`
 
 ## Start A Runtime
 
@@ -125,6 +129,11 @@ The `runtime` object includes:
 - `bootstrap_duration_ms`
 - `dom_nodes`
 - `latest_event_sequence`
+
+The response also includes:
+
+- `profile.profile`
+- `profile.path`
 
 ### `POST /navigate`
 
@@ -202,6 +211,22 @@ Import or export session state:
 - local storage
 - session storage
 - network overrides
+
+### `POST /session/save`
+
+Persist the current runtime session to the active profile file:
+
+```bash
+curl -X POST http://127.0.0.1:7878/session/save
+```
+
+### `POST /session/load`
+
+Reload the active profile file into the live runtime:
+
+```bash
+curl -X POST http://127.0.0.1:7878/session/load
+```
 
 ### `POST /trace/enable`
 

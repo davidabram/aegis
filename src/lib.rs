@@ -8,6 +8,7 @@ pub mod host;
 pub mod native;
 pub mod runtime;
 pub mod session;
+pub mod state;
 pub mod trace;
 pub mod transport;
 
@@ -23,7 +24,9 @@ pub use native::{
 };
 pub use runtime::executor::{AegisRuntime, ExecutionReport};
 pub use session::cookies::{Cookie, SessionState};
+pub use session::profile::{SessionProfileInfo, SessionProfileStore};
 pub use session::storage::{NetworkOverride, StorageArea};
+pub use state::AegisStatePaths;
 pub use trace::recorder::TraceRecorder;
 pub use trace::replayer::{ReplayState, replay_trace};
 pub use transport::bridge::{

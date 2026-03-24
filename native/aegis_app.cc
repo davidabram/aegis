@@ -304,12 +304,22 @@ bool DispatchRendererOperation(const std::string& op,
   if (op == aegis::kOpSnapshotStorage) {
     return EvalToString(
         frame,
-        R"(JSON.stringify({
-          cookies: [],
-          local_storage: Object.fromEntries(Object.entries(localStorage)),
-          session_storage: Object.fromEntries(Object.entries(sessionStorage)),
-          network_overrides: []
-        }))",
+        R"((() => {
+          const readStorage = (getter) => {
+            try {
+              const store = getter();
+              return Object.fromEntries(Object.entries(store));
+            } catch (_) {
+              return {};
+            }
+          };
+          return JSON.stringify({
+            cookies: [],
+            local_storage: readStorage(() => localStorage),
+            session_storage: readStorage(() => sessionStorage),
+            network_overrides: []
+          });
+        })())",
         response, error);
   }
 
@@ -318,8 +328,9 @@ bool DispatchRendererOperation(const std::string& op,
     return EvalToString(
         frame,
         "(() => { const s = JSON.parse(" + quoted +
-            "); if (s.local_storage) { for (const [k,v] of Object.entries(s.local_storage)) localStorage.setItem(k, v); }"
-            " if (s.session_storage) { for (const [k,v] of Object.entries(s.session_storage)) sessionStorage.setItem(k, v); }"
+            "); const writeStorage = (getter, values) => { try { const store = getter(); for (const [k,v] of Object.entries(values || {})) store.setItem(k, v); } catch (_) {} };"
+            " writeStorage(() => localStorage, s.local_storage);"
+            " writeStorage(() => sessionStorage, s.session_storage);"
             " return '{}'; })()",
         response, error);
   }

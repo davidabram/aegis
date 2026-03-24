@@ -36,11 +36,15 @@ Global flags:
 - `--mode headless|headful`
 - `--start-url <url>`
 - `--host-lib <path>`
+- `--profile <name>`
 
 Production state model:
 
-- runtime browser profiles are instance-local and not a persistence API
-- session continuity goes through `GET/POST /session`
+- Chromium browser profiles are ephemeral and not a persistence API
+- Aegis-owned state lives under `~/.aegis` by default, or `$AEGIS_HOME` if set
+- session continuity goes through `GET /session`, `POST /session`, `POST /session/save`, and `POST /session/load`
+- the active profile persists to `~/.aegis/profiles/<profile>/session.json`
+- concern-specific local settings belong in `~/.aegis/settings/*.json`
 - traces go through `POST /trace/enable`
 - if `--start-url` is omitted, the runtime boots into a local no-network bootstrap page
 
@@ -180,6 +184,9 @@ Returns:
 
 - `host_library`
 - `browser`
+- `runtime`
+- `startup`
+- `profile`
 
 ### Inject Session
 
@@ -193,6 +200,18 @@ curl -X POST http://127.0.0.1:7878/session \
 
 ```bash
 curl http://127.0.0.1:7878/session
+```
+
+### Save Active Profile
+
+```bash
+curl -X POST http://127.0.0.1:7878/session/save
+```
+
+### Load Active Profile
+
+```bash
+curl -X POST http://127.0.0.1:7878/session/load
 ```
 
 ### Navigate
