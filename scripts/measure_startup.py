@@ -11,6 +11,7 @@ import threading
 import time
 import urllib.request
 from pathlib import Path
+from statistics import median
 
 
 def http_get_json(url: str, timeout: float) -> dict:
@@ -84,6 +85,7 @@ def main() -> int:
     parser.add_argument("--host-lib", default="native/build-xcode/Release/libaegis_host.dylib")
     parser.add_argument("--timeout", type=float, default=20.0)
     parser.add_argument("--debug-log", default="/tmp/aegis-measure-startup.log")
+    parser.add_argument("--samples", type=int, default=1)
     args = parser.parse_args()
 
     root = Path(__file__).resolve().parents[1]
@@ -122,65 +124,96 @@ def main() -> int:
         args.addr,
     ]
 
-    launch_started_at = time.time()
-    process = subprocess.Popen(
-        command,
-        cwd=root,
-        env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        text=True,
-        bufsize=1,
-    )
-    started_at = time.time()
-    banner_info: dict[str, object] = {}
-    banner_thread = threading.Thread(
-        target=watch_ready_banner,
-        args=(process.stderr, started_at, banner_info),
-        daemon=True,
-    )
-    banner_thread.start()
+    def run_sample(sample_index: int) -> dict:
+        debug_log = args.debug_log
+        if args.samples > 1:
+            debug_path = Path(args.debug_log)
+            debug_log = str(
+                debug_path.with_name(
+                    f"{debug_path.stem}-{sample_index + 1}{debug_path.suffix}"
+                )
+            )
 
-    try:
-        runtime_ready_s, runtime_before, runtime_attempts = wait_for_runtime(base_url, args.timeout)
+        sample_env = env.copy()
+        sample_env["AEGIS_DEBUG_LOG"] = debug_log
 
-        first_command_started = time.time()
-        first_execute = http_post_json(
-            f"{base_url}/execute",
-            {"commands": [{"type": "eval", "code": "document.title"}]},
-            timeout=args.timeout,
+        launch_started_at = time.time()
+        process = subprocess.Popen(
+            command,
+            cwd=root,
+            env=sample_env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
         )
-        first_command_s = time.time() - first_command_started
+        started_at = time.time()
+        banner_info: dict[str, object] = {}
+        banner_thread = threading.Thread(
+            target=watch_ready_banner,
+            args=(process.stderr, started_at, banner_info),
+            daemon=True,
+        )
+        banner_thread.start()
 
-        runtime_after = http_get_json(f"{base_url}/runtime", timeout=1.0)
-
-        report = {
-            "addr": args.addr,
-            "mode": args.mode,
-            "start_url": args.start_url,
-            "pid": process.pid,
-            "process_spawn_ms": round((started_at - launch_started_at) * 1000, 1),
-            "runtime_ready_ms": round(runtime_ready_s * 1000, 1),
-            "runtime_poll_attempts": runtime_attempts,
-            "first_command_ms": round(first_command_s * 1000, 1),
-            "runtime_before": runtime_before,
-            "first_execute": first_execute,
-            "runtime_after": runtime_after,
-            "debug_log": args.debug_log,
-        }
-        report.update(banner_info)
-        print(json.dumps(report, indent=2))
-        return 0
-    finally:
         try:
-            process.terminate()
-            process.wait(timeout=5)
-        except Exception:
+            runtime_ready_s, runtime_before, runtime_attempts = wait_for_runtime(base_url, args.timeout)
+
+            first_command_started = time.time()
+            first_execute = http_post_json(
+                f"{base_url}/execute",
+                {"commands": [{"type": "eval", "code": "document.title"}]},
+                timeout=args.timeout,
+            )
+            first_command_s = time.time() - first_command_started
+
+            runtime_after = http_get_json(f"{base_url}/runtime", timeout=1.0)
+
+            report = {
+                "addr": args.addr,
+                "mode": args.mode,
+                "start_url": args.start_url,
+                "pid": process.pid,
+                "process_spawn_ms": round((started_at - launch_started_at) * 1000, 1),
+                "runtime_ready_ms": round(runtime_ready_s * 1000, 1),
+                "runtime_poll_attempts": runtime_attempts,
+                "first_command_ms": round(first_command_s * 1000, 1),
+                "runtime_before": runtime_before,
+                "first_execute": first_execute,
+                "runtime_after": runtime_after,
+                "debug_log": debug_log,
+            }
+            report.update(banner_info)
+            return report
+        finally:
             try:
-                os.kill(process.pid, signal.SIGKILL)
+                process.terminate()
+                process.wait(timeout=5)
             except Exception:
-                pass
-        banner_thread.join(timeout=0.2)
+                try:
+                    os.kill(process.pid, signal.SIGKILL)
+                except Exception:
+                    pass
+            banner_thread.join(timeout=0.2)
+
+    if args.samples == 1:
+        print(json.dumps(run_sample(0), indent=2))
+        return 0
+
+    samples = [run_sample(i) for i in range(args.samples)]
+    summary = {
+        "samples": args.samples,
+        "mode": args.mode,
+        "addr": args.addr,
+        "median_process_spawn_ms": round(median(sample["process_spawn_ms"] for sample in samples), 1),
+        "median_runtime_ready_ms": round(median(sample["runtime_ready_ms"] for sample in samples), 1),
+        "median_first_command_ms": round(median(sample["first_command_ms"] for sample in samples), 1),
+        "max_runtime_ready_ms": round(max(sample["runtime_ready_ms"] for sample in samples), 1),
+        "max_first_command_ms": round(max(sample["first_command_ms"] for sample in samples), 1),
+        "sample_reports": samples,
+    }
+    print(json.dumps(summary, indent=2))
+    return 0
 
 
 if __name__ == "__main__":

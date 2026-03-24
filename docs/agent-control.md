@@ -79,6 +79,7 @@ Measure cold-start and first-command latency:
 
 ```bash
 python3 scripts/measure_startup.py --mode headful
+python3 scripts/measure_startup.py --mode headful --samples 5
 ```
 
 The startup harness now measures the local bootstrap page by default so cold-start timings are not
@@ -91,6 +92,8 @@ It also reports:
 - `runtime_poll_attempts`
 - `runtime_ready_ms`
 - `first_command_ms`
+
+With `--samples > 1` it also prints median and max timings plus the full report for each sample.
 
 ## Session Shape
 

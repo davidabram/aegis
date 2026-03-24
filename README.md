@@ -238,6 +238,7 @@ Measure cold-start and first-command latency with the real bundled runtime path:
 
 ```bash
 python3 scripts/measure_startup.py --mode headful
+python3 scripts/measure_startup.py --mode headful --samples 5
 ```
 
 The report includes:
@@ -250,6 +251,8 @@ The report includes:
 - `runtime_before`
 - `first_execute`
 - `runtime_after`
+
+When `--samples` is greater than `1`, the harness prints median and max timings plus the full per-sample reports.
 
 ## Native Runtime
 
