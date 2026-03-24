@@ -4,8 +4,8 @@ use std::path::PathBuf;
 
 use aegis::api::server;
 use aegis::{
-    AegisConfigStore, AegisSecretStore, AegisStatePaths, BrowserConfig, BrowserMode, NativeConfiguration,
-    build_xcode, configure_xcode, native, replay_trace,
+    AegisConfigStore, AegisSecretStore, AegisStatePaths, BrowserConfig, BrowserMode,
+    CredentialInput, NativeConfiguration, build_xcode, configure_xcode, native, replay_trace,
 };
 use clap::{Parser, Subcommand};
 
@@ -75,6 +75,28 @@ enum ConfigCommands {
         profile: Option<String>,
         #[arg(long)]
         json: String,
+    },
+    CredentialsList {
+        #[arg(long)]
+        profile: Option<String>,
+    },
+    CredentialsSet {
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long)]
+        json: String,
+    },
+    CredentialsRemove {
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long)]
+        origin: String,
+        #[arg(long)]
+        username: String,
+    },
+    CredentialsClear {
+        #[arg(long)]
+        profile: Option<String>,
     },
 }
 
@@ -307,6 +329,64 @@ fn handle_config_command(
                     "profile": profile,
                     "path": path,
                     "secrets": value,
+                }))?
+            );
+        }
+        ConfigCommands::CredentialsList { profile } => {
+            let store = AegisSecretStore::detect()?;
+            let profile = profile.unwrap_or_else(|| default_profile.to_string());
+            let entries = store.load_profile_credentials(&profile)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "profile": profile,
+                    "credentials": entries,
+                }))?
+            );
+        }
+        ConfigCommands::CredentialsSet { profile, json } => {
+            let store = AegisSecretStore::detect()?;
+            let profile = profile.unwrap_or_else(|| default_profile.to_string());
+            let input: CredentialInput = serde_json::from_str(&json)?;
+            let (path, credential) = store.upsert_profile_credential(&profile, input)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "profile": profile,
+                    "path": path,
+                    "credential": credential,
+                }))?
+            );
+        }
+        ConfigCommands::CredentialsRemove {
+            profile,
+            origin,
+            username,
+        } => {
+            let store = AegisSecretStore::detect()?;
+            let profile = profile.unwrap_or_else(|| default_profile.to_string());
+            let (path, removed) = store.remove_profile_credential(&profile, &origin, &username)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "profile": profile,
+                    "path": path,
+                    "origin": origin,
+                    "username": username,
+                    "removed": removed,
+                }))?
+            );
+        }
+        ConfigCommands::CredentialsClear { profile } => {
+            let store = AegisSecretStore::detect()?;
+            let profile = profile.unwrap_or_else(|| default_profile.to_string());
+            let path = store.clear_profile_credentials(&profile)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "profile": profile,
+                    "path": path,
+                    "credentials": [],
                 }))?
             );
         }

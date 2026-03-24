@@ -117,6 +117,12 @@ impl AegisStatePaths {
             "runtime settings",
             normalize_runtime_settings,
         )?;
+        self.ensure_canonical_json_file(
+            &self.settings_file("credentials"),
+            &default_credentials_settings_payload(),
+            "credentials settings",
+            normalize_credentials_settings,
+        )?;
         self.ensure_profile_layout(DEFAULT_PROFILE)?;
         Ok(())
     }
@@ -148,11 +154,17 @@ impl AegisStatePaths {
                 self.replace_corrupt_file(path, &default_bytes, label)?;
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                fs::write(path, &default_bytes)
-                    .map_err(|write_error| format!("failed to write {}: {write_error}", path.display()))?;
+                fs::write(path, &default_bytes).map_err(|write_error| {
+                    format!("failed to write {}: {write_error}", path.display())
+                })?;
+                secure_state_file_if_needed(path)?;
             }
             Err(error) => {
-                return Err(format!("failed to read {} {}: {error}", label, path.display()));
+                return Err(format!(
+                    "failed to read {} {}: {error}",
+                    label,
+                    path.display()
+                ));
             }
         }
         Ok(())
@@ -183,15 +195,20 @@ impl AegisStatePaths {
                 if normalized != default_or_existing(path)? {
                     let payload = serde_json::to_vec_pretty(&normalized)
                         .map_err(|error| format!("failed to encode normalized {label}: {error}"))?;
-                    fs::write(path, payload)
-                        .map_err(|error| format!("failed to rewrite normalized {}: {error}", path.display()))?;
+                    fs::write(path, payload).map_err(|error| {
+                        format!("failed to rewrite normalized {}: {error}", path.display())
+                    })?;
                 }
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 self.ensure_json_file(path, default_value, label)?;
             }
             Err(error) => {
-                return Err(format!("failed to read {} {}: {error}", label, path.display()));
+                return Err(format!(
+                    "failed to read {} {}: {error}",
+                    label,
+                    path.display()
+                ));
             }
         }
         Ok(())
@@ -226,7 +243,8 @@ impl AegisStatePaths {
             })?;
         }
         fs::write(path, replacement)
-            .map_err(|error| format!("failed to rewrite {} {}: {error}", label, path.display()))
+            .map_err(|error| format!("failed to rewrite {} {}: {error}", label, path.display()))?;
+        secure_state_file_if_needed(path)
     }
 
     fn remove_obsolete_path(&self, path: &Path) -> Result<(), String> {
@@ -234,11 +252,16 @@ impl AegisStatePaths {
             return Ok(());
         }
         if path.is_dir() {
-            fs::remove_dir_all(path)
-                .map_err(|error| format!("failed to remove obsolete directory {}: {error}", path.display()))?;
+            fs::remove_dir_all(path).map_err(|error| {
+                format!(
+                    "failed to remove obsolete directory {}: {error}",
+                    path.display()
+                )
+            })?;
         } else {
-            fs::remove_file(path)
-                .map_err(|error| format!("failed to remove obsolete file {}: {error}", path.display()))?;
+            fs::remove_file(path).map_err(|error| {
+                format!("failed to remove obsolete file {}: {error}", path.display())
+            })?;
         }
         Ok(())
     }
@@ -251,7 +274,8 @@ impl AegisStatePaths {
         for entry in fs::read_dir(&profiles_dir)
             .map_err(|error| format!("failed to read {}: {error}", profiles_dir.display()))?
         {
-            let entry = entry.map_err(|error| format!("failed to read profile secret entry: {error}"))?;
+            let entry =
+                entry.map_err(|error| format!("failed to read profile secret entry: {error}"))?;
             let obsolete = entry.path().join("credentials.json");
             if obsolete.exists() {
                 fs::remove_file(&obsolete).map_err(|error| {
@@ -319,6 +343,23 @@ fn default_runtime_settings_payload() -> serde_json::Value {
     })
 }
 
+fn normalize_credentials_settings(value: serde_json::Value) -> serde_json::Value {
+    json!({
+        "version": STATE_VERSION,
+        "auto_store": value
+            .get("auto_store")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(true)
+    })
+}
+
+fn default_credentials_settings_payload() -> serde_json::Value {
+    json!({
+        "version": STATE_VERSION,
+        "auto_store": true
+    })
+}
+
 fn default_session_payload() -> serde_json::Value {
     json!({
         "version": STATE_VERSION,
@@ -334,7 +375,12 @@ fn default_session_payload() -> serde_json::Value {
 fn default_secrets_payload() -> serde_json::Value {
     json!({
         "version": STATE_VERSION,
-        "secrets": {}
+        "secrets": {
+            "credentials": {
+                "version": STATE_VERSION,
+                "entries": []
+            }
+        }
     })
 }
 
@@ -372,6 +418,30 @@ fn validate_name(value: &str, label: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn secure_state_file_if_needed(path: &Path) -> Result<(), String> {
+    if path
+        .components()
+        .any(|component| component.as_os_str() == "secrets")
+    {
+        set_owner_only_permissions(path)?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_owner_only_permissions(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let permissions = fs::Permissions::from_mode(0o600);
+    fs::set_permissions(path, permissions)
+        .map_err(|error| format!("failed to secure secret file {}: {error}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn set_owner_only_permissions(_path: &Path) -> Result<(), String> {
+    Ok(())
+}
+
 #[cfg(test)]
 use std::sync::{Mutex, OnceLock};
 
@@ -388,7 +458,9 @@ mod tests {
 
     #[test]
     fn detect_bootstraps_canonical_layout() {
-        let _guard = aegis_test_env_lock().lock().unwrap();
+        let _guard = aegis_test_env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let temp = tempfile::tempdir().unwrap();
         unsafe {
             std::env::set_var("AEGIS_HOME", temp.path());
@@ -396,6 +468,7 @@ mod tests {
         let paths = AegisStatePaths::detect().unwrap();
         assert!(paths.settings_file("agent").exists());
         assert!(paths.settings_file("runtime").exists());
+        assert!(paths.settings_file("credentials").exists());
         assert!(paths.session_file("default").exists());
         assert!(paths.profile_secrets_file("default").exists());
         assert!(paths.runtime_instances_dir("serve-headless").exists());
@@ -407,7 +480,9 @@ mod tests {
 
     #[test]
     fn detect_replaces_corrupt_defaults_and_removes_obsolete_dirs() {
-        let _guard = aegis_test_env_lock().lock().unwrap();
+        let _guard = aegis_test_env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let temp = tempfile::tempdir().unwrap();
         unsafe {
             std::env::set_var("AEGIS_HOME", temp.path());
@@ -433,7 +508,9 @@ mod tests {
 
     #[test]
     fn detect_normalizes_agent_settings_and_removes_obsolete_secret_files() {
-        let _guard = aegis_test_env_lock().lock().unwrap();
+        let _guard = aegis_test_env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let temp = tempfile::tempdir().unwrap();
         unsafe {
             std::env::set_var("AEGIS_HOME", temp.path());
@@ -450,8 +527,10 @@ mod tests {
         fs::write(obsolete_dir.join("credentials.json"), b"legacy").unwrap();
         let paths = AegisStatePaths::detect().unwrap();
         let agent = fs::read_to_string(paths.settings_file("agent")).unwrap();
+        let credentials = fs::read_to_string(paths.settings_file("credentials")).unwrap();
         assert!(agent.contains("\"default_profile\": \"work\""));
         assert!(!agent.contains("browser_import"));
+        assert!(credentials.contains("\"auto_store\": true"));
         assert!(!obsolete_dir.join("credentials.json").exists());
         unsafe {
             std::env::remove_var("AEGIS_HOME");

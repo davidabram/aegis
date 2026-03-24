@@ -52,7 +52,9 @@ Runtime state rules:
 - session persistence goes through `GET /session`, `POST /session`, `POST /session/save`, and `POST /session/load`
 - `--profile <name>` selects `~/.aegis/profiles/<name>/session.json`
 - `~/.aegis/settings/*.json` is the canonical home for concern-specific local settings
+- `~/.aegis/settings/credentials.json` controls Aegis-owned login capture behavior
 - `~/.aegis/secrets/profiles/<profile>/secrets.json` is the canonical home for Aegis-owned saved secrets
+- saved browser credentials live under each profile's `secrets.credentials.entries`
 - trace persistence goes through `POST /trace/enable`
 - if `--start-url` is omitted, the runtime boots into a local no-network bootstrap page
 - the canonical control style is semantic `match` targeting for `click` and `set_value`, not long-lived raw DOM ids
@@ -74,6 +76,10 @@ Top-level commands:
 - `config set`
 - `config secrets-get`
 - `config secrets-set`
+- `config credentials-list`
+- `config credentials-set`
+- `config credentials-remove`
+- `config credentials-clear`
 - `trace replay`
 - `native status`
 - `native configure`
@@ -116,6 +122,8 @@ Inspect or set Aegis-owned config:
 ```bash
 aegis config get agent
 aegis config set agent --json '{"default_profile":"work"}'
+aegis config get credentials
+aegis config set credentials --json '{"auto_store":false}'
 ```
 
 Inspect or set Aegis-owned per-profile secrets:
@@ -125,11 +133,22 @@ aegis config secrets-get --profile work
 aegis config secrets-set --profile work --json '{"github":{"username":"saint","password":"..."},"api_keys":{"openai":"..."}}'
 ```
 
+Manage Aegis-owned saved browser credentials:
+
+```bash
+aegis config credentials-list --profile work
+aegis config credentials-set --profile work --json '{"origin":"https://github.com","username":"saint","password":"...","username_field":"login","password_field":"password","form_label":"Sign in"}'
+aegis config credentials-remove --profile work --origin https://github.com --username saint
+aegis config credentials-clear --profile work
+```
+
 Secrets rules:
 
 - secrets live only in `~/.aegis/secrets/...`
 - Aegis does not read or write Chrome/Brave cookies, login databases, or Safe Storage entries
-- if you want browser automation to use credentials, store them explicitly in Aegis and inject them through the runtime/session/config surfaces
+- Aegis auto-stores credentials by default when it sees username/password entry followed by a submit-like click in the active profile
+- users can disable that behavior in `~/.aegis/settings/credentials.json`
+- users can inspect and clean up cached credentials through the CLI without touching browser-managed storage
 
 ## Start A Runtime
 

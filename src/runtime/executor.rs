@@ -19,6 +19,7 @@ pub struct RuntimeStatus {
     pub bootstrap_duration_ms: Option<u64>,
     pub dom_nodes: usize,
     pub latest_event_sequence: u64,
+    pub current_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,6 +39,7 @@ pub struct AegisRuntime {
     runtime_bootstrapped: bool,
     bootstrap_duration_ms: Option<u64>,
     dom_snapshot_valid: bool,
+    current_url: Option<String>,
 }
 
 impl AegisRuntime {
@@ -56,6 +58,7 @@ impl AegisRuntime {
             runtime_bootstrapped: bootstrap_duration_ms.is_some(),
             bootstrap_duration_ms,
             dom_snapshot_valid: false,
+            current_url: None,
         })
     }
 
@@ -104,6 +107,17 @@ impl AegisRuntime {
         } else if has_navigation {
             self.dom.replace_snapshot(DomSnapshot::default());
             self.dom_snapshot_valid = false;
+        }
+        if let Some(url) = response
+            .events
+            .iter()
+            .rev()
+            .find_map(|event| match &event.event {
+                RuntimeEvent::Navigation { url } => Some(url.clone()),
+                _ => None,
+            })
+        {
+            self.current_url = Some(url);
         }
 
         Ok(self.apply_event_batch(response.events))
@@ -196,7 +210,12 @@ impl AegisRuntime {
             bootstrap_duration_ms: self.bootstrap_duration_ms,
             dom_nodes: self.dom.snapshot().nodes.len(),
             latest_event_sequence: self.events.latest_sequence(),
+            current_url: self.current_url.clone(),
         }
+    }
+
+    pub fn current_url(&self) -> Option<&str> {
+        self.current_url.as_deref()
     }
 
     fn record_trace(

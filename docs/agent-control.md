@@ -46,7 +46,9 @@ Production state model:
 - session continuity goes through `GET /session`, `POST /session`, `POST /session/save`, and `POST /session/load`
 - the active profile persists to `~/.aegis/profiles/<profile>/session.json`
 - concern-specific local settings belong in `~/.aegis/settings/*.json`
+- `~/.aegis/settings/credentials.json` controls Aegis-owned login capture
 - Aegis-owned secrets belong in `~/.aegis/secrets/profiles/<profile>/secrets.json`
+- saved browser credentials live under each profile's `secrets.credentials.entries`
 - traces go through `POST /trace/enable`
 - if `--start-url` is omitted, the runtime boots into a local no-network bootstrap page
 - Aegis does not use Chrome/Brave Safe Storage or browser login/profile databases in the production path
@@ -76,6 +78,8 @@ Inspect or set Aegis-owned config:
 ```bash
 aegis config get agent
 aegis config set agent --json '{"default_profile":"work"}'
+aegis config get credentials
+aegis config set credentials --json '{"auto_store":false}'
 ```
 
 Inspect or set Aegis-owned secrets:
@@ -85,11 +89,22 @@ aegis config secrets-get --profile work
 aegis config secrets-set --profile work --json '{"github":{"username":"saint","password":"..."},"api_keys":{"openai":"..."}}'
 ```
 
+Manage Aegis-owned saved browser credentials:
+
+```bash
+aegis config credentials-list --profile work
+aegis config credentials-set --profile work --json '{"origin":"https://github.com","username":"saint","password":"...","username_field":"login","password_field":"password","form_label":"Sign in"}'
+aegis config credentials-remove --profile work --origin https://github.com --username saint
+aegis config credentials-clear --profile work
+```
+
 Secrets rules:
 
 - secrets live only in `~/.aegis/secrets/...`
 - Aegis never reads Chrome/Brave Safe Storage or browser login databases
-- if an agent needs credentials, store them in Aegis and inject them explicitly
+- Aegis auto-stores credentials by default when it sees username/password entry followed by a submit-like click in the active profile
+- users can disable that behavior in `~/.aegis/settings/credentials.json`
+- users can inspect or clean up cached credentials entirely through the CLI
 
 Start the API server:
 

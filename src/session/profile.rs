@@ -143,7 +143,9 @@ mod tests {
 
     #[test]
     fn load_repairs_corrupt_session_profile() {
-        let _guard = aegis_test_env_lock().lock().unwrap();
+        let _guard = aegis_test_env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let temp = tempfile::tempdir().unwrap();
         unsafe {
             std::env::set_var("AEGIS_HOME", temp.path());

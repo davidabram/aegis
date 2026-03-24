@@ -14,8 +14,9 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
 use crate::browser::BrowserConfig;
-use crate::commands::command::Command;
-use crate::dom::node::DomSnapshot;
+use crate::commands::command::{Command, CommandMatcher, CommandTarget};
+use crate::config_store::{AegisConfigStore, AegisSecretStore, CredentialInput};
+use crate::dom::node::{DomNode, DomNodeSemantics, DomSnapshot};
 use crate::events::stream::SequencedEvent;
 use crate::host::LoadedAegisClient;
 use crate::runtime::executor::{ExecutionReport, RuntimeStatus};
@@ -93,6 +94,26 @@ enum ApiCommand {
     RuntimeInfo(oneshot::Sender<(BrowserConfig, RuntimeStatus)>),
 }
 
+#[derive(Debug, Clone)]
+struct AutoCredentialCapture {
+    username: Option<CapturedCredentialField>,
+    password: Option<CapturedCredentialField>,
+    origin: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct CapturedCredentialField {
+    value: String,
+    field_name: Option<String>,
+    label: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CredentialFieldKind {
+    Username,
+    Password,
+}
+
 pub async fn serve(
     addr: SocketAddr,
     host_library: PathBuf,
@@ -103,6 +124,11 @@ pub async fn serve(
     let client_connect_started = std::time::Instant::now();
     let mut client = LoadedAegisClient::connect(host_library.clone(), browser_config.clone())?;
     let profile_store = SessionProfileStore::new(profile_name).map_err(AegisError::Bridge)?;
+    let credential_settings = AegisConfigStore::detect()
+        .and_then(|store| store.load_credentials_settings())
+        .map_err(AegisError::Bridge)?;
+    let credential_store = AegisSecretStore::detect().map_err(AegisError::Bridge)?;
+    let mut credential_capture = AutoCredentialCapture::default();
     if let Some(session) = profile_store.load().map_err(AegisError::Bridge)? {
         client.inject_session(session)?;
     }
@@ -210,11 +236,46 @@ pub async fn serve(
                     let _ = reply.send(result);
                 }
                 ApiCommand::Navigate(url, reply) => {
+                    credential_capture.reset_on_explicit_navigation(&url);
                     let result = client.navigate(url);
                     let _ = reply.send(result);
                 }
                 ApiCommand::Execute(commands, reply) => {
-                    let _ = reply.send(client.execute(&commands));
+                    let maybe_snapshot = if credential_settings.auto_store
+                        && commands.iter().any(|command| {
+                            matches!(command, Command::SetValue { .. } | Command::Click { .. })
+                        }) {
+                        Some(client.snapshot_dom()?)
+                    } else {
+                        None
+                    };
+                    if let Some(snapshot) = maybe_snapshot.as_ref() {
+                        credential_capture.capture_fields(
+                            snapshot,
+                            client.runtime().current_url(),
+                            &commands,
+                        );
+                    }
+                    let should_persist = credential_settings.auto_store
+                        && maybe_snapshot.as_ref().is_some_and(|snapshot| {
+                            credential_capture.should_persist(snapshot, &commands)
+                        });
+                    let persist_origin = if should_persist {
+                        client.runtime().current_url().map(origin_key)
+                    } else {
+                        None
+                    };
+                    let result = client.execute(&commands).and_then(|report| {
+                        if let Some(origin) = persist_origin {
+                            credential_capture.persist(
+                                &credential_store,
+                                &profile_store.info().profile,
+                                &origin,
+                            )?;
+                        }
+                        Ok(report)
+                    });
+                    let _ = reply.send(result);
                 }
                 ApiCommand::SnapshotDom(reply) => {
                     let _ = reply.send(client.snapshot_dom());
@@ -242,6 +303,310 @@ pub async fn serve(
     }
 
     Ok(())
+}
+
+impl Default for AutoCredentialCapture {
+    fn default() -> Self {
+        Self {
+            username: None,
+            password: None,
+            origin: None,
+        }
+    }
+}
+
+impl AutoCredentialCapture {
+    fn capture_fields(
+        &mut self,
+        snapshot: &DomSnapshot,
+        current_url: Option<&str>,
+        commands: &[Command],
+    ) {
+        let current_origin = current_url.map(origin_key);
+        if let (Some(existing), Some(current)) = (self.origin.as_ref(), current_origin.as_ref()) {
+            if existing != current {
+                self.clear();
+            }
+        }
+        if self.origin.is_none() {
+            self.origin = current_origin;
+        }
+
+        for command in commands {
+            let Command::SetValue { target, value } = command else {
+                continue;
+            };
+            let Some(node) = resolve_command_target(snapshot, target) else {
+                continue;
+            };
+            let Some(kind) = classify_credential_field(node) else {
+                continue;
+            };
+            let field = CapturedCredentialField {
+                value: value.clone(),
+                field_name: node.attrs.get("name").cloned(),
+                label: node
+                    .semantic
+                    .as_ref()
+                    .and_then(|semantic| semantic.label.clone().or_else(|| semantic.name.clone())),
+            };
+            match kind {
+                CredentialFieldKind::Username => self.username = Some(field),
+                CredentialFieldKind::Password => self.password = Some(field),
+            }
+        }
+    }
+
+    fn should_persist(&self, snapshot: &DomSnapshot, commands: &[Command]) -> bool {
+        self.username.is_some()
+            && self.password.is_some()
+            && commands.iter().any(|command| {
+                let Command::Click { target } = command else {
+                    return false;
+                };
+                resolve_command_target(snapshot, target).is_some_and(is_submit_like_node)
+            })
+    }
+
+    fn persist(
+        &mut self,
+        store: &AegisSecretStore,
+        profile: &str,
+        fallback_origin: &str,
+    ) -> Result<(), AegisError> {
+        let Some(username) = self.username.as_ref() else {
+            return Ok(());
+        };
+        let Some(password) = self.password.as_ref() else {
+            return Ok(());
+        };
+        store
+            .upsert_profile_credential(
+                profile,
+                CredentialInput {
+                    origin: self
+                        .origin
+                        .clone()
+                        .unwrap_or_else(|| fallback_origin.to_string()),
+                    username: username.value.clone(),
+                    password: password.value.clone(),
+                    username_field: username.field_name.clone(),
+                    password_field: password.field_name.clone(),
+                    form_label: password.label.clone().or_else(|| username.label.clone()),
+                },
+            )
+            .map_err(AegisError::Bridge)?;
+        self.clear();
+        Ok(())
+    }
+
+    fn reset_on_explicit_navigation(&mut self, url: &str) {
+        let target_origin = origin_key(url);
+        if self
+            .origin
+            .as_ref()
+            .is_some_and(|origin| origin != &target_origin)
+        {
+            self.clear();
+        }
+    }
+
+    fn clear(&mut self) {
+        self.username = None;
+        self.password = None;
+        self.origin = None;
+    }
+}
+
+fn resolve_command_target<'a>(
+    snapshot: &'a DomSnapshot,
+    target: &CommandTarget,
+) -> Option<&'a DomNode> {
+    match target {
+        CommandTarget::Id { id } => snapshot.nodes.iter().find(|node| node.id == *id),
+        CommandTarget::Match { matcher } => snapshot
+            .nodes
+            .iter()
+            .find(|node| node_matches_command_matcher(node, matcher)),
+    }
+}
+
+fn node_matches_command_matcher(node: &DomNode, matcher: &CommandMatcher) -> bool {
+    let semantic = node.semantic.as_ref().cloned().unwrap_or(DomNodeSemantics {
+        role: None,
+        name: None,
+        label: None,
+        control_type: None,
+        actionable: false,
+        disabled: false,
+        actions: Vec::new(),
+    });
+    if matcher
+        .role
+        .as_ref()
+        .is_some_and(|value| !includes_normalized(semantic.role.as_deref(), value))
+    {
+        return false;
+    }
+    if matcher
+        .name
+        .as_ref()
+        .is_some_and(|value| !includes_normalized(semantic.name.as_deref(), value))
+    {
+        return false;
+    }
+    if matcher
+        .label
+        .as_ref()
+        .is_some_and(|value| !includes_normalized(semantic.label.as_deref(), value))
+    {
+        return false;
+    }
+    if matcher
+        .control_type
+        .as_ref()
+        .is_some_and(|value| !includes_normalized(semantic.control_type.as_deref(), value))
+    {
+        return false;
+    }
+    if matcher
+        .tag
+        .as_ref()
+        .is_some_and(|value| !includes_normalized(Some(node.tag.as_str()), value))
+    {
+        return false;
+    }
+    if matcher
+        .text
+        .as_ref()
+        .is_some_and(|value| !includes_normalized(node.text.as_deref(), value))
+    {
+        return false;
+    }
+    if matcher.placeholder.as_ref().is_some_and(|value| {
+        !includes_normalized(node.attrs.get("placeholder").map(String::as_str), value)
+    }) {
+        return false;
+    }
+    if matcher.href_contains.as_ref().is_some_and(|value| {
+        !includes_normalized(node.attrs.get("href").map(String::as_str), value)
+    }) {
+        return false;
+    }
+    if matcher
+        .actionable
+        .is_some_and(|value| semantic.actionable != value)
+    {
+        return false;
+    }
+    if matcher
+        .disabled
+        .is_some_and(|value| semantic.disabled != value)
+    {
+        return false;
+    }
+    true
+}
+
+fn classify_credential_field(node: &DomNode) -> Option<CredentialFieldKind> {
+    let control_type = node
+        .semantic
+        .as_ref()
+        .and_then(|semantic| semantic.control_type.as_deref())
+        .or_else(|| node.attrs.get("type").map(String::as_str))
+        .unwrap_or("text");
+    if includes_normalized(Some(control_type), "password") {
+        return Some(CredentialFieldKind::Password);
+    }
+    let hint = credential_hint_text(node);
+    if matches!(
+        control_type,
+        "email" | "text" | "searchbox" | "search" | "textbox"
+    ) && (hint.contains("user")
+        || hint.contains("email")
+        || hint.contains("login")
+        || hint.contains("account")
+        || hint.contains("identifier")
+        || hint.contains("member"))
+    {
+        return Some(CredentialFieldKind::Username);
+    }
+    None
+}
+
+fn is_submit_like_node(node: &DomNode) -> bool {
+    let semantic = node.semantic.as_ref();
+    if semantic.is_some_and(|semantic| semantic.actions.iter().any(|action| action == "submit")) {
+        return true;
+    }
+    if semantic
+        .as_ref()
+        .and_then(|semantic| semantic.control_type.as_deref())
+        .is_some_and(|control| matches!(control, "submit" | "button"))
+    {
+        return true;
+    }
+    let text = credential_hint_text(node);
+    text.contains("sign in")
+        || text.contains("log in")
+        || text.contains("login")
+        || text.contains("continue")
+        || text.contains("submit")
+}
+
+fn credential_hint_text(node: &DomNode) -> String {
+    let mut parts = Vec::new();
+    if let Some(text) = node.text.as_ref() {
+        parts.push(text.as_str());
+    }
+    for key in [
+        "name",
+        "type",
+        "placeholder",
+        "title",
+        "autocomplete",
+        "aria-label",
+        "value",
+    ] {
+        if let Some(value) = node.attrs.get(key) {
+            parts.push(value.as_str());
+        }
+    }
+    if let Some(semantic) = node.semantic.as_ref() {
+        if let Some(name) = semantic.name.as_ref() {
+            parts.push(name.as_str());
+        }
+        if let Some(label) = semantic.label.as_ref() {
+            parts.push(label.as_str());
+        }
+        if let Some(control_type) = semantic.control_type.as_ref() {
+            parts.push(control_type.as_str());
+        }
+    }
+    normalize_text(&parts.join(" "))
+}
+
+fn normalize_text(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+fn includes_normalized(haystack: Option<&str>, needle: &str) -> bool {
+    haystack
+        .map(normalize_text)
+        .is_some_and(|haystack| haystack.contains(&normalize_text(needle)))
+}
+
+fn origin_key(url: &str) -> String {
+    let trimmed = url.trim();
+    if let Some((scheme, rest)) = trimmed.split_once("://") {
+        let host = rest.split('/').next().unwrap_or(rest);
+        return format!("{scheme}://{host}");
+    }
+    trimmed.to_string()
 }
 
 pub fn router(state: ApiState) -> Router {

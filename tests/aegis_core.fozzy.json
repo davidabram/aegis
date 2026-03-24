@@ -3,6 +3,17 @@
   "name": "aegis-core",
   "steps": [
     {
+      "type": "proc_when",
+      "cmd": "cargo",
+      "args": [
+        "test"
+      ],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "times": 1
+    },
+    {
       "name": "cargo-test",
       "type": "proc_spawn",
       "cmd": "cargo",
