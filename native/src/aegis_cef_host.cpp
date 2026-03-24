@@ -29,11 +29,13 @@
 #include "../aegis_client.h"
 #include "../aegis_messages.h"
 #include "../aegis_native_mac.h"
+#include "../aegis_state_paths.h"
 #include "include/base/cef_bind.h"
 #include "include/cef_app.h"
 #include "include/cef_browser.h"
 #include "include/cef_cookie.h"
 #include "include/cef_parser.h"
+#include "include/cef_preference.h"
 #include "include/cef_request_context.h"
 #include "include/cef_waitable_event.h"
 #include "include/views/cef_browser_view.h"
@@ -51,6 +53,33 @@ constexpr auto kShutdownTimeout = std::chrono::seconds(2);
 constexpr auto kPumpInterval = std::chrono::milliseconds(10);
 constexpr char kBootstrapUrl[] =
     "data:text/html,%3C!doctype%20html%3E%3Chtml%3E%3Chead%3E%3Cmeta%20charset%3D%22utf-8%22%3E%3C%2Fhead%3E%3Cbody%3E%3C%2Fbody%3E%3C%2Fhtml%3E";
+
+void AppendDebugLog(const std::string& message);
+
+void ApplyBooleanPreference(CefRefPtr<CefPreferenceManager> manager,
+                            const char* name,
+                            bool value) {
+  if (!manager.get() || !manager->HasPreference(name) ||
+      !manager->CanSetPreference(name)) {
+    return;
+  }
+
+  auto pref_value = CefValue::Create();
+  pref_value->SetBool(value);
+  CefString error;
+  if (!manager->SetPreference(name, pref_value, error)) {
+    AppendDebugLog(std::string("host: failed_to_set_preference ") + name + " " +
+                   error.ToString());
+  }
+}
+
+void ApplyAegisProductionPreferences(CefRefPtr<CefPreferenceManager> manager) {
+  ApplyBooleanPreference(manager, "credentials_enable_service", false);
+  ApplyBooleanPreference(manager, "profile.password_manager_enabled", false);
+  ApplyBooleanPreference(manager, "profile.password_manager_leak_detection", false);
+  ApplyBooleanPreference(manager, "autofill.profile_enabled", false);
+  ApplyBooleanPreference(manager, "autofill.credit_card_enabled", false);
+}
 
 void AppendDebugLog(const std::string& message) {
   const char* path = std::getenv("AEGIS_DEBUG_LOG");
@@ -518,6 +547,8 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
   explicit AegisCefHost(BrowserOptions options, bool manage_cef_lifecycle = true)
       : options_(std::move(options)),
         paths_(ResolveHostPaths()),
+        runtime_session_paths_(AegisCreateRuntimeSessionPaths(
+            options_.headless ? "serve-headless" : "serve-headful")),
         owner_thread_id_(std::this_thread::get_id()),
         manage_cef_lifecycle_(manage_cef_lifecycle) {
     if (pthread_main_np() == 0) {
@@ -531,7 +562,10 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
     }
   }
 
-  ~AegisCefHost() override { Shutdown(); }
+  ~AegisCefHost() override {
+    Shutdown();
+    AegisRemoveRuntimeSession(runtime_session_paths_);
+  }
 
   void WaitForReady() {
     AppendDebugLog("host: wait_for_ready enter");
@@ -964,6 +998,11 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       settings.windowless_rendering_enabled = true;
       settings.command_line_args_disabled = false;
       settings.log_severity = LOGSEVERITY_DISABLE;
+      CefString(&settings.root_cache_path) = runtime_session_paths_.root_cache_path.string();
+
+      if (options_.headless) {
+        AegisInstallModalAlertSuppression();
+      }
 
       if (!options_.headless) {
         AppendDebugLog("host: initialize_host_application begin");
@@ -984,6 +1023,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       }
       AppendDebugLog("host: cef_initialize complete");
       cef_initialized_ = true;
+      ApplyAegisProductionPreferences(CefPreferenceManager::GetGlobalPreferenceManager());
       AppendDebugLog("host: cef initialized");
 
       CreateBrowserOnUiThread();
@@ -1000,6 +1040,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
         cef_unload_library();
         cef_initialized_ = false;
       }
+      AegisRemoveRuntimeSession(runtime_session_paths_);
       std::lock_guard lock(mutex_);
       startup_error_ = error.what();
       cv_.notify_all();
@@ -1059,6 +1100,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       if (!request_context_.get()) {
         throw std::runtime_error("failed to create request context");
       }
+      ApplyAegisProductionPreferences(request_context_);
 
       CefBrowserSettings settings;
       settings.windowless_frame_rate = 30;
@@ -1515,6 +1557,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
 
   const BrowserOptions options_;
   const HostPaths paths_;
+  const AegisRuntimeSessionPaths runtime_session_paths_;
   const std::thread::id owner_thread_id_;
   const bool manage_cef_lifecycle_;
 

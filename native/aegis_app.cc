@@ -1,11 +1,13 @@
 #include "aegis_app.h"
 
+#include <cctype>
 #include <cstdlib>
 #include <fstream>
 #include <string>
 
 #include "aegis_client.h"
 #include "aegis_messages.h"
+#include "aegis_state_paths.h"
 #include "build-xcode/generated/aegis_runtime_script.h"
 #if defined(AEGIS_STANDALONE_APP)
 #include "aegis_native_mac.h"
@@ -13,6 +15,7 @@
 #include "include/cef_browser.h"
 #include "include/cef_command_line.h"
 #include "include/cef_parser.h"
+#include "include/cef_preference.h"
 #include "include/cef_process_message.h"
 #include "include/cef_v8.h"
 #include "include/wrapper/cef_helpers.h"
@@ -43,6 +46,31 @@ void AppendDebugLog(const std::string& message) {
 bool IsHeadless(CefRefPtr<CefCommandLine> command_line) {
   return command_line->HasSwitch("headless") ||
          command_line->GetSwitchValue("mode") == "headless";
+}
+
+void ApplyBooleanPreference(CefRefPtr<CefPreferenceManager> manager,
+                            const char* name,
+                            bool value) {
+  if (!manager.get() || !manager->HasPreference(name) ||
+      !manager->CanSetPreference(name)) {
+    return;
+  }
+
+  auto pref_value = CefValue::Create();
+  pref_value->SetBool(value);
+  CefString error;
+  if (!manager->SetPreference(name, pref_value, error)) {
+    AppendDebugLog(std::string("app: failed_to_set_preference ") + name + " " +
+                   error.ToString());
+  }
+}
+
+void ApplyAegisProductionPreferences(CefRefPtr<CefPreferenceManager> manager) {
+  ApplyBooleanPreference(manager, "credentials_enable_service", false);
+  ApplyBooleanPreference(manager, "profile.password_manager_enabled", false);
+  ApplyBooleanPreference(manager, "profile.password_manager_leak_detection", false);
+  ApplyBooleanPreference(manager, "autofill.profile_enabled", false);
+  ApplyBooleanPreference(manager, "autofill.credit_card_enabled", false);
 }
 
 #if defined(AEGIS_STANDALONE_APP)
@@ -122,6 +150,34 @@ std::string QuoteForJson(const std::string& input) {
   }
   out.push_back('"');
   return out;
+}
+
+std::string NormalizeEvalCode(std::string code) {
+  auto trim = [](std::string* value) {
+    std::size_t start = 0;
+    while (start < value->size() &&
+           std::isspace(static_cast<unsigned char>((*value)[start])) != 0) {
+      ++start;
+    }
+    std::size_t end = value->size();
+    while (end > start &&
+           std::isspace(static_cast<unsigned char>((*value)[end - 1])) != 0) {
+      --end;
+    }
+    *value = value->substr(start, end - start);
+  };
+
+  trim(&code);
+  constexpr char kReturnPrefix[] = "return ";
+  if (code.rfind(kReturnPrefix, 0) == 0) {
+    code.erase(0, sizeof(kReturnPrefix) - 1);
+    trim(&code);
+    if (!code.empty() && code.back() == ';') {
+      code.pop_back();
+      trim(&code);
+    }
+  }
+  return code;
 }
 
 bool EvalToString(CefRefPtr<CefFrame> frame,
@@ -366,7 +422,7 @@ bool DispatchRendererOperation(const std::string& op,
         std::string command_result;
 
         if (type == "eval") {
-          const auto code = command->GetString("code").ToString();
+          const auto code = NormalizeEvalCode(command->GetString("code").ToString());
           std::string value_json;
           std::string command_error;
           if (EvalToJson(frame, code, &value_json, &command_error)) {
@@ -459,7 +515,11 @@ AegisApp::AegisApp(bool launch_browser_on_context_initialized,
                    std::string startup_url)
     : launch_browser_on_context_initialized_(launch_browser_on_context_initialized),
       startup_url_(startup_url.empty() ? kBootstrapUrl : std::move(startup_url)),
-      pending_startup_url_(startup_url_) {}
+      pending_startup_url_(startup_url_) {
+#if defined(AEGIS_STANDALONE_APP)
+  runtime_session_paths_ = AegisCreateRuntimeSessionPaths("app");
+#endif
+}
 
 void AegisApp::OnBeforeCommandLineProcessing(
     const CefString& process_type,
@@ -481,6 +541,7 @@ void AegisApp::OnBeforeCommandLineProcessing(
   command_line->AppendSwitch("disable-search-geolocation-disclosure");
   command_line->AppendSwitch("no-default-browser-check");
   command_line->AppendSwitch("no-first-run");
+  command_line->AppendSwitch("disable-sync");
   command_line->AppendSwitchWithValue("disable-features",
                                       "LocationProviderManager,NewMacNotificationAPI");
 
@@ -537,6 +598,16 @@ void AegisApp::CreateHeadfulBrowser(const std::string& url) {
 #if !defined(AEGIS_STANDALONE_APP)
   (void)url;
 #else
+  if (!request_context_) {
+    CefRequestContextSettings request_context_settings;
+    request_context_ = CefRequestContext::CreateContext(request_context_settings, nullptr);
+  }
+  if (!request_context_) {
+    AppendDebugLog("app: failed to create request context");
+    return;
+  }
+  ApplyAegisProductionPreferences(request_context_);
+
   CefBrowserSettings settings;
   settings.windowless_frame_rate = 30;
 
@@ -547,7 +618,7 @@ void AegisApp::CreateHeadfulBrowser(const std::string& url) {
   window_info.runtime_style = CEF_RUNTIME_STYLE_ALLOY;
 
   if (!CefBrowserHost::CreateBrowser(window_info, client, url, settings, nullptr,
-                                     nullptr)) {
+                                     request_context_)) {
     AppendDebugLog("app: failed to create headful browser");
   }
 #endif
@@ -556,6 +627,7 @@ void AegisApp::CreateHeadfulBrowser(const std::string& url) {
 void AegisApp::OnContextInitialized() {
   CEF_REQUIRE_UI_THREAD();
   AppendDebugLog("app: on_context_initialized");
+  ApplyAegisProductionPreferences(CefPreferenceManager::GetGlobalPreferenceManager());
   if (!launch_browser_on_context_initialized_) {
     return;
   }
@@ -572,10 +644,19 @@ void AegisApp::OnContextInitialized() {
   CefRefPtr<AegisClient> client(new AegisClient(headless, this));
 
   if (headless) {
+    if (!request_context_) {
+      CefRequestContextSettings request_context_settings;
+      request_context_ = CefRequestContext::CreateContext(request_context_settings, nullptr);
+    }
+    if (!request_context_) {
+      AppendDebugLog("app: failed to create headless request context");
+      return;
+    }
+    ApplyAegisProductionPreferences(request_context_);
     CefWindowInfo window_info;
     window_info.SetAsWindowless(kNullWindowHandle);
     CefBrowserHost::CreateBrowser(window_info, client, url, settings, nullptr,
-                                  nullptr);
+                                  request_context_);
     return;
   }
   CreateHeadfulBrowser(url);
@@ -698,7 +779,9 @@ void AegisApp::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
   if (primary_browser_ && browser &&
       primary_browser_->GetIdentifier() == browser->GetIdentifier()) {
     primary_browser_ = nullptr;
+    request_context_ = nullptr;
 #if defined(AEGIS_STANDALONE_APP)
+    AegisRemoveRuntimeSession(runtime_session_paths_);
     AegisCloseBrowserHostWindow();
     CefQuitMessageLoop();
 #endif

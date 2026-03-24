@@ -41,14 +41,13 @@ Global flags:
 Production state model:
 
 - Chromium browser profiles are ephemeral and not a persistence API
+- Chromium credential storage and autofill persistence are disabled in the runtime
 - Aegis-owned state lives under `~/.aegis` by default, or `$AEGIS_HOME` if set
 - session continuity goes through `GET /session`, `POST /session`, `POST /session/save`, and `POST /session/load`
 - the active profile persists to `~/.aegis/profiles/<profile>/session.json`
 - concern-specific local settings belong in `~/.aegis/settings/*.json`
 - traces go through `POST /trace/enable`
 - if `--start-url` is omitted, the runtime boots into a local no-network bootstrap page
-
-On macOS, runtime-backed CLI commands are re-execed through the bundled app path automatically.
 
 For local production-like use, the canonical path is one installed release app at
 `~/Applications/Aegis.app` plus its bundled CLI at

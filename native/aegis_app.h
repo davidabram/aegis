@@ -4,7 +4,9 @@
 #include <string>
 
 #include "aegis_client.h"
+#include "aegis_state_paths.h"
 #include "include/cef_app.h"
+#include "include/cef_request_context.h"
 #include "include/cef_render_process_handler.h"
 
 class AegisApp : public CefApp,
@@ -48,6 +50,10 @@ class AegisApp : public CefApp,
                      const CefString& title) override;
   void OnBeforeClose(CefRefPtr<CefBrowser> browser) override;
 
+  const AegisRuntimeSessionPaths& runtime_session_paths() const {
+    return runtime_session_paths_;
+  }
+
  private:
   void CreateHeadfulBrowser(const std::string& url);
 
@@ -55,6 +61,8 @@ class AegisApp : public CefApp,
   CefRefPtr<CefBrowser> primary_browser_;
   std::string startup_url_;
   std::string pending_startup_url_;
+  AegisRuntimeSessionPaths runtime_session_paths_;
+  CefRefPtr<CefRequestContext> request_context_;
 
   IMPLEMENT_REFCOUNTING(AegisApp);
 };

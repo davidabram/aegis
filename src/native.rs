@@ -210,74 +210,6 @@ pub fn artifact_for_scheme(
 }
 
 #[cfg(target_os = "macos")]
-pub fn is_bundle_executable(path: &Path) -> bool {
-    let Some(macos_dir) = path.parent() else {
-        return false;
-    };
-    if macos_dir.file_name().and_then(|name| name.to_str()) != Some("MacOS") {
-        return false;
-    }
-
-    let Some(contents_dir) = macos_dir.parent() else {
-        return false;
-    };
-    if contents_dir.file_name().and_then(|name| name.to_str()) != Some("Contents") {
-        return false;
-    }
-
-    contents_dir
-        .parent()
-        .and_then(|app| app.extension())
-        .and_then(|ext| ext.to_str())
-        == Some("app")
-}
-
-#[cfg(target_os = "macos")]
-pub fn prepare_bundled_cli(
-    _root: impl AsRef<Path>,
-    source_executable: impl AsRef<Path>,
-) -> Result<PathBuf, AegisError> {
-    let app_bundle = installed_app_bundle().ok_or_else(|| {
-        AegisError::Bridge(
-            "canonical app bundle is not installed at ~/Applications/Aegis.app. Run `aegis native install` first."
-                .into(),
-        )
-    })?;
-    if !app_bundle.exists() {
-        return Err(AegisError::Bridge(
-            format!(
-                "canonical app bundle not found at {}. Run `aegis native install` first.",
-                app_bundle.display()
-            ),
-        ));
-    }
-
-    let target = app_bundle
-        .join("Contents")
-        .join("MacOS")
-        .join(DEFAULT_BUNDLED_CLI_NAME);
-    let source = source_executable.as_ref();
-
-    if target.exists() {
-        let same_file = fs::canonicalize(&target).ok() == fs::canonicalize(source).ok();
-        if !same_file {
-            fs::remove_file(&target)?;
-        }
-    }
-
-    if !target.exists() {
-        fs::copy(source, &target)?;
-        let mode = fs::metadata(source)?.permissions().mode();
-        fs::set_permissions(&target, fs::Permissions::from_mode(mode))?;
-    }
-
-    clear_quarantine_attribute(&app_bundle);
-    ad_hoc_sign_bundle(&app_bundle)?;
-
-    Ok(target)
-}
-
-#[cfg(target_os = "macos")]
 fn preferred_app_bundle(root: &Path) -> PathBuf {
     installed_app_bundle().unwrap_or_else(|| root.join(DEFAULT_APP_BUNDLE_PATH))
 }
@@ -375,21 +307,4 @@ fn apple_arch() -> &'static str {
 
 fn path_encoding_error() -> AegisError {
     AegisError::Bridge("path is not valid utf-8".into())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::is_bundle_executable;
-    use std::path::Path;
-
-    #[test]
-    fn detects_bundle_executable_paths() {
-        assert!(is_bundle_executable(Path::new(
-            "/tmp/aegis_native.app/Contents/MacOS/aegis_cli"
-        )));
-        assert!(!is_bundle_executable(Path::new(
-            "/tmp/aegis_native/Contents/MacOS/aegis_cli"
-        )));
-        assert!(!is_bundle_executable(Path::new("/tmp/aegis_cli")));
-    }
 }

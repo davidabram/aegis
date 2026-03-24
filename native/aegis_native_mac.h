@@ -8,6 +8,7 @@
 
 std::string AegisStandaloneRootCachePath();
 std::string AegisStandaloneCachePath();
+void AegisInstallModalAlertSuppression();
 void AegisInitializeBrowserHostApplication();
 CefWindowHandle AegisCreateBrowserHostView(const std::string& title,
                                            int width,

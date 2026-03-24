@@ -46,6 +46,7 @@ Local release rule:
 Runtime state rules:
 
 - Chromium browser profiles are not a persistence API
+- Chromium credential storage and autofill persistence are disabled in the production runtime
 - persistent agent state lives under `~/.aegis` by default, or `$AEGIS_HOME` if set
 - session persistence goes through `GET /session`, `POST /session`, `POST /session/save`, and `POST /session/load`
 - `--profile <name>` selects `~/.aegis/profiles/<name>/session.json`
@@ -165,6 +166,9 @@ Supported command types:
 - `click`
 - `set_value`
 - `scroll`
+
+`eval.code` should be a JavaScript expression such as `document.title`.
+Aegis also normalizes a leading `return ...;` if you accidentally send one.
 
 Execution model:
 

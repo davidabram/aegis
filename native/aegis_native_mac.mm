@@ -41,27 +41,6 @@
 }
 @end
 
-// ─── Modal alert suppression ─────────────────────────────────────────────────
-
-@interface NSAlert (AegisSuppression)
-- (NSModalResponse)aegis_runModal;
-@end
-
-@implementation NSAlert (AegisSuppression)
-- (NSModalResponse)aegis_runModal {
-  return NSModalResponseCancel;
-}
-@end
-
-static void InstallModalAlertSuppression(void) {
-  static dispatch_once_t once_token;
-  dispatch_once(&once_token, ^{
-    Method original = class_getInstanceMethod([NSAlert class], @selector(runModal));
-    Method replacement = class_getInstanceMethod([NSAlert class], @selector(aegis_runModal));
-    method_exchangeImplementations(original, replacement);
-  });
-}
-
 // ═══════════════════════════════════════════════════════════════════════════════
 // ENTRY POINT
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -148,6 +127,7 @@ int main(int argc, char* argv[]) {
     settings.external_message_pump = embedded_command_mode;
 
     CefRefPtr<AegisApp> app(new AegisApp(!embedded_command_mode, startup_url));
+    CefString(&settings.root_cache_path) = app->runtime_session_paths().root_cache_path.string();
     append_debug("main: before CefExecuteProcess");
     const int subprocess_exit_code = CefExecuteProcess(main_args, app.get(), nullptr);
     append_debug("main: after CefExecuteProcess=" + std::to_string(subprocess_exit_code));
@@ -164,7 +144,7 @@ int main(int argc, char* argv[]) {
 
     if (embedded_command_mode && !headful_mode) {
       [NSApp setActivationPolicy:NSApplicationActivationPolicyProhibited];
-      InstallModalAlertSuppression();
+      AegisInstallModalAlertSuppression();
       append_debug("main: activation policy configured");
     } else if (!embedded_command_mode) {
       [NSApp activateIgnoringOtherApps:YES];

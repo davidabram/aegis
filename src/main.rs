@@ -1,15 +1,9 @@
-#[cfg(target_os = "macos")]
-use std::os::unix::process::CommandExt;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::path::PathBuf;
-use std::process::Command as ProcessCommand;
 
 use aegis::api::server;
-use aegis::{
-    BrowserConfig, BrowserMode, NativeConfiguration, build_xcode, configure_xcode, native,
-    replay_trace,
-};
+use aegis::{BrowserConfig, BrowserMode, NativeConfiguration, build_xcode, configure_xcode, native, replay_trace};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -79,7 +73,6 @@ enum NativeConfigurationArg {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let workspace_root = resolve_workspace_root()?;
-    maybe_reexec_runtime_command_from_bundle(&cli, &workspace_root)?;
     let command = resolved_command(&cli);
     let browser_config = BrowserConfig {
         mode: match effective_mode(&cli) {
@@ -157,45 +150,6 @@ fn effective_mode(cli: &Cli) -> BrowserModeArg {
 
 fn mode_flag_was_set() -> bool {
     std::env::args_os().any(|arg| arg == "--mode")
-}
-
-#[cfg(target_os = "macos")]
-fn maybe_reexec_runtime_command_from_bundle(
-    cli: &Cli,
-    workspace_root: &Path,
-) -> Result<(), Box<dyn std::error::Error>> {
-    if std::env::var_os("AEGIS_BUNDLED_CLI").is_some() || !command_requires_runtime(&cli.command) {
-        return Ok(());
-    }
-
-    let current_exe = std::env::current_exe()?;
-    if native::is_bundle_executable(&current_exe) {
-        return Ok(());
-    }
-
-    let bundled_cli = native::prepare_bundled_cli(workspace_root, &current_exe)?;
-    let mut command = ProcessCommand::new(&bundled_cli);
-    command.current_dir(std::env::current_dir()?);
-    command.env("AEGIS_BUNDLED_CLI", "1");
-    command.args(std::env::args_os().skip(1));
-    let error = command.exec();
-    Err(Box::new(error))
-}
-
-#[cfg(not(target_os = "macos"))]
-fn maybe_reexec_runtime_command_from_bundle(
-    _cli: &Cli,
-    _workspace_root: &Path,
-) -> Result<(), Box<dyn std::error::Error>> {
-    Ok(())
-}
-
-fn command_requires_runtime(command: &Option<Commands>) -> bool {
-    match command {
-        None => true,
-        Some(Commands::Serve { .. }) => true,
-        Some(_) => false,
-    }
 }
 
 fn handle_native_command(

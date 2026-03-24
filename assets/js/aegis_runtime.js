@@ -13,14 +13,54 @@
     "name",
     "type",
     "value",
+    "placeholder",
+    "title",
     "href",
     "src",
     "role",
-    "aria-label"
+    "aria-label",
+    "aria-current",
+    "aria-selected"
   ]);
+  const ignoredTags = new Set(["script", "style", "meta", "link", "noscript", "template"]);
+  const semanticTextTags = new Set([
+    "a",
+    "button",
+    "label",
+    "option",
+    "summary",
+    "textarea",
+    "title",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "p",
+    "li",
+    "dt",
+    "dd",
+    "th",
+    "td",
+    "legend"
+  ]);
+  const semanticTextRoles = new Set(["button", "link", "textbox", "searchbox", "option", "tab"]);
+
+  function normalizeText(value) {
+    return String(value || "").replace(/\s+/g, " ").trim();
+  }
+
+  function truncateText(value, maxLength = 200) {
+    return value.length > maxLength ? value.slice(0, maxLength) : value;
+  }
+
+  function isIgnoredNode(node) {
+    return !!node && node.nodeType === Node.ELEMENT_NODE && ignoredTags.has(node.tagName.toLowerCase());
+  }
 
   function assignId(node) {
-    if (!node || node.nodeType !== Node.ELEMENT_NODE) {
+    if (!node || node.nodeType !== Node.ELEMENT_NODE || isIgnoredNode(node)) {
       return null;
     }
     let id = idByNode.get(node);
@@ -30,6 +70,43 @@
       nodeById.set(id, node);
     }
     return id;
+  }
+
+  function readNodeText(node, attrs) {
+    if (!node || node.nodeType !== Node.ELEMENT_NODE || isIgnoredNode(node)) {
+      return null;
+    }
+
+    const tag = node.tagName.toLowerCase();
+    const role = (attrs.role || "").toLowerCase();
+    let text = "";
+
+    if (node instanceof HTMLInputElement) {
+      text = node.value || attrs.placeholder || attrs["aria-label"] || attrs.title || "";
+    } else if (node instanceof HTMLTextAreaElement || node instanceof HTMLSelectElement) {
+      text = node.value || attrs.placeholder || attrs["aria-label"] || attrs.title || "";
+    } else if (
+      semanticTextTags.has(tag) ||
+      semanticTextRoles.has(role) ||
+      node.children.length === 0
+    ) {
+      text = node.innerText || node.textContent || "";
+    }
+
+    text = normalizeText(text);
+    if (!text) {
+      text = normalizeText(
+        attrs["aria-label"] || attrs.title || attrs.placeholder || attrs.value || ""
+      );
+    }
+    return text ? truncateText(text) : null;
+  }
+
+  function elementValue(node) {
+    if (node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement || node instanceof HTMLSelectElement) {
+      return node.value;
+    }
+    return null;
   }
 
   function serializeNode(node) {
@@ -44,6 +121,10 @@
         attrs[attr.name] = attr.value;
       }
     }
+    const liveValue = elementValue(node);
+    if (liveValue != null) {
+      attrs.value = liveValue;
+    }
 
     const children = [];
     for (const child of Array.from(node.children || [])) {
@@ -57,7 +138,7 @@
       id,
       tag: node.tagName.toLowerCase(),
       attrs,
-      text: node.children.length === 0 ? node.textContent : null,
+      text: readNodeText(node, attrs),
       children
     };
   }
@@ -97,7 +178,7 @@
     const walker = document.createTreeWalker(document.documentElement, NodeFilter.SHOW_ELEMENT);
     let current = walker.currentNode;
     while (current) {
-      const serialized = serializeNode(current);
+      const serialized = isIgnoredNode(current) ? null : serializeNode(current);
       if (serialized) {
         nodes.push(serialized);
       }
@@ -110,26 +191,126 @@
     return nodeById.get(id) || null;
   }
 
+  function scrollIntoViewIfNeeded(el) {
+    if (typeof el.scrollIntoView === "function") {
+      el.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
+    }
+  }
+
+  function focusIfPossible(el) {
+    if (typeof el.focus === "function") {
+      el.focus({ preventScroll: true });
+    }
+  }
+
+  function resolveActionTarget(el) {
+    if (el instanceof HTMLLabelElement && el.control) {
+      return el.control;
+    }
+    return el;
+  }
+
+  function dispatchMouseLikeEvent(el, type) {
+    el.dispatchEvent(
+      new MouseEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        view: window,
+        button: 0,
+        buttons: 1
+      })
+    );
+  }
+
+  function dispatchPointerLikeEvent(el, type) {
+    if (typeof PointerEvent !== "function") {
+      return;
+    }
+    el.dispatchEvent(
+      new PointerEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        pointerId: 1,
+        pointerType: "mouse",
+        isPrimary: true,
+        button: 0,
+        buttons: 1
+      })
+    );
+  }
+
   function click(id) {
-    const el = findById(id);
-    if (!el) {
+    const original = findById(id);
+    if (!original) {
       throw new Error(`node ${id} not found`);
     }
+    const el = resolveActionTarget(original);
+    scrollIntoViewIfNeeded(el);
+    focusIfPossible(el);
+    dispatchPointerLikeEvent(el, "pointerdown");
+    dispatchMouseLikeEvent(el, "mousedown");
+    dispatchPointerLikeEvent(el, "pointerup");
+    dispatchMouseLikeEvent(el, "mouseup");
     if (typeof el.click === "function") {
       el.click();
-      return { clicked: id };
+    } else {
+      dispatchMouseLikeEvent(el, "click");
     }
-    el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
-    return { clicked: id };
+    return { clicked: id, tag: el.tagName.toLowerCase() };
+  }
+
+  function setNativeElementValue(el, value) {
+    const prototype =
+      el instanceof HTMLInputElement
+        ? HTMLInputElement.prototype
+        : el instanceof HTMLTextAreaElement
+          ? HTMLTextAreaElement.prototype
+          : el instanceof HTMLSelectElement
+            ? HTMLSelectElement.prototype
+            : null;
+    const descriptor = prototype && Object.getOwnPropertyDescriptor(prototype, "value");
+    if (descriptor && typeof descriptor.set === "function") {
+      descriptor.set.call(el, value);
+      return;
+    }
+    el.value = value;
   }
 
   function setValue(id, value) {
-    const el = findById(id);
-    if (!el) {
+    const original = findById(id);
+    if (!original) {
       throw new Error(`node ${id} not found`);
     }
-    el.value = value;
-    el.dispatchEvent(new Event("input", { bubbles: true }));
+    const el = resolveActionTarget(original);
+    scrollIntoViewIfNeeded(el);
+    focusIfPossible(el);
+    const previousValue = "value" in el ? el.value : "";
+
+    if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) {
+      setNativeElementValue(el, value);
+      if (el._valueTracker && typeof el._valueTracker.setValue === "function") {
+        el._valueTracker.setValue(previousValue);
+      }
+    } else if (el.isContentEditable) {
+      el.textContent = value;
+    } else {
+      el.value = value;
+    }
+
+    if (typeof InputEvent === "function") {
+      el.dispatchEvent(
+        new InputEvent("input", {
+          bubbles: true,
+          composed: true,
+          inputType: "insertText",
+          data: String(value)
+        })
+      );
+    } else {
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    }
     el.dispatchEvent(new Event("change", { bubbles: true }));
     return { id, value };
   }
