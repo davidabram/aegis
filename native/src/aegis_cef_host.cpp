@@ -998,7 +998,6 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       settings.windowless_rendering_enabled = true;
       settings.command_line_args_disabled = false;
       settings.log_severity = LOGSEVERITY_DISABLE;
-      CefString(&settings.root_cache_path) = runtime_session_paths_.root_cache_path.string();
 
       if (options_.headless) {
         AegisInstallModalAlertSuppression();

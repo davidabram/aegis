@@ -109,7 +109,6 @@ AegisRuntimeSessionPaths AegisCreateRuntimeSessionPaths(const std::string& scope
 
   return {
       .instance_dir = instance_dir,
-      .root_cache_path = instance_dir,
   };
 }
 

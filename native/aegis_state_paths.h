@@ -6,7 +6,6 @@
 
 struct AegisRuntimeSessionPaths {
   std::filesystem::path instance_dir;
-  std::filesystem::path root_cache_path;
 };
 
 std::filesystem::path AegisStateRoot();

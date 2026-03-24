@@ -127,7 +127,6 @@ int main(int argc, char* argv[]) {
     settings.external_message_pump = embedded_command_mode;
 
     CefRefPtr<AegisApp> app(new AegisApp(!embedded_command_mode, startup_url));
-    CefString(&settings.root_cache_path) = app->runtime_session_paths().root_cache_path.string();
     append_debug("main: before CefExecuteProcess");
     const int subprocess_exit_code = CefExecuteProcess(main_args, app.get(), nullptr);
     append_debug("main: after CefExecuteProcess=" + std::to_string(subprocess_exit_code));
