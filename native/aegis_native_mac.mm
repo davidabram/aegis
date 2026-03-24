@@ -62,45 +62,6 @@ static void InstallModalAlertSuppression(void) {
   });
 }
 
-// ─── JSON helper ─────────────────────────────────────────────────────────────
-
-static std::string ExtractJsonStringValue(const std::string& json,
-                                          const std::string& key) {
-  const auto key_pattern = "\"" + key + "\"";
-  const auto key_pos = json.find(key_pattern);
-  if (key_pos == std::string::npos) {
-    return {};
-  }
-  const auto colon_pos = json.find(':', key_pos + key_pattern.size());
-  if (colon_pos == std::string::npos) {
-    return {};
-  }
-  const auto first_quote = json.find('"', colon_pos + 1);
-  if (first_quote == std::string::npos) {
-    return {};
-  }
-
-  std::string value;
-  bool escaping = false;
-  for (std::size_t index = first_quote + 1; index < json.size(); ++index) {
-    const auto ch = json[index];
-    if (escaping) {
-      value.push_back(ch);
-      escaping = false;
-      continue;
-    }
-    if (ch == '\\') {
-      escaping = true;
-      continue;
-    }
-    if (ch == '"') {
-      break;
-    }
-    value.push_back(ch);
-  }
-  return value;
-}
-
 std::filesystem::path StandaloneSupportDir() {
   NSArray<NSURL*>* urls = [[NSFileManager defaultManager]
       URLsForDirectory:NSApplicationSupportDirectory
@@ -215,18 +176,6 @@ int main(int argc, char* argv[]) {
       const auto cache_path = AegisStandaloneCachePath();
       CefString(&settings.root_cache_path) = root_cache_path;
       CefString(&settings.cache_path) = cache_path;
-    } else if (!config_path.empty()) {
-      std::ifstream config_input(config_path, std::ios::binary);
-      if (config_input.is_open()) {
-        const std::string config_json((std::istreambuf_iterator<char>(config_input)),
-                                      std::istreambuf_iterator<char>());
-        const auto user_data_dir = ExtractJsonStringValue(config_json, "user_data_dir");
-        if (!user_data_dir.empty()) {
-          CefString(&settings.cache_path) = user_data_dir;
-          CefString(&settings.root_cache_path) = user_data_dir;
-          append_debug("main: configured cache path " + user_data_dir);
-        }
-      }
     }
 
     CefRefPtr<AegisApp> app(new AegisApp(!embedded_command_mode, startup_url));

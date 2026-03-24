@@ -18,6 +18,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <unistd.h>
 #include <utility>
 #include <vector>
 
@@ -131,8 +132,27 @@ std::filesystem::path HostRootCacheDir() {
   return HostSupportDir() / "agent-runtime";
 }
 
-std::filesystem::path HostDefaultProfileDir() {
-  return HostRootCacheDir() / "default-profile";
+struct HostRuntimePaths {
+  std::filesystem::path root_cache_dir;
+  std::filesystem::path profile_dir;
+};
+
+std::string HostRuntimeInstanceId() {
+  const auto now = std::chrono::system_clock::now().time_since_epoch();
+  const auto nanos =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(now).count();
+  return std::to_string(static_cast<long long>(::getpid())) + "-" +
+         std::to_string(static_cast<long long>(nanos));
+}
+
+HostRuntimePaths CreateHostRuntimePaths() {
+  const auto instance_root = HostRootCacheDir() / "instances" / HostRuntimeInstanceId();
+  const auto profile_dir = instance_root / "profile";
+  std::filesystem::create_directories(profile_dir);
+  return {
+      .root_cache_dir = instance_root,
+      .profile_dir = profile_dir,
+  };
 }
 
 std::filesystem::path DetectAppBundle(const std::filesystem::path& anchor) {
@@ -195,7 +215,6 @@ HostPaths ResolveHostPaths() {
 struct BrowserOptions {
   bool headless = true;
   std::string start_url = kBootstrapUrl;
-  std::string user_data_dir;
 };
 
 BrowserOptions ParseBrowserOptions(const std::vector<std::uint8_t>& bytes) {
@@ -300,8 +319,6 @@ BrowserOptions ParseBrowserOptions(const std::vector<std::uint8_t>& bytes) {
         if (!value.empty()) {
           options.start_url = value;
         }
-      } else if (key == "user_data_dir") {
-        options.user_data_dir = value;
       }
     } else if (json.compare(index, 4, "null") == 0) {
       index += 4;
@@ -464,6 +481,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
   explicit AegisCefHost(BrowserOptions options, bool manage_cef_lifecycle = true)
       : options_(std::move(options)),
         paths_(ResolveHostPaths()),
+        runtime_paths_(CreateHostRuntimePaths()),
         owner_thread_id_(std::this_thread::get_id()),
         manage_cef_lifecycle_(manage_cef_lifecycle) {
     if (pthread_main_np() == 0) {
@@ -895,14 +913,10 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
         AegisInitializeBrowserHostApplication();
       }
 
-      const auto cache_path = options_.user_data_dir.empty()
-                                  ? HostDefaultProfileDir()
-                                  : std::filesystem::path(options_.user_data_dir);
-      const auto root_cache_path = HostRootCacheDir();
-      std::filesystem::create_directories(cache_path);
-      std::filesystem::create_directories(root_cache_path);
-      CefString(&settings.cache_path) = cache_path.string();
-      CefString(&settings.root_cache_path) = root_cache_path.string();
+      CefString(&settings.cache_path) = runtime_paths_.profile_dir.string();
+      CefString(&settings.root_cache_path) = runtime_paths_.root_cache_dir.string();
+      AppendDebugLog("host: runtime root_cache_path=" + runtime_paths_.root_cache_dir.string());
+      AppendDebugLog("host: runtime cache_path=" + runtime_paths_.profile_dir.string());
 
       CefString(&settings.browser_subprocess_path) = paths_.helper_executable.string();
       CefString(&settings.framework_dir_path) = paths_.framework_dir.string();
@@ -985,12 +999,8 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       CEF_REQUIRE_UI_THREAD();
       AppendDebugLog("host: create_browser_on_ui_thread");
 
-      const auto cache_path = options_.user_data_dir.empty()
-                                  ? HostDefaultProfileDir()
-                                  : std::filesystem::path(options_.user_data_dir);
-      std::filesystem::create_directories(cache_path);
       CefRequestContextSettings request_context_settings;
-      CefString(&request_context_settings.cache_path) = cache_path.string();
+      CefString(&request_context_settings.cache_path) = runtime_paths_.profile_dir.string();
       request_context_settings.persist_session_cookies = 1;
       request_context_ = CefRequestContext::CreateContext(request_context_settings, nullptr);
       if (!request_context_.get()) {
@@ -1296,6 +1306,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
 
   const BrowserOptions options_;
   const HostPaths paths_;
+  const HostRuntimePaths runtime_paths_;
   const std::thread::id owner_thread_id_;
   const bool manage_cef_lifecycle_;
 

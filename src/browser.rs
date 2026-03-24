@@ -13,8 +13,6 @@ pub struct BrowserConfig {
     pub mode: BrowserMode,
     #[serde(default)]
     pub start_url: Option<String>,
-    #[serde(default)]
-    pub user_data_dir: Option<String>,
 }
 
 impl Default for BrowserConfig {
@@ -22,7 +20,6 @@ impl Default for BrowserConfig {
         Self {
             mode: BrowserMode::Headless,
             start_url: None,
-            user_data_dir: None,
         }
     }
 }

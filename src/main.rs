@@ -22,8 +22,6 @@ struct Cli {
     mode: BrowserModeArg,
     #[arg(long, global = true)]
     start_url: Option<String>,
-    #[arg(long, global = true)]
-    user_data_dir: Option<String>,
     #[command(subcommand)]
     command: Commands,
 }
@@ -84,7 +82,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             BrowserModeArg::Headful => BrowserMode::Headful,
         },
         start_url: cli.start_url.clone(),
-        user_data_dir: cli.user_data_dir.clone(),
     };
 
     match cli.command {

@@ -110,6 +110,7 @@ Then drive the runtime over:
 Performance note:
 - `POST /navigate` returns a full DOM snapshot
 - `POST /execute` can omit the snapshot for low-latency commands like `eval` and `scroll`, with incremental state flowing through runtime events
+- runtime browser profiles are per-instance; session persistence goes through the `/session` API
 
 ## Native Browser Engine
 

@@ -34,8 +34,13 @@ Global flags:
 
 - `--mode headless|headful`
 - `--start-url <url>`
-- `--user-data-dir <path>`
 - `--host-lib <path>`
+
+Production state model:
+
+- runtime browser profiles are instance-local and not a persistence API
+- session continuity goes through `GET/POST /session`
+- traces go through `POST /trace/enable`
 
 On macOS, runtime-backed CLI commands are re-execed through the bundled app path automatically.
 

@@ -158,7 +158,6 @@ fn trace_recorder_persists_batches() {
         BrowserConfig {
             mode: BrowserMode::Headless,
             start_url: None,
-            user_data_dir: None,
         },
     );
     recorder.set_initial_session(SessionState::default());
@@ -202,7 +201,6 @@ fn replay_trace_rebuilds_final_state() {
         BrowserConfig {
             mode: BrowserMode::Headful,
             start_url: Some("https://example.com".into()),
-            user_data_dir: Some("/tmp/aegis".into()),
         },
     );
     recorder.record_batch(
@@ -250,7 +248,6 @@ fn replay_trace_retains_last_non_null_snapshot() {
         BrowserConfig {
             mode: BrowserMode::Headful,
             start_url: Some("https://example.com".into()),
-            user_data_dir: Some("/tmp/aegis".into()),
         },
     );
     recorder.record_batch(
@@ -300,7 +297,6 @@ fn browser_config_serializes_mode() {
     let json = serde_json::to_string(&BrowserConfig {
         mode: BrowserMode::Headful,
         start_url: None,
-        user_data_dir: None,
     })
     .expect("config serializes");
 
