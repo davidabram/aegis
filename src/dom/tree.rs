@@ -35,6 +35,7 @@ impl DomTree {
                     tag,
                     attrs,
                     text,
+                    semantic,
                     children,
                 } => {
                     self.nodes.insert(
@@ -44,6 +45,7 @@ impl DomTree {
                             tag: tag.clone(),
                             attrs: attrs.clone(),
                             text: text.clone(),
+                            semantic: semantic.clone(),
                             children: children.clone(),
                         },
                     );

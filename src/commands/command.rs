@@ -4,10 +4,53 @@ use serde_json::Value;
 pub type NodeId = u64;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CommandMatcher {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placeholder: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub href_contains: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actionable: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum CommandTarget {
+    Id {
+        id: NodeId,
+    },
+    Match {
+        #[serde(rename = "match")]
+        matcher: CommandMatcher,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Command {
-    Click { id: NodeId },
-    SetValue { id: NodeId, value: String },
+    Click {
+        #[serde(flatten)]
+        target: CommandTarget,
+    },
+    SetValue {
+        #[serde(flatten)]
+        target: CommandTarget,
+        value: String,
+    },
     Scroll { x: i64, y: i64 },
     Eval { code: String },
 }

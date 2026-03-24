@@ -233,11 +233,59 @@ curl -X POST http://127.0.0.1:7878/execute \
   }'
 ```
 
+Canonical targeting rule:
+
+- prefer semantic `match` targets for `click` and `set_value`
+- use raw node `id` only for short-lived follow-up actions against a freshly materialized DOM
+- on reactive pages, node ids are not a stable long-term contract
+
+Matcher example:
+
+```bash
+curl -X POST http://127.0.0.1:7878/execute \
+  -H 'content-type: application/json' \
+  -d '{
+    "commands": [
+      {
+        "type": "set_value",
+        "match": {
+          "control_type": "searchbox",
+          "name": "Search with DuckDuckGo",
+          "actionable": true
+        },
+        "value": "browser automation"
+      },
+      {
+        "type": "click",
+        "match": {
+          "control_type": "submit",
+          "name": "Search",
+          "actionable": true
+        }
+      }
+    ]
+  }'
+```
+
+Supported matcher fields:
+
+- `role`
+- `name`
+- `label`
+- `control_type`
+- `tag`
+- `text`
+- `placeholder`
+- `href_contains`
+- `actionable`
+- `disabled`
+
 Notes:
 - `navigate` returns quickly with ordered navigation/events and invalidates the cached DOM tree
-- `GET /dom` or a node-ID command such as `click` / `set_value` repopulates the DOM snapshot on demand
+- `GET /dom` or a DOM-targeting command such as `click` / `set_value` repopulates the DOM snapshot on demand
 - `execute` may return `"snapshot": null` for low-latency commands such as `eval` and `scroll`
 - agents should treat the event stream as the incremental source of truth between full snapshots
+- the most reliable loop on live sites is `navigate -> /dom -> execute(match...)`
 
 ### Snapshot DOM
 

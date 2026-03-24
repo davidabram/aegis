@@ -1,8 +1,8 @@
 use aegis::{
-    BatchRequest, BrowserConfig, BrowserMode, Command, Cookie, NetworkOverride, RuntimeEvent,
-    SessionState, StorageArea, TraceRecorder,
+    BatchRequest, BrowserConfig, BrowserMode, Command, CommandMatcher, CommandTarget, Cookie,
+    NetworkOverride, RuntimeEvent, SessionState, StorageArea, TraceRecorder,
     dom::diff::{DomMutation, diff_snapshots},
-    dom::node::{DomNode, DomSnapshot},
+    dom::node::{DomNode, DomNodeSemantics, DomSnapshot},
     events::stream::{EventStream, EventType, SequencedEvent},
     replay_trace,
     transport::protocol::{
@@ -18,9 +18,24 @@ fn encodes_batch_request_with_stable_shape() {
     let request = BatchRequest {
         batch_id: 42,
         commands: vec![
-            Command::Click { id: 9 },
+            Command::Click {
+                target: CommandTarget::Id { id: 9 },
+            },
             Command::SetValue {
-                id: 10,
+                target: CommandTarget::Match {
+                    matcher: CommandMatcher {
+                        control_type: Some("searchbox".into()),
+                        name: Some("Search".into()),
+                        role: None,
+                        label: None,
+                        tag: None,
+                        text: None,
+                        placeholder: None,
+                        href_contains: None,
+                        actionable: Some(true),
+                        disabled: Some(false),
+                    },
+                },
                 value: "hello".into(),
             },
             Command::Scroll { x: 0, y: 480 },
@@ -32,6 +47,8 @@ fn encodes_batch_request_with_stable_shape() {
     assert!(encoded.contains("\"type\":\"click\""));
     assert!(encoded.contains("\"type\":\"set_value\""));
     assert!(encoded.contains("\"type\":\"scroll\""));
+    assert!(encoded.contains("\"match\""));
+    assert!(encoded.contains("\"control_type\":\"searchbox\""));
 }
 
 #[test]
@@ -42,6 +59,7 @@ fn diffs_snapshots_for_attribute_changes() {
             tag: "input".into(),
             attrs: HashMap::from([("type".into(), "text".into())]),
             text: None,
+            semantic: None,
             children: vec![],
         }],
     };
@@ -54,6 +72,7 @@ fn diffs_snapshots_for_attribute_changes() {
                 ("value".into(), "value-1".into()),
             ]),
             text: None,
+            semantic: None,
             children: vec![],
         }],
     };
@@ -183,7 +202,9 @@ fn trace_recorder_persists_batches() {
     recorder.record_batch(
         BatchRequest {
             batch_id: 7,
-            commands: vec![Command::Click { id: 3 }],
+            commands: vec![Command::Click {
+                target: CommandTarget::Id { id: 3 },
+            }],
         },
         aegis::BatchResponse {
             batch_id: 7,
@@ -236,6 +257,7 @@ fn replay_trace_rebuilds_final_state() {
                     tag: "html".into(),
                     attrs: HashMap::new(),
                     text: None,
+                    semantic: None,
                     children: vec![],
                 }],
             }),
@@ -255,6 +277,67 @@ fn replay_trace_rebuilds_final_state() {
     assert_eq!(replay.final_snapshot.nodes.len(), 1);
     assert_eq!(replay.events.latest_sequence(), 2);
     assert_eq!(replay.browser_config.mode, BrowserMode::Headful);
+}
+
+#[test]
+fn diffs_snapshots_for_semantic_changes() {
+    let before = DomSnapshot {
+        nodes: vec![DomNode {
+            id: 7,
+            tag: "button".into(),
+            attrs: HashMap::new(),
+            text: Some("Search".into()),
+            semantic: Some(DomNodeSemantics {
+                role: Some("button".into()),
+                name: Some("Search".into()),
+                label: None,
+                control_type: Some("button".into()),
+                actionable: true,
+                disabled: false,
+                actions: vec!["click".into()],
+            }),
+            children: vec![],
+        }],
+    };
+    let after = DomSnapshot {
+        nodes: vec![DomNode {
+            id: 7,
+            tag: "button".into(),
+            attrs: HashMap::new(),
+            text: Some("Search".into()),
+            semantic: Some(DomNodeSemantics {
+                role: Some("button".into()),
+                name: Some("Submit search".into()),
+                label: None,
+                control_type: Some("button".into()),
+                actionable: true,
+                disabled: false,
+                actions: vec!["click".into(), "submit".into()],
+            }),
+            children: vec![],
+        }],
+    };
+
+    let changes = diff_snapshots(&before, &after);
+    assert_eq!(
+        changes,
+        vec![DomMutation::Upsert {
+            id: 7,
+            tag: "button".into(),
+            attrs: HashMap::new(),
+            text: Some("Search".into()),
+            semantic: Some(DomNodeSemantics {
+                role: Some("button".into()),
+                name: Some("Submit search".into()),
+                label: None,
+                control_type: Some("button".into()),
+                actionable: true,
+                disabled: false,
+                actions: vec!["click".into(), "submit".into()],
+            }),
+            children: vec![],
+        }]
+    );
 }
 
 #[test]
@@ -283,6 +366,7 @@ fn replay_trace_retains_last_non_null_snapshot() {
                     tag: "html".into(),
                     attrs: HashMap::new(),
                     text: None,
+                    semantic: None,
                     children: vec![2],
                 }],
             }),
@@ -337,6 +421,7 @@ fn replay_trace_clears_snapshot_on_navigation_without_snapshot() {
                     tag: "html".into(),
                     attrs: HashMap::new(),
                     text: None,
+                    semantic: None,
                     children: vec![2],
                 }],
             }),

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::commands::command::NodeId;
-use crate::dom::node::{DomNode, DomSnapshot};
+use crate::dom::node::{DomNode, DomNodeSemantics, DomSnapshot};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -13,6 +13,8 @@ pub enum DomMutation {
         attrs: std::collections::HashMap<String, String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         text: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        semantic: Option<DomNodeSemantics>,
         #[serde(default)]
         children: Vec<NodeId>,
     },
@@ -64,6 +66,11 @@ pub fn diff_snapshots(previous: &DomSnapshot, next: &DomSnapshot) -> Vec<DomMuta
                     });
                 }
 
+                if previous_node.semantic != next_node.semantic {
+                    changes.push(upsert_mutation(next_node));
+                    continue;
+                }
+
                 if previous_node.children != next_node.children {
                     changes.push(DomMutation::SetChildren {
                         id,
@@ -107,6 +114,7 @@ fn upsert_mutation(node: &DomNode) -> DomMutation {
         tag: node.tag.clone(),
         attrs: node.attrs.clone(),
         text: node.text.clone(),
+        semantic: node.semantic.clone(),
         children: node.children.clone(),
     }
 }

@@ -17,10 +17,19 @@
     "title",
     "href",
     "src",
+    "alt",
+    "for",
+    "autocomplete",
+    "disabled",
+    "readonly",
+    "checked",
     "role",
     "aria-label",
     "aria-current",
-    "aria-selected"
+    "aria-selected",
+    "aria-expanded",
+    "aria-pressed",
+    "aria-describedby"
   ]);
   const ignoredTags = new Set(["script", "style", "meta", "link", "noscript", "template"]);
   const semanticTextTags = new Set([
@@ -109,6 +118,171 @@
     return null;
   }
 
+  function implicitRole(node, attrs) {
+    if (!node || node.nodeType !== Node.ELEMENT_NODE) {
+      return null;
+    }
+    const tag = node.tagName.toLowerCase();
+    if (attrs.role) {
+      return attrs.role;
+    }
+    if (tag === "a" && attrs.href) return "link";
+    if (tag === "button") return "button";
+    if (tag === "select") return "combobox";
+    if (tag === "textarea") return "textbox";
+    if (tag === "option") return "option";
+    if (tag === "summary") return "button";
+    if (tag === "input") {
+      switch ((attrs.type || "text").toLowerCase()) {
+        case "search":
+          return "searchbox";
+        case "button":
+        case "submit":
+        case "reset":
+        case "image":
+          return "button";
+        case "checkbox":
+          return "checkbox";
+        case "radio":
+          return "radio";
+        case "range":
+          return "slider";
+        default:
+          return "textbox";
+      }
+    }
+    return null;
+  }
+
+  function associatedLabel(node) {
+    if (!node || node.nodeType !== Node.ELEMENT_NODE) {
+      return null;
+    }
+    if (node instanceof HTMLInputElement ||
+        node instanceof HTMLTextAreaElement ||
+        node instanceof HTMLSelectElement) {
+      if (node.labels && node.labels.length > 0) {
+        const text = normalizeText(Array.from(node.labels).map((label) => label.innerText || label.textContent || "").join(" "));
+        if (text) return truncateText(text);
+      }
+    }
+    if (node instanceof HTMLLabelElement) {
+      const text = normalizeText(node.innerText || node.textContent || "");
+      if (text) return truncateText(text);
+    }
+    return null;
+  }
+
+  function accessibleName(node, attrs, text) {
+    const label = associatedLabel(node);
+    const tag = node && node.nodeType === Node.ELEMENT_NODE ? node.tagName.toLowerCase() : "";
+    const name = normalizeText(
+      attrs["aria-label"] ||
+      label ||
+      ((tag === "button" || tag === "input" || tag === "textarea" || tag === "select") ? attrs.title : "") ||
+      ((tag === "button" || tag === "input") ? attrs.value : "") ||
+      text ||
+      attrs.placeholder ||
+      attrs.alt ||
+      attrs.title ||
+      attrs.value ||
+      ""
+    );
+    return name ? truncateText(name) : null;
+  }
+
+  function controlType(node, attrs) {
+    if (!node || node.nodeType !== Node.ELEMENT_NODE) {
+      return null;
+    }
+    const tag = node.tagName.toLowerCase();
+    if (tag === "input") {
+      const type = (attrs.type || "text").toLowerCase();
+      const role = (attrs.role || "").toLowerCase();
+      const searchHint = `${attrs["aria-label"] || ""} ${attrs.placeholder || ""} ${attrs.name || ""}`.toLowerCase();
+      if (type === "hidden") {
+        return "hidden";
+      }
+      if (type === "search") {
+        return "searchbox";
+      }
+      if (type === "submit" || type === "image") {
+        return "submit";
+      }
+      if (role === "combobox" && searchHint.includes("search")) {
+        return "searchbox";
+      }
+      if (role === "combobox") {
+        return "combobox";
+      }
+      return type;
+    }
+    if (tag === "button") {
+      return (attrs.type || "").toLowerCase() === "submit" ? "submit" : "button";
+    }
+    if (tag === "textarea" || tag === "select") {
+      return tag;
+    }
+    if (tag === "a" && attrs.href) {
+      return "link";
+    }
+    return null;
+  }
+
+  function availableActions(node, attrs) {
+    if (!node || node.nodeType !== Node.ELEMENT_NODE) {
+      return [];
+    }
+    const actions = [];
+    const tag = node.tagName.toLowerCase();
+    const type = (attrs.type || "").toLowerCase();
+    const disabled = node.hasAttribute("disabled") || attrs["aria-disabled"] === "true";
+    if (disabled) {
+      return actions;
+    }
+    if (tag === "input" && type === "hidden") {
+      return actions;
+    }
+    if (tag === "a" && attrs.href) {
+      actions.push("click", "open");
+    }
+    if (tag === "button" || (tag === "input" && ["button", "submit", "reset", "checkbox", "radio", "image"].includes(type)) || tag === "summary") {
+      actions.push("click");
+    }
+    if (tag === "input" && ["submit", "image"].includes(type)) {
+      actions.push("submit");
+    }
+    if (tag === "button" && type === "submit") {
+      actions.push("submit");
+    }
+    if (node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement || node instanceof HTMLSelectElement || node.isContentEditable) {
+      actions.push("type");
+    }
+    return Array.from(new Set(actions));
+  }
+
+  function semanticInfo(node, attrs, text) {
+    const role = implicitRole(node, attrs);
+    const label = associatedLabel(node);
+    const name = accessibleName(node, attrs, text);
+    const actions = availableActions(node, attrs);
+    const disabled = !!(node && node.nodeType === Node.ELEMENT_NODE &&
+      (node.hasAttribute("disabled") || attrs["aria-disabled"] === "true"));
+    const control = controlType(node, attrs);
+    if (!role && !label && !name && !control && actions.length === 0 && !disabled) {
+      return null;
+    }
+    return {
+      role,
+      name,
+      label,
+      control_type: control,
+      actionable: control !== "hidden" && actions.length > 0,
+      disabled,
+      actions
+    };
+  }
+
   function serializeNode(node) {
     const id = assignId(node);
     if (id == null) {
@@ -134,11 +308,13 @@
       }
     }
 
+    const text = readNodeText(node, attrs);
     return {
       id,
       tag: node.tagName.toLowerCase(),
       attrs,
-      text: readNodeText(node, attrs),
+      text,
+      semantic: semanticInfo(node, attrs, text),
       children
     };
   }
@@ -191,6 +367,69 @@
     return nodeById.get(id) || null;
   }
 
+  function includesNormalized(actual, expected) {
+    if (!expected) {
+      return true;
+    }
+    const left = normalizeText(actual || "");
+    const right = normalizeText(expected || "");
+    if (!right) {
+      return true;
+    }
+    return left.toLowerCase().includes(right.toLowerCase());
+  }
+
+  function resolveTarget(target) {
+    if (typeof target === "number") {
+      const node = findById(target);
+      if (!node) {
+        throw new Error(`node ${target} not found`);
+      }
+      return { node, targetId: target, matched: false };
+    }
+
+    if (!target || typeof target !== "object") {
+      throw new Error("command target must be a node id or matcher object");
+    }
+
+    const matcher = target;
+    const elements = document.querySelectorAll("*");
+    for (const node of elements) {
+      const attrs = {};
+      for (const attr of Array.from(node.attributes || [])) {
+        if (attrAllowList.has(attr.name)) {
+          attrs[attr.name] = attr.value;
+        }
+      }
+      const liveValue = elementValue(node);
+      if (liveValue != null) {
+        attrs.value = liveValue;
+      }
+      const text = readNodeText(node, attrs);
+      const semantic = semanticInfo(node, attrs, text) || {};
+      const tag = node.tagName ? node.tagName.toLowerCase() : "";
+
+      if (matcher.role && !includesNormalized(semantic.role, matcher.role)) continue;
+      if (matcher.name && !includesNormalized(semantic.name, matcher.name)) continue;
+      if (matcher.label && !includesNormalized(semantic.label, matcher.label)) continue;
+      if (matcher.control_type && !includesNormalized(semantic.control_type, matcher.control_type)) continue;
+      if (matcher.tag && !includesNormalized(tag, matcher.tag)) continue;
+      if (matcher.text && !includesNormalized(text, matcher.text)) continue;
+      if (matcher.placeholder && !includesNormalized(attrs.placeholder, matcher.placeholder)) continue;
+      if (matcher.href_contains && !includesNormalized(attrs.href, matcher.href_contains)) continue;
+      if (typeof matcher.actionable === "boolean" && !!semantic.actionable !== matcher.actionable) continue;
+      if (typeof matcher.disabled === "boolean" && !!semantic.disabled !== matcher.disabled) continue;
+
+      const targetId = assignId(node);
+      if (targetId == null) {
+        continue;
+      }
+      return { node, targetId, matched: true };
+    }
+
+    throw new Error(`no node matched ${JSON.stringify(matcher)}`);
+  }
+
   function scrollIntoViewIfNeeded(el) {
     if (typeof el.scrollIntoView === "function") {
       el.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
@@ -241,24 +480,38 @@
     );
   }
 
-  function click(id) {
-    const original = findById(id);
-    if (!original) {
-      throw new Error(`node ${id} not found`);
-    }
-    const el = resolveActionTarget(original);
+  function click(target) {
+    const resolved = resolveTarget(target);
+    const el = resolveActionTarget(resolved.node);
     scrollIntoViewIfNeeded(el);
     focusIfPossible(el);
+    dispatchPointerLikeEvent(el, "pointerover");
+    dispatchMouseLikeEvent(el, "mouseover");
+    dispatchPointerLikeEvent(el, "pointermove");
+    dispatchMouseLikeEvent(el, "mousemove");
     dispatchPointerLikeEvent(el, "pointerdown");
     dispatchMouseLikeEvent(el, "mousedown");
     dispatchPointerLikeEvent(el, "pointerup");
     dispatchMouseLikeEvent(el, "mouseup");
-    if (typeof el.click === "function") {
+    const type = el instanceof HTMLInputElement || el instanceof HTMLButtonElement
+      ? (el.getAttribute("type") || "").toLowerCase()
+      : "";
+    if ((el instanceof HTMLButtonElement || el instanceof HTMLInputElement) &&
+        (type === "submit" || type === "image") &&
+        el.form &&
+        typeof el.form.requestSubmit === "function") {
+      el.form.requestSubmit(el);
+    } else if (typeof el.click === "function") {
       el.click();
     } else {
       dispatchMouseLikeEvent(el, "click");
     }
-    return { clicked: id, tag: el.tagName.toLowerCase() };
+    return {
+      clicked: resolved.targetId,
+      matched: resolved.matched,
+      tag: el.tagName.toLowerCase(),
+      control_type: type || el.tagName.toLowerCase()
+    };
   }
 
   function setNativeElementValue(el, value) {
@@ -278,12 +531,9 @@
     el.value = value;
   }
 
-  function setValue(id, value) {
-    const original = findById(id);
-    if (!original) {
-      throw new Error(`node ${id} not found`);
-    }
-    const el = resolveActionTarget(original);
+  function setValue(target, value) {
+    const resolved = resolveTarget(target);
+    const el = resolveActionTarget(resolved.node);
     scrollIntoViewIfNeeded(el);
     focusIfPossible(el);
     const previousValue = "value" in el ? el.value : "";
@@ -312,7 +562,7 @@
       el.dispatchEvent(new Event("input", { bubbles: true }));
     }
     el.dispatchEvent(new Event("change", { bubbles: true }));
-    return { id, value };
+    return { id: resolved.targetId, matched: resolved.matched, value };
   }
 
   function scrollToPosition(x, y) {
@@ -327,9 +577,9 @@
       try {
         switch (command.type) {
           case "click":
-            return { ok: true, value: click(command.id) };
+            return { ok: true, value: click(command.match || command.id) };
           case "set_value":
-            return { ok: true, value: setValue(command.id, command.value) };
+            return { ok: true, value: setValue(command.match || command.id, command.value) };
           case "scroll":
             return { ok: true, value: scrollToPosition(command.x, command.y) };
           case "eval":
@@ -347,27 +597,22 @@
     const changes = [];
 
     if (mutation.type === "attributes") {
-      const id = assignId(mutation.target);
-      if (id != null && mutation.attributeName) {
-        changes.push({
-          kind: "set_attr",
-          id,
-          name: mutation.attributeName,
-          value: mutation.target.getAttribute(mutation.attributeName)
-        });
+      if (mutation.target && mutation.target.nodeType === Node.ELEMENT_NODE) {
+        const serialized = serializeNode(mutation.target);
+        if (serialized) {
+          changes.push({ kind: "upsert", ...serialized });
+        }
       }
       return changes;
     }
 
     if (mutation.type === "characterData") {
       const parent = mutation.target.parentElement;
-      const id = assignId(parent);
-      if (id != null) {
-        changes.push({
-          kind: "set_text",
-          id,
-          text: parent.textContent
-        });
+      if (parent) {
+        const serialized = serializeNode(parent);
+        if (serialized) {
+          changes.push({ kind: "upsert", ...serialized });
+        }
       }
       return changes;
     }

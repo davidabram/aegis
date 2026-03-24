@@ -17,6 +17,7 @@ Core capabilities:
 
 - real browser navigation
 - live command execution against the page
+- semantic matcher-based control targeting for reactive sites
 - headless and headful control
 - DOM snapshots
 - ordered runtime events
@@ -53,6 +54,7 @@ Runtime state rules:
 - `~/.aegis/settings/*.json` is the canonical home for concern-specific local settings
 - trace persistence goes through `POST /trace/enable`
 - if `--start-url` is omitted, the runtime boots into a local no-network bootstrap page
+- the canonical control style is semantic `match` targeting for `click` and `set_value`, not long-lived raw DOM ids
 
 ## CLI Surface
 

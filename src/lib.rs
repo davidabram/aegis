@@ -15,7 +15,7 @@ pub mod transport;
 pub use api::server;
 pub use browser::{BrowserConfig, BrowserMode};
 pub use client::AegisClient;
-pub use commands::command::{Command, CommandResult, NodeId};
+pub use commands::command::{Command, CommandMatcher, CommandResult, CommandTarget, NodeId};
 pub use dom::node::{DomNode, DomSnapshot};
 pub use events::stream::{EventStream, EventType, RuntimeEvent, SequencedEvent};
 pub use native::{

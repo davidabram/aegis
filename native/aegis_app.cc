@@ -152,6 +152,28 @@ std::string QuoteForJson(const std::string& input) {
   return out;
 }
 
+bool CommandTargetArgument(CefRefPtr<CefDictionaryValue> command,
+                           std::string* argument,
+                           std::string* error) {
+  if (command->HasKey("match")) {
+    auto matcher = command->GetDictionary("match");
+    if (!matcher.get()) {
+      *error = "command match target must be an object";
+      return false;
+    }
+    auto wrapped = CefValue::Create();
+    wrapped->SetDictionary(matcher->Copy(false));
+    *argument = CefWriteJSON(wrapped, JSON_WRITER_DEFAULT).ToString();
+    return true;
+  }
+  if (command->HasKey("id")) {
+    *argument = std::to_string(command->GetInt("id"));
+    return true;
+  }
+  *error = "command target must include id or match";
+  return false;
+}
+
 std::string NormalizeEvalCode(std::string code) {
   auto trim = [](std::string* value) {
     std::size_t start = 0;
@@ -432,20 +454,26 @@ bool DispatchRendererOperation(const std::string& op,
                 "{\"ok\":false,\"error\":" + QuoteForJson(command_error) + "}";
           }
         } else if (type == "click") {
-          const auto id = std::to_string(command->GetInt("id"));
+          std::string target_argument;
+          if (!CommandTargetArgument(command, &target_argument, error)) {
+            return false;
+          }
           const auto wrapped =
               "(() => { try { return JSON.stringify({ok:true,value:(window.__aegis ? window.__aegis.click(" +
-              id +
+              target_argument +
               ") : null)}); } catch (error) { return JSON.stringify({ok:false,error:String(error && error.message ? error.message : error)}); } })()";
           if (!EvalToString(frame, wrapped, &command_result, error)) {
             return false;
           }
         } else if (type == "set_value") {
-          const auto id = std::to_string(command->GetInt("id"));
+          std::string target_argument;
+          if (!CommandTargetArgument(command, &target_argument, error)) {
+            return false;
+          }
           const auto value_json = QuoteForJavaScript(command->GetString("value").ToString());
           const auto wrapped =
               "(() => { try { return JSON.stringify({ok:true,value:(window.__aegis ? window.__aegis.setValue(" +
-              id + "," + value_json +
+              target_argument + "," + value_json +
               ") : null)}); } catch (error) { return JSON.stringify({ok:false,error:String(error && error.message ? error.message : error)}); } })()";
           if (!EvalToString(frame, wrapped, &command_result, error)) {
             return false;
