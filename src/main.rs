@@ -58,7 +58,7 @@ enum NativeCommands {
     Status,
     Configure,
     Build {
-        #[arg(long, value_enum, default_value = "debug")]
+        #[arg(long, value_enum, default_value = "release")]
         configuration: NativeConfigurationArg,
         #[arg(long)]
         scheme: Option<String>,
@@ -75,7 +75,8 @@ enum NativeConfigurationArg {
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
-    maybe_reexec_runtime_command_from_bundle(&cli, Path::new("."))?;
+    let workspace_root = resolve_workspace_root()?;
+    maybe_reexec_runtime_command_from_bundle(&cli, &workspace_root)?;
     let browser_config = BrowserConfig {
         mode: match cli.mode {
             BrowserModeArg::Headless => BrowserMode::Headless,
@@ -100,7 +101,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Ok(());
         }
         Commands::Native { command } => {
-            handle_native_command(command, Path::new("."))?;
+            handle_native_command(command, &workspace_root)?;
             return Ok(());
         }
         _ => {}
@@ -111,7 +112,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let host_lib = cli
                 .host_lib
                 .clone()
-                .ok_or("`--host-lib` is required for `serve`")?;
+                .unwrap_or_else(|| native::status(&workspace_root).default_host_library);
+            if !host_lib.exists() {
+                return Err(format!(
+                    "host library not found at {}. Run `aegis native build --configuration release --scheme aegis_host` first or pass --host-lib.",
+                    host_lib.display()
+                )
+                .into());
+            }
             server::serve(addr, host_lib, browser_config).await?;
         }
         Commands::Trace { command } => match command {
@@ -121,6 +129,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+fn resolve_workspace_root() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    if let Some(root) = std::env::var_os("AEGIS_WORKSPACE_ROOT") {
+        return Ok(PathBuf::from(root));
+    }
+    Ok(std::env::current_dir()?)
 }
 
 #[cfg(target_os = "macos")]

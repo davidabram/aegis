@@ -1,3 +1,4 @@
+use std::env;
 use std::fs;
 #[cfg(target_os = "macos")]
 use std::os::unix::fs::PermissionsExt;
@@ -12,9 +13,11 @@ const NATIVE_DIR: &str = "native";
 const XCODE_BUILD_DIR: &str = "native/build-xcode";
 const XCODE_PROJECT: &str = "native/build-xcode/aegis_native.xcodeproj";
 const DEFAULT_SCHEME: &str = "aegis_native";
-pub const DEFAULT_APP_BUNDLE_PATH: &str = "native/build-xcode/Debug/aegis_native.app";
+pub const DEFAULT_APP_BUNDLE_PATH: &str = "native/build-xcode/Release/aegis_native.app";
 #[cfg(target_os = "macos")]
 const DEFAULT_BUNDLED_CLI_NAME: &str = "aegis_cli";
+#[cfg(target_os = "macos")]
+const LOCAL_INSTALL_APP_NAME: &str = "Aegis.app";
 const CEF_SDK_DIR: &str =
     "third_party/cef/cef_binary_146.0.6+g68649e2+chromium-146.0.7680.154_macosarm64";
 
@@ -51,9 +54,9 @@ pub fn status(root: impl AsRef<Path>) -> NativeStatus {
     let root = root.as_ref();
     let cef_sdk_root = root.join(CEF_SDK_DIR);
     let xcode_project = root.join(XCODE_PROJECT);
-    let default_app_bundle = root.join(DEFAULT_APP_BUNDLE_PATH);
+    let default_app_bundle = preferred_app_bundle(root);
     let default_app_executable = bundle_executable(&default_app_bundle);
-    let default_host_library = root.join("native/build-xcode/Debug/libaegis_host.dylib");
+    let default_host_library = root.join("native/build-xcode/Release/libaegis_host.dylib");
 
     NativeStatus {
         cef_sdk_present: cef_sdk_root.exists(),
@@ -124,11 +127,35 @@ pub fn build_xcode(
 
 pub fn bundle_executable(bundle: impl AsRef<Path>) -> PathBuf {
     let bundle = bundle.as_ref();
-    let binary_name = bundle
-        .file_stem()
-        .map(|stem| stem.to_string_lossy().into_owned())
-        .unwrap_or_else(|| DEFAULT_SCHEME.to_string());
+    let binary_name = macos_bundle_executable_name(bundle).unwrap_or_else(|| {
+        bundle
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_else(|| DEFAULT_SCHEME.to_string())
+    });
     bundle.join("Contents").join("MacOS").join(binary_name)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_bundle_executable_name(bundle: &Path) -> Option<String> {
+    let plist = bundle.join("Contents").join("Info");
+    let output = Command::new("defaults")
+        .arg("read")
+        .arg(plist)
+        .arg("CFBundleExecutable")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8(output.stdout).ok()?;
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn macos_bundle_executable_name(_bundle: &Path) -> Option<String> {
+    None
 }
 
 pub fn artifact_for_scheme(
@@ -175,9 +202,9 @@ pub fn prepare_bundled_cli(
     source_executable: impl AsRef<Path>,
 ) -> Result<PathBuf, AegisError> {
     let root = root.as_ref();
-    let app_bundle = root.join(DEFAULT_APP_BUNDLE_PATH);
+    let app_bundle = preferred_app_bundle(root);
     if !app_bundle.exists() {
-        build_xcode(root, NativeConfiguration::Debug, None)?;
+        build_xcode(root, NativeConfiguration::Release, None)?;
     }
 
     let target = app_bundle
@@ -199,7 +226,49 @@ pub fn prepare_bundled_cli(
         fs::set_permissions(&target, fs::Permissions::from_mode(mode))?;
     }
 
+    clear_quarantine_attribute(&app_bundle);
+    ad_hoc_sign_bundle(&app_bundle)?;
+
     Ok(target)
+}
+
+#[cfg(target_os = "macos")]
+fn preferred_app_bundle(root: &Path) -> PathBuf {
+    installed_app_bundle().unwrap_or_else(|| root.join(DEFAULT_APP_BUNDLE_PATH))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn preferred_app_bundle(root: &Path) -> PathBuf {
+    root.join(DEFAULT_APP_BUNDLE_PATH)
+}
+
+#[cfg(target_os = "macos")]
+fn installed_app_bundle() -> Option<PathBuf> {
+    let home = env::var_os("HOME")?;
+    let bundle = PathBuf::from(home)
+        .join("Applications")
+        .join(LOCAL_INSTALL_APP_NAME);
+    bundle.exists().then_some(bundle)
+}
+
+#[cfg(target_os = "macos")]
+fn clear_quarantine_attribute(bundle: &Path) {
+    let _ = Command::new("xattr").args(["-cr"]).arg(bundle).output();
+}
+
+#[cfg(target_os = "macos")]
+fn ad_hoc_sign_bundle(bundle: &Path) -> Result<(), AegisError> {
+    run_checked(
+        "codesign",
+        &[
+            "--force",
+            "--deep",
+            "--sign",
+            "-",
+            bundle.to_str().ok_or_else(path_encoding_error)?,
+        ],
+        Path::new("/"),
+    )
 }
 
 fn run_checked(program: &str, args: &[&str], root: &Path) -> Result<(), AegisError> {

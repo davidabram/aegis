@@ -35,6 +35,12 @@ There is one supported runtime model:
 
 There is no production per-command relaunch path.
 
+Local release rule:
+
+- use the release CLI
+- use the release host library
+- prefer the stable installed app at `~/Applications/Aegis.app` when present
+
 Runtime state rules:
 
 - browser profiles are instance-local
@@ -64,7 +70,7 @@ Global runtime flags:
 
 ```bash
 aegis \
-  --host-lib ./native/build-xcode/Debug/libaegis_host.dylib \
+  --host-lib ./native/build-xcode/Release/libaegis_host.dylib \
   --mode headful \
   serve --addr 127.0.0.1:7878
 ```
@@ -232,7 +238,7 @@ The report includes:
 
 Aegis uses a local native host library:
 
-- `native/build-xcode/Debug/libaegis_host.dylib`
+- `native/build-xcode/Release/libaegis_host.dylib`
 
 Native helper commands:
 
@@ -242,6 +248,32 @@ aegis native configure
 aegis native build
 aegis native paths
 ```
+
+Install a stable local release app bundle:
+
+```bash
+./scripts/install_local_release.sh
+```
+
+That installs a locally ad hoc signed app at `~/Applications/Aegis.app`, clears quarantine
+attributes, and gives the runtime a stable local app path without requiring a paid Apple
+Developer account.
+
+## Local Signing Limits
+
+Without a paid Apple Developer account, Aegis can still do a lot locally:
+
+- build release binaries
+- use one stable installed app path
+- ad hoc sign the local app bundle
+- clear quarantine attributes on that local bundle
+
+What local-only setup cannot bypass:
+
+- macOS Automation / Accessibility / similar privacy approvals
+- the benefits of Developer ID signing and notarization
+
+Those system approvals still require one user approval path in macOS.
 
 ## Dependencies
 
