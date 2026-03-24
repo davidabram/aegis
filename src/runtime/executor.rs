@@ -187,10 +187,8 @@ impl AegisRuntime {
 
     fn ensure_runtime_bootstrapped(&mut self, capture_snapshot: bool) -> Result<(), AegisError> {
         if !self.runtime_bootstrapped {
-            let started = std::time::Instant::now();
-            self.bridge.install_runtime()?;
             self.runtime_bootstrapped = true;
-            self.bootstrap_duration_ms = Some(started.elapsed().as_millis() as u64);
+            self.bootstrap_duration_ms = Some(0);
         }
         if capture_snapshot {
             let snapshot = self.bridge.snapshot_dom()?;

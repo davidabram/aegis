@@ -18,7 +18,7 @@ rm -rf "$installed_app"
 cp -R "$release_app" "$installed_app"
 cp "$release_bin" "$installed_app/Contents/MacOS/aegis_cli"
 chmod +x "$installed_app/Contents/MacOS/aegis_cli"
-xattr -cr "$installed_app" || true
+xattr -cr "$installed_app" >/dev/null 2>&1 || true
 codesign --force --deep --sign - "$installed_app"
 
 printf '%s\n' "$installed_app"

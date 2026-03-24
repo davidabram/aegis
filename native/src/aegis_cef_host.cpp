@@ -594,11 +594,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
   }
 
   std::vector<std::uint8_t> InstallRuntime(const std::vector<std::uint8_t>& request) override {
-    auto payload = DecodeEnvelope(MessageKind::InstallRuntime, request);
-    if (payload->GetType() != VTYPE_STRING) {
-      throw std::runtime_error("install runtime payload must be a string");
-    }
-    runtime_script_ = payload->GetString().ToString();
+    static_cast<void>(request);
     EnsureRuntimeInstalled();
     return {};
   }
@@ -883,6 +879,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
         AppendDebugLog("host: lifecycle context_ready");
         std::lock_guard lock(mutex_);
         renderer_ready_ = true;
+        runtime_installed_ = true;
         const auto url = args->GetString(1).ToString();
         if (!url.empty()) {
           current_url_ = url;
@@ -1221,18 +1218,6 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
 
   void EnsureRuntimeInstalled() {
     EnsurePageReady();
-
-    bool needs_install = false;
-    {
-      std::lock_guard lock(mutex_);
-      needs_install = !runtime_script_.empty() && !runtime_installed_;
-    }
-    if (!needs_install) {
-      return;
-    }
-
-    InvokeRenderer(aegis::kOpInstallRuntime, runtime_script_);
-
     std::lock_guard lock(mutex_);
     runtime_installed_ = true;
   }
@@ -1413,7 +1398,6 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
   std::string startup_error_;
   std::string current_url_ = "about:blank";
   int next_request_id_ = 1;
-  std::string runtime_script_;
   std::vector<std::pair<std::string, std::string>> network_overrides_;
   std::vector<std::string> local_events_;
   std::map<int, RendererReply> renderer_replies_;

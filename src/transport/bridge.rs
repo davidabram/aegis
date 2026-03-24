@@ -1,8 +1,6 @@
 use std::ffi::c_void;
-use std::fs;
 use std::ptr::NonNull;
 use std::slice;
-use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -112,7 +110,6 @@ enum BridgeBackend {
 
 pub struct CefBridge {
     backend: BridgeBackend,
-    runtime_script_path: PathBuf,
 }
 
 impl CefBridge {
@@ -121,13 +118,11 @@ impl CefBridge {
             NonNull::new(host).ok_or_else(|| AegisError::Bridge("host handle is null".into()))?;
         Ok(Self {
             backend: BridgeBackend::Dynamic { host, fns },
-            runtime_script_path: PathBuf::from("assets/js/aegis_runtime.js"),
         })
     }
 
     pub fn install_runtime(&mut self) -> Result<(), AegisError> {
-        let script = fs::read_to_string(&self.runtime_script_path)?;
-        let payload = encode_message(MessageKind::InstallRuntime, &script)?;
+        let payload = encode_message(MessageKind::InstallRuntime, &())?;
         let _response = self.invoke_message(MessageKind::InstallRuntime, &payload)?;
         Ok(())
     }

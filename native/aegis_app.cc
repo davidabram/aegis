@@ -6,6 +6,7 @@
 
 #include "aegis_client.h"
 #include "aegis_messages.h"
+#include "aegis_runtime_script.h"
 #if defined(AEGIS_STANDALONE_APP)
 #include "aegis_native_mac.h"
 #endif
@@ -568,10 +569,27 @@ void AegisApp::OnContextInitialized() {
 
 void AegisApp::OnContextCreated(CefRefPtr<CefBrowser>,
                                 CefRefPtr<CefFrame> frame,
-                                CefRefPtr<CefV8Context>) {
+                                CefRefPtr<CefV8Context> context) {
   CEF_REQUIRE_RENDERER_THREAD();
   AppendDebugLog("app: on_context_created");
-  if (!frame.get()) {
+  if (!frame.get() || !frame->IsMain() || !context.get()) {
+    return;
+  }
+
+  if (!context->Enter()) {
+    AppendDebugLog("app: on_context_created failed_enter_context");
+    return;
+  }
+
+  CefRefPtr<CefV8Value> result;
+  CefRefPtr<CefV8Exception> exception;
+  const bool installed =
+      context->Eval(kAegisRuntimeScript, frame->GetURL(), 0, result, exception);
+  context->Exit();
+  if (!installed) {
+    AppendDebugLog(std::string("app: on_context_created runtime_install_failed ") +
+                   (exception.get() ? exception->GetMessage().ToString()
+                                    : std::string("unknown")));
     return;
   }
 
