@@ -240,6 +240,24 @@ void CleanupStaleRuntimeInstances() {
   }
 }
 
+void StartRuntimeCleanupAsync() {
+  static std::once_flag once;
+  std::call_once(once, []() {
+    std::thread([]() {
+      const auto started = std::chrono::steady_clock::now();
+      AppendDebugLog("host: async runtime cleanup begin");
+      CleanupLegacyRuntimeRoot();
+      CleanupStaleRuntimeInstances();
+      const auto elapsed_ms =
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+              std::chrono::steady_clock::now() - started)
+              .count();
+      AppendDebugLog("host: async runtime cleanup complete ms=" +
+                     std::to_string(elapsed_ms));
+    }).detach();
+  });
+}
+
 std::filesystem::path DetectAppBundle(const std::filesystem::path& anchor) {
   for (auto current = anchor; !current.empty(); current = current.parent_path()) {
     if (current.extension() == ".app") {
@@ -573,8 +591,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       throw std::runtime_error("aegis CEF host must be created on the process main thread");
     }
     AppendDebugLog("host: constructed");
-    CleanupLegacyRuntimeRoot();
-    CleanupStaleRuntimeInstances();
+    StartRuntimeCleanupAsync();
     if (manage_cef_lifecycle_) {
       Start();
     } else {
