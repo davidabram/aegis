@@ -330,6 +330,7 @@ bool DispatchRendererOperation(const std::string& op,
     auto request = parsed->GetDictionary();
     auto commands = request->HasKey("commands") ? request->GetList("commands") : CefListValue::Create();
     const int batch_id = request->HasKey("batch_id") ? request->GetInt("batch_id") : 0;
+    bool requires_snapshot = false;
 
     std::string results_json = "[";
     if (commands.get()) {
@@ -344,6 +345,9 @@ bool DispatchRendererOperation(const std::string& op,
         }
 
         const auto type = command->GetString("type").ToString();
+        if (type != "eval" && type != "scroll") {
+          requires_snapshot = true;
+        }
         std::string command_result;
 
         if (type == "eval") {
@@ -397,11 +401,13 @@ bool DispatchRendererOperation(const std::string& op,
     }
     results_json += "]";
 
-    std::string snapshot_json;
-    if (!EvalToString(frame,
-                      "JSON.stringify(window.__aegis ? window.__aegis.snapshot() : {nodes:[]})",
-                      &snapshot_json, error)) {
-      return false;
+    std::string snapshot_json = "null";
+    if (requires_snapshot) {
+      if (!EvalToString(frame,
+                        "JSON.stringify(window.__aegis ? window.__aegis.snapshot() : {nodes:[]})",
+                        &snapshot_json, error)) {
+        return false;
+      }
     }
 
     std::string events_wrapper_json;

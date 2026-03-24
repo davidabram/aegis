@@ -98,7 +98,7 @@ pub struct BatchRequest {
 pub struct BatchResponse {
     pub batch_id: u64,
     pub results: Vec<CommandResult>,
-    pub snapshot: DomSnapshot,
+    pub snapshot: Option<DomSnapshot>,
     #[serde(default)]
     pub events: Vec<BridgeEventEnvelope>,
 }
@@ -191,7 +191,7 @@ impl CefBridge {
         Ok(BatchResponse {
             batch_id: 0,
             results: Vec::new(),
-            snapshot: response.snapshot,
+            snapshot: Some(response.snapshot),
             events: response.events,
         })
     }

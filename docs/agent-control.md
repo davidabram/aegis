@@ -180,6 +180,11 @@ curl -X POST http://127.0.0.1:7878/execute \
   }'
 ```
 
+Notes:
+- `navigate` returns a full DOM snapshot for page resync
+- `execute` may return `"snapshot": null` for low-latency commands such as `eval` and `scroll`
+- agents should treat the event stream as the incremental source of truth between full snapshots
+
 ### Snapshot DOM
 
 ```bash

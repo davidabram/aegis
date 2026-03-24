@@ -5,7 +5,9 @@ use aegis::{
     dom::node::{DomNode, DomSnapshot},
     events::stream::{EventStream, EventType, SequencedEvent},
     replay_trace,
-    transport::protocol::{EvalJsRequest, MessageKind, TraceFile, decode_message, encode_message},
+    transport::protocol::{
+        BatchWireResponse, EvalJsRequest, MessageKind, TraceFile, decode_message, encode_message,
+    },
 };
 use std::collections::HashMap;
 use std::env;
@@ -128,6 +130,25 @@ fn binary_protocol_round_trips() {
 }
 
 #[test]
+fn batch_wire_response_decodes_null_snapshot() {
+    let frame = encode_message(
+        MessageKind::SendBatch,
+        &BatchWireResponse {
+            batch_id: 5,
+            results: Vec::new(),
+            snapshot: None,
+            events: Vec::new(),
+        },
+    )
+    .expect("frame encodes");
+
+    let payload: BatchWireResponse =
+        decode_message(MessageKind::SendBatch, &frame).expect("frame decodes");
+    assert_eq!(payload.batch_id, 5);
+    assert!(payload.snapshot.is_none());
+}
+
+#[test]
 fn trace_recorder_persists_batches() {
     let path = env::temp_dir().join("aegis-trace-test.json");
     let _ = std::fs::remove_file(&path);
@@ -149,7 +170,7 @@ fn trace_recorder_persists_batches() {
         aegis::BatchResponse {
             batch_id: 7,
             results: vec![aegis::CommandResult::ok(serde_json::json!({"clicked": 3}))],
-            snapshot: DomSnapshot::default(),
+            snapshot: Some(DomSnapshot::default()),
             events: Vec::new(),
         },
         &[SequencedEvent {
@@ -192,7 +213,7 @@ fn replay_trace_rebuilds_final_state() {
         aegis::BatchResponse {
             batch_id: 9,
             results: Vec::new(),
-            snapshot: DomSnapshot {
+            snapshot: Some(DomSnapshot {
                 nodes: vec![DomNode {
                     id: 1,
                     tag: "html".into(),
@@ -200,7 +221,7 @@ fn replay_trace_rebuilds_final_state() {
                     text: None,
                     children: vec![],
                 }],
-            },
+            }),
             events: Vec::new(),
         },
         &[SequencedEvent {
@@ -217,6 +238,61 @@ fn replay_trace_rebuilds_final_state() {
     assert_eq!(replay.final_snapshot.nodes.len(), 1);
     assert_eq!(replay.events.latest_sequence(), 2);
     assert_eq!(replay.browser_config.mode, BrowserMode::Headful);
+}
+
+#[test]
+fn replay_trace_retains_last_non_null_snapshot() {
+    let path = env::temp_dir().join("aegis-trace-replay-null-snapshot-test.json");
+    let _ = std::fs::remove_file(&path);
+
+    let mut recorder = TraceRecorder::new(
+        &path,
+        BrowserConfig {
+            mode: BrowserMode::Headful,
+            start_url: Some("https://example.com".into()),
+            user_data_dir: Some("/tmp/aegis".into()),
+        },
+    );
+    recorder.record_batch(
+        BatchRequest {
+            batch_id: 1,
+            commands: vec![],
+        },
+        aegis::BatchResponse {
+            batch_id: 1,
+            results: Vec::new(),
+            snapshot: Some(DomSnapshot {
+                nodes: vec![DomNode {
+                    id: 1,
+                    tag: "html".into(),
+                    attrs: HashMap::new(),
+                    text: None,
+                    children: vec![2],
+                }],
+            }),
+            events: Vec::new(),
+        },
+        &[],
+    );
+    recorder.record_batch(
+        BatchRequest {
+            batch_id: 2,
+            commands: vec![Command::Scroll { x: 0, y: 480 }],
+        },
+        aegis::BatchResponse {
+            batch_id: 2,
+            results: Vec::new(),
+            snapshot: None,
+            events: Vec::new(),
+        },
+        &[],
+    );
+    recorder.flush().expect("trace flushes");
+
+    let replay = replay_trace(&path).expect("trace replays");
+    assert_eq!(replay.final_snapshot.nodes.len(), 1);
+    assert_eq!(replay.final_snapshot.nodes[0].tag, "html");
+    assert_eq!(replay.final_snapshot.nodes[0].children, vec![2]);
 }
 
 #[test]

@@ -19,7 +19,9 @@ pub fn replay_trace(path: impl Into<std::path::PathBuf>) -> Result<ReplayState, 
     let mut events = EventStream::default();
 
     for batch in &trace.batches {
-        final_snapshot = batch.response.snapshot.clone();
+        if let Some(snapshot) = &batch.response.snapshot {
+            final_snapshot = snapshot.clone();
+        }
         for event in &batch.emitted_events {
             events.push(SequencedEvent {
                 sequence: event.sequence,

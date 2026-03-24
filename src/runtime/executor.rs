@@ -2,8 +2,9 @@ use crate::browser::BrowserConfig;
 use serde::{Deserialize, Serialize};
 
 use crate::commands::command::{Command, CommandResult};
+use crate::dom::diff::DomMutation;
 use crate::dom::tree::DomTree;
-use crate::events::stream::{EventStream, SequencedEvent};
+use crate::events::stream::{EventStream, RuntimeEvent, SequencedEvent};
 use crate::runtime::scheduler::Scheduler;
 use crate::session::cookies::SessionState;
 use crate::trace::recorder::TraceRecorder;
@@ -74,23 +75,33 @@ impl AegisRuntime {
         &mut self,
         response: BatchResponse,
     ) -> Result<Vec<SequencedEvent>, AegisError> {
-        self.dom.replace_snapshot(response.snapshot.clone());
+        if let Some(snapshot) = response.snapshot.clone() {
+            self.dom.replace_snapshot(snapshot);
+        }
 
-        let mut events = response
-            .events
+        let mut raw_events = response.events;
+        raw_events.extend(self.bridge.drain_events()?);
+        self.apply_dom_mutations(&raw_events);
+
+        let events = raw_events
             .into_iter()
             .map(|event| self.sequence_event(event))
             .collect::<Vec<_>>();
-
-        let bridge_events = self.bridge.drain_events()?;
-        let bridge_events = bridge_events
-            .into_iter()
-            .map(|event| self.sequence_event(event))
-            .collect::<Vec<_>>();
-        events.extend(bridge_events);
         self.events.push_all(events.clone());
 
         Ok(events)
+    }
+
+    fn apply_dom_mutations(&mut self, events: &[BridgeEventEnvelope]) {
+        let mut changes = Vec::<DomMutation>::new();
+        for event in events {
+            if let RuntimeEvent::DomMutation { changes: event_changes } = &event.event {
+                changes.extend(event_changes.iter().cloned());
+            }
+        }
+        if !changes.is_empty() {
+            self.dom.apply_mutations(&changes);
+        }
     }
 
     fn sequence_event(&mut self, event: BridgeEventEnvelope) -> SequencedEvent {

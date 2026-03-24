@@ -107,6 +107,10 @@ Then drive the runtime over:
 - `GET /events`
 - `GET/POST /session`
 
+Performance note:
+- `POST /navigate` returns a full DOM snapshot
+- `POST /execute` can omit the snapshot for low-latency commands like `eval` and `scroll`, with incremental state flowing through runtime events
+
 ## Native Browser Engine
 
 The native browser runtime is a macOS CEF-backed engine with two main surfaces:

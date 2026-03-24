@@ -58,7 +58,8 @@ pub struct NavigateResponse {
 pub struct BatchWireResponse {
     pub batch_id: u64,
     pub results: Vec<CommandResult>,
-    pub snapshot: DomSnapshot,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<DomSnapshot>,
     #[serde(default)]
     pub events: Vec<BridgeEventEnvelope>,
 }
