@@ -17,7 +17,7 @@ use crate::commands::command::Command;
 use crate::dom::node::DomSnapshot;
 use crate::events::stream::SequencedEvent;
 use crate::host::LoadedAegisClient;
-use crate::runtime::executor::ExecutionReport;
+use crate::runtime::executor::{ExecutionReport, RuntimeStatus};
 use crate::session::cookies::SessionState;
 use crate::transport::bridge::AegisError;
 
@@ -71,7 +71,7 @@ enum ApiCommand {
     SnapshotDom(oneshot::Sender<Result<DomSnapshot, AegisError>>),
     Events(u64, oneshot::Sender<Result<Vec<SequencedEvent>, AegisError>>),
     EnableTrace(PathBuf, oneshot::Sender<Result<(), AegisError>>),
-    BrowserConfig(oneshot::Sender<BrowserConfig>),
+    RuntimeInfo(oneshot::Sender<(BrowserConfig, RuntimeStatus)>),
 }
 
 pub async fn serve(
@@ -148,8 +148,8 @@ pub async fn serve(
                     client.enable_trace_recording(path);
                     let _ = reply.send(Ok(()));
                 }
-                ApiCommand::BrowserConfig(reply) => {
-                    let _ = reply.send(browser_config.clone());
+                ApiCommand::RuntimeInfo(reply) => {
+                    let _ = reply.send((browser_config.clone(), client.runtime_status()));
                 }
             },
             Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -183,18 +183,20 @@ async fn health() -> Json<HealthResponse> {
 struct RuntimeInfo {
     host_library: PathBuf,
     browser: BrowserConfig,
+    runtime: RuntimeStatus,
 }
 
 async fn runtime_info(State(state): State<ApiState>) -> Result<Json<RuntimeInfo>, ApiError> {
     let (reply_tx, reply_rx) = oneshot::channel();
     state
         .tx
-        .send(ApiCommand::BrowserConfig(reply_tx))
+        .send(ApiCommand::RuntimeInfo(reply_tx))
         .map_err(channel_error)?;
-    let browser = reply_rx.await.map_err(reply_error_config)?;
+    let (browser, runtime) = reply_rx.await.map_err(reply_error_config)?;
     Ok(Json(RuntimeInfo {
         host_library: state.host_library,
         browser,
+        runtime,
     }))
 }
 

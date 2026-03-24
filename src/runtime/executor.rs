@@ -13,6 +13,14 @@ use crate::transport::bridge::{
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeStatus {
+    pub bootstrapped: bool,
+    pub bootstrap_duration_ms: Option<u64>,
+    pub dom_nodes: usize,
+    pub latest_event_sequence: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionReport {
     pub batch_id: u64,
     pub results: Vec<CommandResult>,
@@ -27,6 +35,7 @@ pub struct AegisRuntime {
     scheduler: Scheduler,
     trace_recorder: Option<TraceRecorder>,
     runtime_bootstrapped: bool,
+    bootstrap_duration_ms: Option<u64>,
 }
 
 impl AegisRuntime {
@@ -39,6 +48,7 @@ impl AegisRuntime {
             scheduler: Scheduler::default(),
             trace_recorder: None,
             runtime_bootstrapped: false,
+            bootstrap_duration_ms: None,
         })
     }
 
@@ -153,6 +163,15 @@ impl AegisRuntime {
         &self.browser_config
     }
 
+    pub fn runtime_status(&self) -> RuntimeStatus {
+        RuntimeStatus {
+            bootstrapped: self.runtime_bootstrapped,
+            bootstrap_duration_ms: self.bootstrap_duration_ms,
+            dom_nodes: self.dom.snapshot().nodes.len(),
+            latest_event_sequence: self.events.latest_sequence(),
+        }
+    }
+
     fn record_trace(
         &mut self,
         request: BatchRequest,
@@ -168,8 +187,10 @@ impl AegisRuntime {
 
     fn ensure_runtime_bootstrapped(&mut self, capture_snapshot: bool) -> Result<(), AegisError> {
         if !self.runtime_bootstrapped {
+            let started = std::time::Instant::now();
             self.bridge.install_runtime()?;
             self.runtime_bootstrapped = true;
+            self.bootstrap_duration_ms = Some(started.elapsed().as_millis() as u64);
         }
         if capture_snapshot {
             let snapshot = self.bridge.snapshot_dom()?;

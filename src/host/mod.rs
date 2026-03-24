@@ -9,7 +9,7 @@ use crate::client::AegisClient;
 use crate::commands::command::Command;
 use crate::dom::node::DomSnapshot;
 use crate::events::stream::SequencedEvent;
-use crate::runtime::executor::ExecutionReport;
+use crate::runtime::executor::{ExecutionReport, RuntimeStatus};
 use crate::session::cookies::SessionState;
 use crate::transport::bridge::{AegisError, CefBridge, HostFunctionTable, HostHandle};
 
@@ -128,6 +128,10 @@ impl LoadedAegisClient {
 
     pub fn browser_config(&self) -> &BrowserConfig {
         self.client.browser_config()
+    }
+
+    pub fn runtime_status(&self) -> RuntimeStatus {
+        self.client.runtime().runtime_status()
     }
 }
 
