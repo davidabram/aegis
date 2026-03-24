@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "name": "aegis-host-backed",
+  "steps": [
+    {
+      "type": "proc_when",
+      "cmd": "bash",
+      "args": [
+        "scripts/host_backed_smoke.sh"
+      ],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "times": 1
+    },
+    {
+      "name": "host-backed-smoke",
+      "type": "proc_spawn",
+      "cmd": "bash",
+      "args": [
+        "scripts/host_backed_smoke.sh"
+      ],
+      "expect_exit": 0
+    }
+  ]
+}
