@@ -26,23 +26,24 @@ pub struct AegisRuntime {
     events: EventStream,
     scheduler: Scheduler,
     trace_recorder: Option<TraceRecorder>,
+    runtime_bootstrapped: bool,
 }
 
 impl AegisRuntime {
-    pub fn new(mut bridge: CefBridge, browser_config: BrowserConfig) -> Result<Self, AegisError> {
-        bridge.install_runtime()?;
-        let snapshot = bridge.snapshot_dom()?;
+    pub fn new(bridge: CefBridge, browser_config: BrowserConfig) -> Result<Self, AegisError> {
         Ok(Self {
             bridge,
             browser_config,
-            dom: DomTree::from_snapshot(snapshot),
+            dom: DomTree::default(),
             events: EventStream::default(),
             scheduler: Scheduler::default(),
             trace_recorder: None,
+            runtime_bootstrapped: false,
         })
     }
 
     pub fn execute(&mut self, commands: &[Command]) -> Result<ExecutionReport, AegisError> {
+        self.ensure_runtime_bootstrapped(false)?;
         let batch_id = self.scheduler.next_batch_id();
         let request = BatchRequest {
             batch_id,
@@ -61,6 +62,7 @@ impl AegisRuntime {
     }
 
     pub fn navigate(&mut self, url: String) -> Result<Vec<SequencedEvent>, AegisError> {
+        self.ensure_runtime_bootstrapped(false)?;
         let response = self.bridge.navigate(&url)?;
         let request = BatchRequest {
             batch_id: self.scheduler.next_batch_id(),
@@ -122,6 +124,7 @@ impl AegisRuntime {
     }
 
     pub fn snapshot_session(&mut self) -> Result<SessionState, AegisError> {
+        self.ensure_runtime_bootstrapped(false)?;
         self.bridge.snapshot_session()
     }
 
@@ -129,8 +132,9 @@ impl AegisRuntime {
         self.bridge.pump()
     }
 
-    pub fn dom_snapshot(&self) -> crate::dom::node::DomSnapshot {
-        self.dom.snapshot()
+    pub fn snapshot_dom(&mut self) -> Result<crate::dom::node::DomSnapshot, AegisError> {
+        self.ensure_runtime_bootstrapped(true)?;
+        Ok(self.dom.snapshot())
     }
 
     pub fn event_stream(&self) -> &EventStream {
@@ -158,6 +162,18 @@ impl AegisRuntime {
         if let Some(recorder) = &mut self.trace_recorder {
             recorder.record_batch(request, response, emitted_events);
             recorder.flush()?;
+        }
+        Ok(())
+    }
+
+    fn ensure_runtime_bootstrapped(&mut self, capture_snapshot: bool) -> Result<(), AegisError> {
+        if !self.runtime_bootstrapped {
+            self.bridge.install_runtime()?;
+            self.runtime_bootstrapped = true;
+        }
+        if capture_snapshot {
+            let snapshot = self.bridge.snapshot_dom()?;
+            self.dom.replace_snapshot(snapshot);
         }
         Ok(())
     }

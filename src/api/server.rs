@@ -139,7 +139,7 @@ pub async fn serve(
                     let _ = reply.send(client.execute(&commands));
                 }
                 ApiCommand::SnapshotDom(reply) => {
-                    let _ = reply.send(Ok(client.snapshot_dom()));
+                    let _ = reply.send(client.snapshot_dom());
                 }
                 ApiCommand::Events(since, reply) => {
                     let _ = reply.send(Ok(client.events_since(since)));

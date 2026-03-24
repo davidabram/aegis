@@ -107,8 +107,8 @@ impl LoadedAegisClient {
         self.client.runtime_mut().snapshot_session()
     }
 
-    pub fn snapshot_dom(&mut self) -> DomSnapshot {
-        self.client.runtime().dom_snapshot()
+    pub fn snapshot_dom(&mut self) -> Result<DomSnapshot, AegisError> {
+        self.client.runtime_mut().snapshot_dom()
     }
 
     pub fn pump(&mut self) -> Result<(), AegisError> {
