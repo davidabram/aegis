@@ -130,8 +130,31 @@ fn filters_event_stream_by_type() {
     });
 
     let only_nav = stream.read_from(0, Some(EventType::Navigation));
-    assert_eq!(only_nav.len(), 1);
-    assert_eq!(only_nav[0].sequence, 1);
+    assert!(!only_nav.gap_detected);
+    assert_eq!(only_nav.events.len(), 1);
+    assert_eq!(only_nav.events[0].sequence, 1);
+}
+
+#[test]
+fn detects_event_gaps_when_history_is_truncated() {
+    let mut stream = EventStream::with_max_retained(2);
+    for sequence in 1..=3 {
+        stream.push(SequencedEvent {
+            sequence,
+            timestamp_ms: sequence,
+            event: RuntimeEvent::Log {
+                level: "info".into(),
+                message: format!("event-{sequence}"),
+                data: None,
+            },
+        });
+    }
+
+    let window = stream.read_from(0, None);
+    assert!(window.gap_detected);
+    assert_eq!(window.oldest_available_sequence, Some(2));
+    assert_eq!(window.latest_sequence, 3);
+    assert_eq!(window.events.len(), 2);
 }
 
 #[test]

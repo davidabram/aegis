@@ -1,6 +1,6 @@
 use crate::browser::BrowserConfig;
 use crate::commands::command::Command;
-use crate::events::stream::{EventType, SequencedEvent};
+use crate::events::stream::{EventReadWindow, EventType, SequencedEvent};
 use crate::runtime::executor::{AegisRuntime, ExecutionReport};
 use crate::session::cookies::SessionState;
 use crate::transport::bridge::{AegisError, CefBridge};
@@ -36,7 +36,7 @@ impl AegisClient {
         self.runtime.pump()
     }
 
-    pub fn navigation_events_since(&self, sequence: u64) -> Vec<SequencedEvent> {
+    pub fn navigation_events_since(&self, sequence: u64) -> EventReadWindow {
         self.runtime
             .event_stream()
             .read_from(sequence, Some(EventType::Navigation))

@@ -14,6 +14,8 @@ use crate::transport::protocol::{
     NavigateResponse, decode_message, encode_message,
 };
 
+const MAX_HOST_BUFFER_LEN: usize = 64 * 1024 * 1024;
+
 #[derive(Debug, Error)]
 pub enum AegisError {
     #[error("serialization error: {0}")]
@@ -249,8 +251,22 @@ impl CefBridge {
         fns: HostFunctionTable,
         buffer: HostBuffer,
     ) -> Result<Vec<u8>, AegisError> {
-        if buffer.ptr.is_null() || buffer.len == 0 {
+        if buffer.ptr.is_null() && buffer.len == 0 {
             return Ok(Vec::new());
+        }
+        if buffer.ptr.is_null() || buffer.len == 0 {
+            return Err(AegisError::Bridge(
+                "native host returned an invalid buffer shape".into(),
+            ));
+        }
+        if buffer.len > MAX_HOST_BUFFER_LEN {
+            unsafe {
+                (fns.free_buffer)(host.as_ptr(), buffer);
+            }
+            return Err(AegisError::Bridge(format!(
+                "native host returned an oversized buffer: {} bytes",
+                buffer.len
+            )));
         }
 
         let output = unsafe { slice::from_raw_parts(buffer.ptr.cast_const(), buffer.len) }.to_vec();

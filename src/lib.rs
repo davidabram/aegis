@@ -21,7 +21,7 @@ pub use config_store::{
     AegisConfigStore, AegisSecretStore, CredentialInput, CredentialsSettings, StoredCredentialEntry,
 };
 pub use dom::node::{DomNode, DomSnapshot};
-pub use events::stream::{EventStream, EventType, RuntimeEvent, SequencedEvent};
+pub use events::stream::{EventReadWindow, EventStream, EventType, RuntimeEvent, SequencedEvent};
 pub use native::{
     NativeConfiguration, NativeStatus, artifact_for_scheme, build_xcode, bundle_executable,
     configure_xcode,

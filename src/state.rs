@@ -1,4 +1,5 @@
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -149,15 +150,13 @@ impl AegisStatePaths {
         match fs::read(path) {
             Ok(bytes) => {
                 if serde_json::from_slice::<serde_json::Value>(&bytes).is_ok() {
+                    secure_state_file_if_needed(path)?;
                     return Ok(());
                 }
                 self.replace_corrupt_file(path, &default_bytes, label)?;
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                fs::write(path, &default_bytes).map_err(|write_error| {
-                    format!("failed to write {}: {write_error}", path.display())
-                })?;
-                secure_state_file_if_needed(path)?;
+                write_state_file(path, &default_bytes)?;
             }
             Err(error) => {
                 return Err(format!(
@@ -195,9 +194,9 @@ impl AegisStatePaths {
                 if normalized != default_or_existing(path)? {
                     let payload = serde_json::to_vec_pretty(&normalized)
                         .map_err(|error| format!("failed to encode normalized {label}: {error}"))?;
-                    fs::write(path, payload).map_err(|error| {
-                        format!("failed to rewrite normalized {}: {error}", path.display())
-                    })?;
+                    write_state_file(path, &payload)?;
+                } else {
+                    secure_state_file_if_needed(path)?;
                 }
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -242,9 +241,8 @@ impl AegisStatePaths {
                 )
             })?;
         }
-        fs::write(path, replacement)
-            .map_err(|error| format!("failed to rewrite {} {}: {error}", label, path.display()))?;
-        secure_state_file_if_needed(path)
+        write_state_file(path, replacement)
+            .map_err(|error| format!("failed to rewrite {} {}: {error}", label, path.display()))
     }
 
     fn remove_obsolete_path(&self, path: &Path) -> Result<(), String> {
@@ -418,13 +416,178 @@ fn validate_name(value: &str, label: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn secure_state_file_if_needed(path: &Path) -> Result<(), String> {
-    if path
-        .components()
-        .any(|component| component.as_os_str() == "secrets")
-    {
-        set_owner_only_permissions(path)?;
+pub fn with_state_file_lock<T>(
+    path: &Path,
+    action: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let _guard = StateFileLock::acquire(path)?;
+    action()
+}
+
+pub fn replace_corrupt_state_file(path: &Path, replacement: &[u8], label: &str) -> Result<(), String> {
+    let backup = corrupt_backup_path(path);
+    if path.exists() {
+        fs::rename(path, &backup).map_err(|error| {
+            format!(
+                "failed to quarantine corrupt {} {} to {}: {error}",
+                label,
+                path.display(),
+                backup.display()
+            )
+        })?;
     }
+    write_state_file(path, replacement)
+}
+
+pub fn write_state_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("invalid state path {}", path.display()))?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("failed to create directory {}: {error}", parent.display()))?;
+
+    let temp_path = temporary_write_path(path);
+    let mut file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&temp_path)
+        .map_err(|error| format!("failed to open temp state file {}: {error}", temp_path.display()))?;
+
+    if let Err(error) = file.write_all(bytes) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(format!(
+            "failed to write temp state file {}: {error}",
+            temp_path.display()
+        ));
+    }
+    if let Err(error) = file.sync_all() {
+        let _ = fs::remove_file(&temp_path);
+        return Err(format!(
+            "failed to sync temp state file {}: {error}",
+            temp_path.display()
+        ));
+    }
+    if let Err(error) = secure_state_file_if_needed(&temp_path) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(error);
+    }
+
+    if let Err(error) = fs::rename(&temp_path, path) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(format!(
+            "failed to atomically replace state file {}: {error}",
+            path.display()
+        ));
+    }
+
+    secure_state_file_if_needed(path)?;
+    sync_directory(parent)?;
+    Ok(())
+}
+
+fn secure_state_file_if_needed(path: &Path) -> Result<(), String> {
+    set_owner_only_permissions(path)
+}
+
+fn temporary_write_path(path: &Path) -> PathBuf {
+    let pid = std::process::id();
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_micros())
+        .unwrap_or(0);
+    let file_name = path
+        .file_name()
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "state".to_string());
+    path.with_file_name(format!("{file_name}.tmp.{pid}.{timestamp}"))
+}
+
+fn lock_file_path(path: &Path) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "state".to_string());
+    path.with_file_name(format!("{file_name}.lock"))
+}
+
+struct StateFileLock {
+    file: File,
+}
+
+impl StateFileLock {
+    fn acquire(path: &Path) -> Result<Self, String> {
+        let lock_path = lock_file_path(path);
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
+            .map_err(|error| format!("failed to open state lock {}: {error}", lock_path.display()))?;
+        lock_file_exclusive(&file, &lock_path)?;
+        Ok(Self { file })
+    }
+}
+
+impl Drop for StateFileLock {
+    fn drop(&mut self) {
+        let _ = unlock_file(&self.file);
+    }
+}
+
+#[cfg(unix)]
+fn lock_file_exclusive(file: &File, path: &Path) -> Result<(), String> {
+    use std::os::fd::AsRawFd;
+
+    let status = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "failed to lock state file {}: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        ))
+    }
+}
+
+#[cfg(not(unix))]
+fn lock_file_exclusive(_file: &File, _path: &Path) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn unlock_file(file: &File) -> Result<(), String> {
+    use std::os::fd::AsRawFd;
+
+    let status = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "failed to unlock state file: {}",
+            std::io::Error::last_os_error()
+        ))
+    }
+}
+
+#[cfg(not(unix))]
+fn unlock_file(_file: &File) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> Result<(), String> {
+    let directory = File::open(path)
+        .map_err(|error| format!("failed to open state directory {}: {error}", path.display()))?;
+    directory
+        .sync_all()
+        .map_err(|error| format!("failed to sync state directory {}: {error}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
@@ -461,11 +624,11 @@ mod tests {
         let _guard = aegis_test_env_lock()
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir().expect("temporary state dir should be created");
         unsafe {
             std::env::set_var("AEGIS_HOME", temp.path());
         }
-        let paths = AegisStatePaths::detect().unwrap();
+        let paths = AegisStatePaths::detect().expect("state layout should bootstrap");
         assert!(paths.settings_file("agent").exists());
         assert!(paths.settings_file("runtime").exists());
         assert!(paths.settings_file("credentials").exists());
@@ -483,18 +646,22 @@ mod tests {
         let _guard = aegis_test_env_lock()
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir().expect("temporary state dir should be created");
         unsafe {
             std::env::set_var("AEGIS_HOME", temp.path());
         }
-        fs::create_dir_all(temp.path().join("settings")).unwrap();
-        fs::write(temp.path().join("settings/agent.json"), b"{not-json").unwrap();
-        fs::create_dir_all(temp.path().join("imports/old")).unwrap();
-        let paths = AegisStatePaths::detect().unwrap();
-        let agent = fs::read_to_string(paths.settings_file("agent")).unwrap();
+        fs::create_dir_all(temp.path().join("settings"))
+            .expect("settings directory should be created");
+        fs::write(temp.path().join("settings/agent.json"), b"{not-json")
+            .expect("corrupt settings fixture should be written");
+        fs::create_dir_all(temp.path().join("imports/old"))
+            .expect("obsolete directory should be created");
+        let paths = AegisStatePaths::detect().expect("state layout should repair corrupt config");
+        let agent = fs::read_to_string(paths.settings_file("agent"))
+            .expect("normalized agent config should be readable");
         assert!(agent.contains("\"default_profile\""));
         let backups = fs::read_dir(temp.path().join("settings"))
-            .unwrap()
+            .expect("settings directory should be readable")
             .filter_map(Result::ok)
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .filter(|name| name.starts_with("agent.json.corrupt."))
@@ -511,27 +678,67 @@ mod tests {
         let _guard = aegis_test_env_lock()
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir().expect("temporary state dir should be created");
         unsafe {
             std::env::set_var("AEGIS_HOME", temp.path());
         }
         let settings_dir = temp.path().join("settings");
-        fs::create_dir_all(&settings_dir).unwrap();
+        fs::create_dir_all(&settings_dir).expect("settings directory should be created");
         fs::write(
             settings_dir.join("agent.json"),
             br#"{"version":1,"default_profile":"work","browser_import":"brave"}"#,
         )
-        .unwrap();
+        .expect("agent fixture should be written");
         let obsolete_dir = temp.path().join("secrets/profiles/work");
-        fs::create_dir_all(&obsolete_dir).unwrap();
-        fs::write(obsolete_dir.join("credentials.json"), b"legacy").unwrap();
-        let paths = AegisStatePaths::detect().unwrap();
-        let agent = fs::read_to_string(paths.settings_file("agent")).unwrap();
-        let credentials = fs::read_to_string(paths.settings_file("credentials")).unwrap();
+        fs::create_dir_all(&obsolete_dir).expect("obsolete secret dir should be created");
+        fs::write(obsolete_dir.join("credentials.json"), b"legacy")
+            .expect("obsolete secret fixture should be written");
+        let paths = AegisStatePaths::detect().expect("state layout should normalize config");
+        let agent = fs::read_to_string(paths.settings_file("agent"))
+            .expect("agent config should be readable");
+        let credentials = fs::read_to_string(paths.settings_file("credentials"))
+            .expect("credentials config should be readable");
         assert!(agent.contains("\"default_profile\": \"work\""));
         assert!(!agent.contains("browser_import"));
         assert!(credentials.contains("\"auto_store\": true"));
         assert!(!obsolete_dir.join("credentials.json").exists());
+        unsafe {
+            std::env::remove_var("AEGIS_HOME");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn detect_secures_existing_state_files() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = aegis_test_env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let temp = tempfile::tempdir().expect("temporary state dir should be created");
+        unsafe {
+            std::env::set_var("AEGIS_HOME", temp.path());
+        }
+        let paths = AegisStatePaths::detect().expect("state layout should bootstrap");
+        fs::set_permissions(paths.session_file("default"), fs::Permissions::from_mode(0o644))
+            .expect("session permissions should be changed for test");
+        fs::set_permissions(paths.settings_file("agent"), fs::Permissions::from_mode(0o644))
+            .expect("settings permissions should be changed for test");
+
+        let paths = AegisStatePaths::detect().expect("state layout should re-secure files");
+        let session_mode = fs::metadata(paths.session_file("default"))
+            .expect("session metadata should be readable")
+            .permissions()
+            .mode()
+            & 0o777;
+        let agent_mode = fs::metadata(paths.settings_file("agent"))
+            .expect("agent metadata should be readable")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(session_mode, 0o600);
+        assert_eq!(agent_mode, 0o600);
+
         unsafe {
             std::env::remove_var("AEGIS_HOME");
         }

@@ -6,7 +6,7 @@ use crate::commands::command::{Command, CommandResult};
 use crate::dom::diff::DomMutation;
 use crate::dom::node::DomSnapshot;
 use crate::dom::tree::DomTree;
-use crate::events::stream::{EventStream, RuntimeEvent, SequencedEvent};
+use crate::events::stream::{EventReadWindow, EventStream, RuntimeEvent, SequencedEvent};
 use crate::runtime::scheduler::Scheduler;
 use crate::session::cookies::SessionState;
 use crate::trace::recorder::TraceRecorder;
@@ -20,7 +20,9 @@ pub struct RuntimeStatus {
     pub bootstrap_duration_ms: Option<u64>,
     pub dom_nodes: usize,
     pub dom_snapshot_available: bool,
+    pub retained_event_count: usize,
     pub latest_event_sequence: u64,
+    pub oldest_retained_event_sequence: Option<u64>,
     pub current_url: Option<String>,
     pub last_dom_refresh_at_ms: Option<u64>,
     pub last_event_at_ms: Option<u64>,
@@ -86,7 +88,7 @@ impl AegisRuntime {
         let response = self.bridge.send_batch(&request)?;
         let results = response.results.clone();
         let emitted_events = self.apply_response(response.clone())?;
-        self.mark_successful_roundtrip();
+        self.mark_successful_command();
         self.record_trace(request, response, &emitted_events)?;
 
         Ok(ExecutionReport {
@@ -104,7 +106,7 @@ impl AegisRuntime {
             commands: Vec::new(),
         };
         let emitted_events = self.apply_response(response.clone())?;
-        self.mark_successful_roundtrip();
+        self.mark_successful_command();
         self.record_trace(request, response, &emitted_events)?;
         Ok(emitted_events)
     }
@@ -186,13 +188,15 @@ impl AegisRuntime {
             recorder.set_initial_session(session.clone());
             recorder.flush()?;
         }
-        self.bridge.inject_session(session)
+        self.bridge.inject_session(session)?;
+        self.mark_successful_bridge_roundtrip();
+        Ok(())
     }
 
     pub fn snapshot_session(&mut self) -> Result<SessionState, AegisError> {
         self.ensure_runtime_bootstrapped(false)?;
         let session = self.bridge.snapshot_session()?;
-        self.mark_successful_roundtrip();
+        self.mark_successful_bridge_roundtrip();
         Ok(session)
     }
 
@@ -201,8 +205,7 @@ impl AegisRuntime {
     }
 
     pub fn snapshot_dom(&mut self) -> Result<crate::dom::node::DomSnapshot, AegisError> {
-        self.ensure_runtime_bootstrapped(true)?;
-        self.mark_successful_roundtrip();
+        self.refresh_dom_snapshot()?;
         Ok(self.dom.snapshot())
     }
 
@@ -212,8 +215,12 @@ impl AegisRuntime {
 
     pub fn drain_pending_events(&mut self) -> Result<Vec<SequencedEvent>, AegisError> {
         let raw_events = self.bridge.drain_events()?;
-        self.mark_successful_roundtrip();
+        self.mark_successful_bridge_roundtrip();
         Ok(self.apply_event_batch(raw_events))
+    }
+
+    pub fn read_events_from(&self, sequence: u64) -> EventReadWindow {
+        self.events.read_from(sequence, None)
     }
 
     pub fn bridge(&self) -> &CefBridge {
@@ -234,7 +241,9 @@ impl AegisRuntime {
             bootstrap_duration_ms: self.bootstrap_duration_ms,
             dom_nodes: self.dom.snapshot().nodes.len(),
             dom_snapshot_available: self.dom_snapshot_valid,
+            retained_event_count: self.events.retained_len(),
             latest_event_sequence: self.events.latest_sequence(),
+            oldest_retained_event_sequence: self.events.oldest_sequence(),
             current_url: self.current_url.clone(),
             last_dom_refresh_at_ms: self.last_dom_refresh_at_ms,
             last_event_at_ms: self.last_event_at_ms,
@@ -262,11 +271,7 @@ impl AegisRuntime {
 
     fn ensure_runtime_bootstrapped(&mut self, capture_snapshot: bool) -> Result<(), AegisError> {
         if capture_snapshot && !self.dom_snapshot_valid {
-            let snapshot = self.bridge.snapshot_dom()?;
-            self.dom.replace_snapshot(snapshot);
-            self.dom_snapshot_valid = true;
-            self.last_dom_refresh_at_ms = Some(now_ms());
-            self.mark_successful_roundtrip();
+            self.refresh_dom_snapshot()?;
         }
         Ok(())
     }
@@ -277,7 +282,21 @@ impl AegisRuntime {
             .any(|command| matches!(command, Command::Click { .. } | Command::SetValue { .. }))
     }
 
-    fn mark_successful_roundtrip(&mut self) {
+    fn refresh_dom_snapshot(&mut self) -> Result<(), AegisError> {
+        let _ = self.drain_pending_events()?;
+        let snapshot = self.bridge.snapshot_dom()?;
+        self.dom.replace_snapshot(snapshot);
+        self.dom_snapshot_valid = true;
+        self.last_dom_refresh_at_ms = Some(now_ms());
+        self.mark_successful_bridge_roundtrip();
+        Ok(())
+    }
+
+    fn mark_successful_bridge_roundtrip(&mut self) {
+        self.last_successful_bridge_roundtrip_at_ms = Some(now_ms());
+    }
+
+    fn mark_successful_command(&mut self) {
         let now = now_ms();
         self.last_successful_bridge_roundtrip_at_ms = Some(now);
         self.last_successful_command_at_ms = Some(now);

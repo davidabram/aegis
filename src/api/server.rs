@@ -18,7 +18,7 @@ use crate::browser::BrowserConfig;
 use crate::commands::command::{Command, CommandMatcher, CommandTarget};
 use crate::config_store::{AegisConfigStore, AegisSecretStore, CredentialInput};
 use crate::dom::node::{DomNode, DomNodeSemantics, DomSnapshot};
-use crate::events::stream::SequencedEvent;
+use crate::events::stream::{EventReadWindow, SequencedEvent};
 use crate::host::LoadedAegisClient;
 use crate::runtime::executor::{ExecutionReport, RuntimeStatus};
 use crate::session::cookies::SessionState;
@@ -93,7 +93,7 @@ enum ApiCommand {
     SnapshotDom(oneshot::Sender<Result<DomSnapshot, AegisError>>),
     Events(
         u64,
-        oneshot::Sender<Result<Vec<SequencedEvent>, AegisError>>,
+        oneshot::Sender<Result<EventReadWindow, AegisError>>,
     ),
     EnableTrace(PathBuf, oneshot::Sender<Result<(), AegisError>>),
 }
@@ -178,7 +178,7 @@ struct NativeOperationError {
     restart_recommended: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct AutoCredentialCapture {
     username: Option<CapturedCredentialField>,
     password: Option<CapturedCredentialField>,
@@ -457,16 +457,6 @@ pub async fn serve(
     Ok(())
 }
 
-impl Default for AutoCredentialCapture {
-    fn default() -> Self {
-        Self {
-            username: None,
-            password: None,
-            origin: None,
-        }
-    }
-}
-
 impl AutoCredentialCapture {
     fn capture_fields(
         &mut self,
@@ -475,10 +465,10 @@ impl AutoCredentialCapture {
         commands: &[Command],
     ) {
         let current_origin = current_url.map(origin_key);
-        if let (Some(existing), Some(current)) = (self.origin.as_ref(), current_origin.as_ref()) {
-            if existing != current {
-                self.clear();
-            }
+        if let (Some(existing), Some(current)) = (self.origin.as_ref(), current_origin.as_ref())
+            && existing != current
+        {
+            self.clear();
         }
         if self.origin.is_none() {
             self.origin = current_origin;
@@ -923,7 +913,7 @@ async fn snapshot_dom(State(state): State<ApiState>) -> Result<Json<DomSnapshot>
 async fn events(
     State(state): State<ApiState>,
     Query(query): Query<EventQuery>,
-) -> Result<Json<Vec<SequencedEvent>>, ApiError> {
+) -> Result<Json<EventReadWindow>, ApiError> {
     let (reply_tx, reply_rx) = oneshot::channel();
     state
         .tx
@@ -1154,7 +1144,9 @@ fn read_diagnostics(diagnostics: &Arc<Mutex<ServeDiagnostics>>) -> RuntimeDiagno
                 bootstrap_duration_ms: None,
                 dom_nodes: 0,
                 dom_snapshot_available: false,
+                retained_event_count: 0,
                 latest_event_sequence: 0,
+                oldest_retained_event_sequence: None,
                 current_url: None,
                 last_dom_refresh_at_ms: None,
                 last_event_at_ms: None,

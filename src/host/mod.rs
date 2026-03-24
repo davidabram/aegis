@@ -9,7 +9,7 @@ use crate::browser::BrowserConfig;
 use crate::client::AegisClient;
 use crate::commands::command::Command;
 use crate::dom::node::DomSnapshot;
-use crate::events::stream::SequencedEvent;
+use crate::events::stream::{EventReadWindow, SequencedEvent};
 use crate::runtime::executor::{ExecutionReport, RuntimeStatus};
 use crate::session::cookies::SessionState;
 use crate::transport::bridge::{AegisError, CefBridge, HostFunctionTable, HostHandle};
@@ -122,13 +122,9 @@ impl LoadedAegisClient {
         self.client.runtime_mut().enable_trace_recording(path);
     }
 
-    pub fn events_since(&mut self, sequence: u64) -> Result<Vec<SequencedEvent>, AegisError> {
+    pub fn events_since(&mut self, sequence: u64) -> Result<EventReadWindow, AegisError> {
         let _ = self.client.runtime_mut().drain_pending_events()?;
-        Ok(self
-            .client
-            .runtime()
-            .event_stream()
-            .read_from(sequence, None))
+        Ok(self.client.runtime().read_events_from(sequence))
     }
 
     pub fn browser_config(&self) -> &BrowserConfig {

@@ -1,10 +1,11 @@
-use std::fs;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
 use crate::session::cookies::SessionState;
-use crate::state::AegisStatePaths;
+use crate::state::{
+    AegisStatePaths, replace_corrupt_state_file, with_state_file_lock, write_state_file,
+};
 
 const PROFILE_VERSION: u32 = 1;
 
@@ -45,61 +46,62 @@ impl SessionProfileStore {
         if !self.info.path.exists() {
             return Ok(None);
         }
-        let bytes = fs::read(&self.info.path)
-            .map_err(|error| format!("failed to read session profile: {error}"))?;
-        let stored: StoredSessionProfile = match serde_json::from_slice(&bytes) {
-            Ok(stored) => stored,
-            Err(_) => {
+        with_state_file_lock(&self.info.path, || {
+            let bytes = std::fs::read(&self.info.path)
+                .map_err(|error| format!("failed to read session profile: {error}"))?;
+            let stored: StoredSessionProfile = match serde_json::from_slice(&bytes) {
+                Ok(stored) => stored,
+                Err(_) => {
+                    let default = default_session_payload();
+                    replace_corrupt_state_file(
+                        &self.info.path,
+                        &serde_json::to_vec_pretty(&default).map_err(|error| {
+                            format!("failed to encode default session profile: {error}")
+                        })?,
+                        "session profile",
+                    )?;
+                    StoredSessionProfile {
+                        version: PROFILE_VERSION,
+                        session: SessionState::default(),
+                    }
+                }
+            };
+            if stored.version != PROFILE_VERSION {
                 let default = default_session_payload();
-                AegisStatePaths::detect()?.repair_json_file(
+                replace_corrupt_state_file(
                     &self.info.path,
-                    &default,
+                    &serde_json::to_vec_pretty(&default).map_err(|error| {
+                        format!("failed to encode default session profile: {error}")
+                    })?,
                     "session profile",
                 )?;
-                StoredSessionProfile {
-                    version: PROFILE_VERSION,
-                    session: SessionState::default(),
-                }
+                return Ok(Some(SessionState::default()));
             }
-        };
-        if stored.version != PROFILE_VERSION {
-            let default = default_session_payload();
-            AegisStatePaths::detect()?.repair_json_file(
-                &self.info.path,
-                &default,
-                "session profile",
-            )?;
-            return Ok(Some(SessionState::default()));
-        }
-        if stored.session.validate().is_err() {
-            let default = default_session_payload();
-            AegisStatePaths::detect()?.repair_json_file(
-                &self.info.path,
-                &default,
-                "session profile",
-            )?;
-            return Ok(Some(SessionState::default()));
-        }
-        Ok(Some(stored.session))
+            if stored.session.validate().is_err() {
+                let default = default_session_payload();
+                replace_corrupt_state_file(
+                    &self.info.path,
+                    &serde_json::to_vec_pretty(&default).map_err(|error| {
+                        format!("failed to encode default session profile: {error}")
+                    })?,
+                    "session profile",
+                )?;
+                return Ok(Some(SessionState::default()));
+            }
+            Ok(Some(stored.session))
+        })
     }
 
     pub fn save(&self, session: &SessionState) -> Result<PathBuf, String> {
         session
             .validate()
             .map_err(|error| format!("invalid session profile data: {error}"))?;
-        let parent =
-            self.info.path.parent().ok_or_else(|| {
-                format!("invalid session profile path {}", self.info.path.display())
-            })?;
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("failed to create session profile directory: {error}"))?;
         let payload = serde_json::to_vec_pretty(&StoredSessionProfile {
             version: PROFILE_VERSION,
             session: session.clone(),
         })
         .map_err(|error| format!("failed to encode session profile: {error}"))?;
-        fs::write(&self.info.path, payload)
-            .map_err(|error| format!("failed to write session profile: {error}"))?;
+        with_state_file_lock(&self.info.path, || write_state_file(&self.info.path, &payload))?;
         Ok(self.info.path.clone())
     }
 }
@@ -146,16 +148,27 @@ mod tests {
         let _guard = aegis_test_env_lock()
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir().expect("temporary state dir should be created");
         unsafe {
             std::env::set_var("AEGIS_HOME", temp.path());
         }
-        let store = SessionProfileStore::new("default").unwrap();
-        fs::write(store.info().path.clone(), b"{bad-json").unwrap();
-        let session = store.load().unwrap().unwrap();
+        let store =
+            SessionProfileStore::new("default").expect("session profile store should initialize");
+        fs::write(store.info().path.clone(), b"{bad-json")
+            .expect("corrupt session fixture should be written");
+        let session = store
+            .load()
+            .expect("corrupt session should be repaired")
+            .expect("default session should be returned");
         assert!(session.cookies.is_empty());
-        let backups = fs::read_dir(store.info().path.parent().unwrap())
-            .unwrap()
+        let backups = fs::read_dir(
+            store
+                .info()
+                .path
+                .parent()
+                .expect("session profile should have a parent directory"),
+        )
+            .expect("session profile directory should be readable")
             .filter_map(Result::ok)
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .filter(|name| name.starts_with("session.json.corrupt."))

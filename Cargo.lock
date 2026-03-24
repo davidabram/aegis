@@ -9,6 +9,7 @@ dependencies = [
  "axum",
  "bincode",
  "clap",
+ "libc",
  "libloading",
  "serde",
  "serde_json",

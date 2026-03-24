@@ -1,11 +1,10 @@
-use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::state::AegisStatePaths;
+use crate::state::{AegisStatePaths, with_state_file_lock, write_state_file};
 
 #[derive(Debug, Clone)]
 pub struct AegisConfigStore {
@@ -66,35 +65,27 @@ impl AegisConfigStore {
         if !path.exists() {
             return Ok(None);
         }
-        let bytes = fs::read(&path)
-            .map_err(|error| format!("failed to read config {}: {error}", path.display()))?;
-        let value: Value = match serde_json::from_slice(&bytes) {
-            Ok(value) => value,
-            Err(_) => {
-                let default = default_config_payload(concern);
-                self.paths.repair_json_file(&path, &default, "config")?;
-                default
-            }
-        };
-        Ok(Some(value))
+        with_state_file_lock(&path, || {
+            let bytes = std::fs::read(&path)
+                .map_err(|error| format!("failed to read config {}: {error}", path.display()))?;
+            let value: Value = match serde_json::from_slice(&bytes) {
+                Ok(value) => value,
+                Err(_) => {
+                    let default = default_config_payload(concern);
+                    self.paths.repair_json_file(&path, &default, "config")?;
+                    default
+                }
+            };
+            Ok(Some(value))
+        })
     }
 
     pub fn set(&self, concern: &str, value: &Value) -> Result<PathBuf, String> {
         validate_name(concern, "name")?;
         let path = self.paths.settings_file(concern);
-        let parent = path
-            .parent()
-            .ok_or_else(|| format!("invalid config path {}", path.display()))?;
-        fs::create_dir_all(parent).map_err(|error| {
-            format!(
-                "failed to create config directory {}: {error}",
-                parent.display()
-            )
-        })?;
         let payload = serde_json::to_vec_pretty(value)
             .map_err(|error| format!("failed to encode config {concern}: {error}"))?;
-        fs::write(&path, payload)
-            .map_err(|error| format!("failed to write config {}: {error}", path.display()))?;
+        with_state_file_lock(&path, || write_state_file(&path, &payload))?;
         Ok(path)
     }
 
@@ -136,43 +127,18 @@ impl AegisSecretStore {
         if !path.exists() {
             return Ok(Value::Object(Default::default()));
         }
-        let bytes = fs::read(&path)
-            .map_err(|error| format!("failed to read secret file {}: {error}", path.display()))?;
-        let stored: StoredProfileSecrets = match serde_json::from_slice(&bytes) {
-            Ok(stored) => stored,
-            Err(_) => {
-                let default = default_secrets_payload();
-                self.paths
-                    .repair_json_file(&path, &default, "profile secrets")?;
-                StoredProfileSecrets {
-                    version: 1,
-                    secrets: default["secrets"].clone(),
-                }
-            }
-        };
-        Ok(stored.secrets)
+        with_state_file_lock(&path, || self.load_profile_secrets_unlocked(&path))
     }
 
     pub fn save_profile_secrets(&self, profile: &str, secrets: &Value) -> Result<PathBuf, String> {
         validate_name(profile, "profile")?;
         let path = self.paths.profile_secrets_file(profile);
-        let parent = path
-            .parent()
-            .ok_or_else(|| format!("invalid secret path {}", path.display()))?;
-        fs::create_dir_all(parent).map_err(|error| {
-            format!(
-                "failed to create secret directory {}: {error}",
-                parent.display()
-            )
-        })?;
         let payload = serde_json::to_vec_pretty(&StoredProfileSecrets {
             version: 1,
             secrets: secrets.clone(),
         })
         .map_err(|error| format!("failed to encode secret payload: {error}"))?;
-        fs::write(&path, payload)
-            .map_err(|error| format!("failed to write secret file {}: {error}", path.display()))?;
-        set_owner_only_permissions(&path)?;
+        with_state_file_lock(&path, || write_state_file(&path, &payload))?;
         Ok(path)
     }
 
@@ -190,37 +156,49 @@ impl AegisSecretStore {
         input: CredentialInput,
     ) -> Result<(PathBuf, StoredCredentialEntry), String> {
         validate_credential_input(&input)?;
-        let mut secrets = self.load_profile_secrets(profile)?;
-        let mut entries = parse_credentials_entries(&secrets);
-        let now_ms = unix_timestamp_ms();
-        let mut entry = StoredCredentialEntry {
-            origin: input.origin.trim().to_string(),
-            username: input.username.trim().to_string(),
-            password: input.password,
-            username_field: normalize_optional(input.username_field),
-            password_field: normalize_optional(input.password_field),
-            form_label: normalize_optional(input.form_label),
-            created_at_ms: now_ms,
-            updated_at_ms: now_ms,
-        };
-        if let Some(existing) = entries.iter_mut().find(|existing| {
-            existing.origin.eq_ignore_ascii_case(&entry.origin)
-                && existing.username.eq_ignore_ascii_case(&entry.username)
-        }) {
-            entry.created_at_ms = existing.created_at_ms;
-            entry.updated_at_ms = now_ms;
-            *existing = entry.clone();
-        } else {
-            entries.push(entry.clone());
-            entries.sort_by(|left, right| {
-                left.origin
-                    .cmp(&right.origin)
-                    .then_with(|| left.username.cmp(&right.username))
-            });
-        }
-        upsert_credentials_entries(&mut secrets, entries)?;
-        let path = self.save_profile_secrets(profile, &secrets)?;
-        Ok((path, entry))
+        let path = self.paths.profile_secrets_file(profile);
+        with_state_file_lock(&path, || {
+            let mut secrets = if path.exists() {
+                self.load_profile_secrets_unlocked(&path)?
+            } else {
+                Value::Object(Default::default())
+            };
+            let mut entries = parse_credentials_entries(&secrets);
+            let now_ms = unix_timestamp_ms();
+            let mut entry = StoredCredentialEntry {
+                origin: input.origin.trim().to_string(),
+                username: input.username.trim().to_string(),
+                password: input.password.clone(),
+                username_field: normalize_optional(input.username_field.clone()),
+                password_field: normalize_optional(input.password_field.clone()),
+                form_label: normalize_optional(input.form_label.clone()),
+                created_at_ms: now_ms,
+                updated_at_ms: now_ms,
+            };
+            if let Some(existing) = entries.iter_mut().find(|existing| {
+                existing.origin.eq_ignore_ascii_case(&entry.origin)
+                    && existing.username.eq_ignore_ascii_case(&entry.username)
+            }) {
+                entry.created_at_ms = existing.created_at_ms;
+                entry.updated_at_ms = now_ms;
+                *existing = entry.clone();
+            } else {
+                entries.push(entry.clone());
+                entries.sort_by(|left, right| {
+                    left.origin
+                        .cmp(&right.origin)
+                        .then_with(|| left.username.cmp(&right.username))
+                });
+            }
+            upsert_credentials_entries(&mut secrets, entries)?;
+            let payload = serde_json::to_vec_pretty(&StoredProfileSecrets {
+                version: 1,
+                secrets: secrets.clone(),
+            })
+            .map_err(|error| format!("failed to encode secret payload: {error}"))?;
+            write_state_file(&path, &payload)?;
+            Ok((path.clone(), entry))
+        })
     }
 
     pub fn remove_profile_credential(
@@ -229,23 +207,66 @@ impl AegisSecretStore {
         origin: &str,
         username: &str,
     ) -> Result<(PathBuf, bool), String> {
-        let mut secrets = self.load_profile_secrets(profile)?;
-        let mut entries = parse_credentials_entries(&secrets);
-        let before = entries.len();
-        entries.retain(|entry| {
-            !(entry.origin.eq_ignore_ascii_case(origin)
-                && entry.username.eq_ignore_ascii_case(username))
-        });
-        let removed = entries.len() != before;
-        upsert_credentials_entries(&mut secrets, entries)?;
-        let path = self.save_profile_secrets(profile, &secrets)?;
-        Ok((path, removed))
+        let path = self.paths.profile_secrets_file(profile);
+        with_state_file_lock(&path, || {
+            let mut secrets = if path.exists() {
+                self.load_profile_secrets_unlocked(&path)?
+            } else {
+                Value::Object(Default::default())
+            };
+            let mut entries = parse_credentials_entries(&secrets);
+            let before = entries.len();
+            entries.retain(|entry| {
+                !(entry.origin.eq_ignore_ascii_case(origin)
+                    && entry.username.eq_ignore_ascii_case(username))
+            });
+            let removed = entries.len() != before;
+            upsert_credentials_entries(&mut secrets, entries)?;
+            let payload = serde_json::to_vec_pretty(&StoredProfileSecrets {
+                version: 1,
+                secrets: secrets.clone(),
+            })
+            .map_err(|error| format!("failed to encode secret payload: {error}"))?;
+            write_state_file(&path, &payload)?;
+            Ok((path.clone(), removed))
+        })
     }
 
     pub fn clear_profile_credentials(&self, profile: &str) -> Result<PathBuf, String> {
-        let mut secrets = self.load_profile_secrets(profile)?;
-        upsert_credentials_entries(&mut secrets, Vec::new())?;
-        self.save_profile_secrets(profile, &secrets)
+        let path = self.paths.profile_secrets_file(profile);
+        with_state_file_lock(&path, || {
+            let mut secrets = if path.exists() {
+                self.load_profile_secrets_unlocked(&path)?
+            } else {
+                Value::Object(Default::default())
+            };
+            upsert_credentials_entries(&mut secrets, Vec::new())?;
+            let payload = serde_json::to_vec_pretty(&StoredProfileSecrets {
+                version: 1,
+                secrets: secrets.clone(),
+            })
+            .map_err(|error| format!("failed to encode secret payload: {error}"))?;
+            write_state_file(&path, &payload)?;
+            Ok(path.clone())
+        })
+    }
+
+    fn load_profile_secrets_unlocked(&self, path: &std::path::Path) -> Result<Value, String> {
+        let bytes = std::fs::read(path)
+            .map_err(|error| format!("failed to read secret file {}: {error}", path.display()))?;
+        let stored: StoredProfileSecrets = match serde_json::from_slice(&bytes) {
+            Ok(stored) => stored,
+            Err(_) => {
+                let default = default_secrets_payload();
+                self.paths
+                    .repair_json_file(path, &default, "profile secrets")?;
+                StoredProfileSecrets {
+                    version: 1,
+                    secrets: default["secrets"].clone(),
+                }
+            }
+        };
+        Ok(stored.secrets)
     }
 }
 
@@ -360,20 +381,6 @@ fn unix_timestamp_ms() -> u64 {
         .as_millis() as u64
 }
 
-#[cfg(unix)]
-fn set_owner_only_permissions(path: &std::path::Path) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt;
-
-    let permissions = fs::Permissions::from_mode(0o600);
-    fs::set_permissions(path, permissions)
-        .map_err(|error| format!("failed to secure secret file {}: {error}", path.display()))
-}
-
-#[cfg(not(unix))]
-fn set_owner_only_permissions(_path: &std::path::Path) -> Result<(), String> {
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
@@ -393,17 +400,20 @@ mod tests {
         let _guard = aegis_test_env_lock()
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir().expect("temporary state dir should be created");
         unsafe {
             std::env::set_var("AEGIS_HOME", temp.path());
         }
-        let store = AegisConfigStore::detect().unwrap();
+        let store = AegisConfigStore::detect().expect("config store should initialize");
         let path = store.paths.settings_file("agent");
-        fs::write(&path, b"{bad-json").unwrap();
-        let value = store.get("agent").unwrap().unwrap();
+        fs::write(&path, b"{bad-json").expect("corrupt config fixture should be written");
+        let value = store
+            .get("agent")
+            .expect("config lookup should repair corrupt file")
+            .expect("agent config should exist");
         assert_eq!(value["default_profile"], "default");
-        let backups = fs::read_dir(path.parent().unwrap())
-            .unwrap()
+        let backups = fs::read_dir(path.parent().expect("agent config should have a parent"))
+            .expect("agent config directory should be readable")
             .filter_map(Result::ok)
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .filter(|name| name.starts_with("agent.json.corrupt."))
@@ -419,14 +429,16 @@ mod tests {
         let _guard = aegis_test_env_lock()
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir().expect("temporary state dir should be created");
         unsafe {
             std::env::set_var("AEGIS_HOME", temp.path());
         }
-        let store = AegisSecretStore::detect().unwrap();
+        let store = AegisSecretStore::detect().expect("secret store should initialize");
         let path = store.paths.profile_secrets_file("default");
-        fs::write(&path, b"{bad-json").unwrap();
-        let value = store.load_profile_secrets("default").unwrap();
+        fs::write(&path, b"{bad-json").expect("corrupt secret fixture should be written");
+        let value = store
+            .load_profile_secrets("default")
+            .expect("secret lookup should repair corrupt file");
         assert_eq!(
             value,
             serde_json::json!({
@@ -436,8 +448,8 @@ mod tests {
                 }
             })
         );
-        let backups = fs::read_dir(path.parent().unwrap())
-            .unwrap()
+        let backups = fs::read_dir(path.parent().expect("secret file should have a parent"))
+            .expect("secret directory should be readable")
             .filter_map(Result::ok)
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .filter(|name| name.starts_with("secrets.json.corrupt."))
@@ -453,12 +465,14 @@ mod tests {
         let _guard = aegis_test_env_lock()
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir().expect("temporary state dir should be created");
         unsafe {
             std::env::set_var("AEGIS_HOME", temp.path());
         }
-        let store = AegisConfigStore::detect().unwrap();
-        let settings = store.load_credentials_settings().unwrap();
+        let store = AegisConfigStore::detect().expect("config store should initialize");
+        let settings = store
+            .load_credentials_settings()
+            .expect("credentials settings should load");
         assert_eq!(
             settings,
             CredentialsSettings {
@@ -476,11 +490,11 @@ mod tests {
         let _guard = aegis_test_env_lock()
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir().expect("temporary state dir should be created");
         unsafe {
             std::env::set_var("AEGIS_HOME", temp.path());
         }
-        let store = AegisSecretStore::detect().unwrap();
+        let store = AegisSecretStore::detect().expect("secret store should initialize");
         store
             .save_profile_secrets(
                 "default",
@@ -488,7 +502,7 @@ mod tests {
                     "api_keys": {"openai": "secret"}
                 }),
             )
-            .unwrap();
+            .expect("profile secrets should be saved");
         let (_, saved) = store
             .upsert_profile_credential(
                 "default",
@@ -501,21 +515,25 @@ mod tests {
                     form_label: Some("Sign in".into()),
                 },
             )
-            .unwrap();
+            .expect("credential should be upserted");
         assert_eq!(saved.origin, "https://example.com");
-        let credentials = store.load_profile_credentials("default").unwrap();
+        let credentials = store
+            .load_profile_credentials("default")
+            .expect("credentials should load");
         assert_eq!(credentials.len(), 1);
         assert_eq!(credentials[0].username, "saint");
-        let raw = store.load_profile_secrets("default").unwrap();
+        let raw = store
+            .load_profile_secrets("default")
+            .expect("raw secrets should load");
         assert_eq!(raw["api_keys"]["openai"], "secret");
         let (_, removed) = store
             .remove_profile_credential("default", "https://example.com", "saint")
-            .unwrap();
+            .expect("credential should be removed");
         assert!(removed);
         assert!(
             store
                 .load_profile_credentials("default")
-                .unwrap()
+                .expect("credentials should load after removal")
                 .is_empty()
         );
         unsafe {

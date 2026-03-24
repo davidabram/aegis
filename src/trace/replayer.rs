@@ -16,7 +16,7 @@ pub fn replay_trace(path: impl Into<std::path::PathBuf>) -> Result<ReplayState, 
     let recorder = TraceRecorder::load(path)?;
     let trace = recorder.trace();
     let mut final_snapshot = DomSnapshot::default();
-    let mut events = EventStream::default();
+    let mut events = EventStream::unbounded();
 
     for batch in &trace.batches {
         if let Some(snapshot) = &batch.response.snapshot {

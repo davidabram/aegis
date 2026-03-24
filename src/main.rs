@@ -266,7 +266,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 serde_json::to_string_pretty(&serde_json::json!({
                     "session": state.session,
                     "final_snapshot": state.final_snapshot,
-                    "latest_event_sequence": state.events.latest_sequence()
+                    "latest_event_sequence": state.events.latest_sequence(),
+                    "oldest_retained_event_sequence": state.events.oldest_sequence(),
+                    "retained_event_count": state.events.retained_len()
                 }))?
             );
             return Ok(());
