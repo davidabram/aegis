@@ -164,10 +164,7 @@ Secrets rules:
 ## Start A Runtime
 
 ```bash
-aegis \
-  --host-lib ./native/build-xcode/Release/libaegis_host.dylib \
-  --mode headful \
-  serve --addr 127.0.0.1:7878
+aegis --mode headful serve --addr 127.0.0.1:7878
 ```
 
 For live agent debugging:
@@ -368,7 +365,8 @@ When `--samples` is greater than `1`, the harness prints median and max timings 
 
 Aegis uses a local native host library:
 
-- `native/build-xcode/Release/libaegis_host.dylib`
+- packaged installs use `~/Applications/Aegis.app/Contents/Frameworks/libaegis_host.dylib`
+- workspace builds use `native/build-xcode/Release/libaegis_host.dylib`
 
 Native helper commands:
 

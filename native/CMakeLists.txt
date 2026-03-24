@@ -142,6 +142,16 @@ set_target_properties(${AEGIS_HOST_LIBRARY_TARGET} PROPERTIES
   XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED "NO"
 )
 
+add_dependencies(${AEGIS_NATIVE_TARGET} ${AEGIS_HOST_LIBRARY_TARGET})
+add_custom_command(
+  TARGET ${AEGIS_NATIVE_TARGET}
+  POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "${CEF_TARGET_OUT_DIR}/libaegis_host.dylib"
+          "${CEF_APP}/Contents/Frameworks/libaegis_host.dylib"
+  VERBATIM
+)
+
 COPY_MAC_FRAMEWORK("${AEGIS_NATIVE_TARGET}" "${CEF_BINARY_DIR}" "${CEF_APP}")
 
 foreach(_suffix_list ${CEF_HELPER_APP_SUFFIXES})

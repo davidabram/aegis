@@ -115,10 +115,7 @@ Secrets rules:
 Start the API server:
 
 ```bash
-aegis \
-  --host-lib ./native/build-xcode/Release/libaegis_host.dylib \
-  --mode headful \
-  serve --addr 127.0.0.1:7878
+aegis --mode headful serve --addr 127.0.0.1:7878
 ```
 
 Measure cold-start and first-command latency:

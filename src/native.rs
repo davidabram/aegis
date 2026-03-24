@@ -17,6 +17,8 @@ pub const DEFAULT_APP_BUNDLE_PATH: &str = "native/build-xcode/Release/aegis_nati
 #[cfg(target_os = "macos")]
 const DEFAULT_BUNDLED_CLI_NAME: &str = "aegis_cli";
 #[cfg(target_os = "macos")]
+const DEFAULT_BUNDLED_HOST_LIBRARY_NAME: &str = "libaegis_host.dylib";
+#[cfg(target_os = "macos")]
 const LOCAL_INSTALL_APP_NAME: &str = "Aegis.app";
 const CEF_SDK_DIR: &str =
     "third_party/cef/cef_binary_146.0.6+g68649e2+chromium-146.0.7680.154_macosarm64";
@@ -56,7 +58,7 @@ pub fn status(root: impl AsRef<Path>) -> NativeStatus {
     let xcode_project = root.join(XCODE_PROJECT);
     let default_app_bundle = preferred_app_bundle(root);
     let default_app_executable = bundle_executable(&default_app_bundle);
-    let default_host_library = root.join("native/build-xcode/Release/libaegis_host.dylib");
+    let default_host_library = preferred_host_library(root, &default_app_bundle);
 
     NativeStatus {
         cef_sdk_present: cef_sdk_root.exists(),
@@ -103,6 +105,15 @@ pub fn install_local_release(
     let mode = fs::metadata(source_executable)?.permissions().mode();
     fs::set_permissions(&bundled_cli, fs::Permissions::from_mode(mode))?;
 
+    let built_host_library = artifact_for_scheme(root, NativeConfiguration::Release, "aegis_host");
+    let bundled_host_library = bundled_host_library(&install_bundle);
+    if let Some(parent) = bundled_host_library.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::copy(&built_host_library, &bundled_host_library)?;
+    let host_mode = fs::metadata(&built_host_library)?.permissions().mode();
+    fs::set_permissions(&bundled_host_library, fs::Permissions::from_mode(host_mode))?;
+
     clear_quarantine_attribute(&install_bundle);
     ad_hoc_sign_bundle(&install_bundle)?;
 
@@ -138,9 +149,7 @@ pub fn build_xcode(
 ) -> Result<PathBuf, AegisError> {
     let root = root.as_ref();
     let project = root.join(XCODE_PROJECT);
-    if !project.exists() {
-        configure_xcode(root)?;
-    }
+    configure_xcode(root)?;
     let scheme = scheme.unwrap_or(DEFAULT_SCHEME);
 
     run_checked(
@@ -211,6 +220,15 @@ pub fn artifact_for_scheme(
 }
 
 #[cfg(target_os = "macos")]
+pub fn bundled_host_library(bundle: impl AsRef<Path>) -> PathBuf {
+    bundle
+        .as_ref()
+        .join("Contents")
+        .join("Frameworks")
+        .join(DEFAULT_BUNDLED_HOST_LIBRARY_NAME)
+}
+
+#[cfg(target_os = "macos")]
 pub fn open_local_app(root: impl AsRef<Path>) -> Result<PathBuf, AegisError> {
     let bundle = preferred_app_bundle(root.as_ref());
     if !bundle.exists() {
@@ -246,6 +264,22 @@ fn installed_app_bundle() -> Option<PathBuf> {
         .join("Applications")
         .join(LOCAL_INSTALL_APP_NAME);
     bundle.exists().then_some(bundle)
+}
+
+fn workspace_host_library(root: &Path) -> PathBuf {
+    root.join("native/build-xcode/Release/libaegis_host.dylib")
+}
+
+fn preferred_host_library(root: &Path, app_bundle: &Path) -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        let bundled = bundled_host_library(app_bundle);
+        if bundled.exists() {
+            return bundled;
+        }
+    }
+
+    workspace_host_library(root)
 }
 
 #[cfg(target_os = "macos")]
@@ -327,4 +361,62 @@ fn apple_arch() -> &'static str {
 
 fn path_encoding_error() -> AegisError {
     AegisError::Bridge("path is not valid utf-8".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_prefers_bundled_host_library_for_installed_app() {
+        let temp = tempfile::tempdir().expect("temporary dir should be created");
+        let repo_root = temp.path().join("repo");
+        let home_dir = temp.path().join("home");
+        let install_bundle = home_dir.join("Applications").join("Aegis.app");
+        let installed_host = bundled_host_library(&install_bundle);
+
+        fs::create_dir_all(
+            installed_host
+                .parent()
+                .expect("host library should have a parent"),
+        )
+        .expect("bundle framework dir should be created");
+        fs::write(&installed_host, b"host").expect("bundled host should be created");
+        fs::create_dir_all(&repo_root).expect("repo root should be created");
+
+        unsafe {
+            std::env::set_var("HOME", &home_dir);
+        }
+
+        let status = status(&repo_root);
+        assert_eq!(status.default_host_library, installed_host);
+        assert!(status.default_host_library_present);
+
+        unsafe {
+            std::env::remove_var("HOME");
+        }
+    }
+
+    #[test]
+    fn status_falls_back_to_workspace_host_library_without_installed_bundle() {
+        let temp = tempfile::tempdir().expect("temporary dir should be created");
+        let repo_root = temp.path().join("repo");
+        let workspace_host = workspace_host_library(&repo_root);
+
+        fs::create_dir_all(
+            workspace_host
+                .parent()
+                .expect("workspace host library should have a parent"),
+        )
+        .expect("workspace host dir should be created");
+        fs::write(&workspace_host, b"host").expect("workspace host should be created");
+
+        unsafe {
+            std::env::remove_var("HOME");
+        }
+
+        let status = status(&repo_root);
+        assert_eq!(status.default_host_library, workspace_host);
+        assert!(status.default_host_library_present);
+    }
 }
