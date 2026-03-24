@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use aegis::api::server;
 use aegis::{
-    AegisConfigStore, AegisSecretStore, BrowserConfig, BrowserMode, NativeConfiguration,
+    AegisConfigStore, AegisSecretStore, AegisStatePaths, BrowserConfig, BrowserMode, NativeConfiguration,
     build_xcode, configure_xcode, native, replay_trace,
 };
 use clap::{Parser, Subcommand};
@@ -101,6 +101,7 @@ enum NativeConfigurationArg {
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
+    let _state_paths = AegisStatePaths::detect()?;
     let workspace_root = resolve_workspace_root()?;
     let command = resolved_command(&cli);
     let browser_config = BrowserConfig {
