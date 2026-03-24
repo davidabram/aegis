@@ -58,7 +58,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Measure Aegis cold-start and first-command latency.")
     parser.add_argument("--addr", default="127.0.0.1:7915")
     parser.add_argument("--mode", choices=("headless", "headful"), default="headless")
-    parser.add_argument("--start-url", default="https://example.com")
+    parser.add_argument(
+        "--start-url",
+        default="data:text/html,%3C!doctype%20html%3E%3Chtml%3E%3Chead%3E%3Cmeta%20charset%3D%22utf-8%22%3E%3Ctitle%3EAegis%20Bootstrap%3C%2Ftitle%3E%3C%2Fhead%3E%3Cbody%3E%3C%2Fbody%3E%3C%2Fhtml%3E",
+    )
     parser.add_argument("--host-lib", default="native/build-xcode/Release/libaegis_host.dylib")
     parser.add_argument("--timeout", type=float, default=20.0)
     parser.add_argument("--debug-log", default="/tmp/aegis-measure-startup.log")

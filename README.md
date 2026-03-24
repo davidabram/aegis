@@ -48,6 +48,7 @@ Runtime state rules:
 - browser profiles are instance-local
 - session persistence goes through `GET/POST /session`
 - trace persistence goes through `POST /trace/enable`
+- if `--start-url` is omitted, the runtime boots into a local no-network bootstrap page
 
 ## CLI Surface
 
@@ -90,6 +91,9 @@ For live agent debugging:
 For unattended execution:
 
 - use `--mode headless`
+
+If `--start-url` is omitted, Aegis starts on the local bootstrap page and only pays network cost
+when the agent explicitly navigates.
 
 ## HTTP API
 

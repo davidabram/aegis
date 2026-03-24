@@ -42,6 +42,7 @@ Production state model:
 - runtime browser profiles are instance-local and not a persistence API
 - session continuity goes through `GET/POST /session`
 - traces go through `POST /trace/enable`
+- if `--start-url` is omitted, the runtime boots into a local no-network bootstrap page
 
 On macOS, runtime-backed CLI commands are re-execed through the bundled app path automatically.
 
@@ -79,6 +80,9 @@ Measure cold-start and first-command latency:
 ```bash
 python3 scripts/measure_startup.py --mode headful
 ```
+
+The startup harness now measures the local bootstrap page by default so cold-start timings are not
+inflated by external network fetches.
 
 ## Session Shape
 

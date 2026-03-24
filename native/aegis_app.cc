@@ -19,6 +19,9 @@
 
 namespace {
 
+constexpr char kBootstrapUrl[] =
+    "data:text/html,%3C!doctype%20html%3E%3Chtml%3E%3Chead%3E%3Cmeta%20charset%3D%22utf-8%22%3E%3C%2Fhead%3E%3Cbody%3E%3C%2Fbody%3E%3C%2Fhtml%3E";
+
 void AppendDebugLog(const std::string& message) {
   std::string path;
   if (const char* env_path = std::getenv("AEGIS_DEBUG_LOG");
@@ -444,7 +447,7 @@ bool DispatchRendererOperation(const std::string& op,
 AegisApp::AegisApp(bool launch_browser_on_context_initialized,
                    std::string startup_url)
     : launch_browser_on_context_initialized_(launch_browser_on_context_initialized),
-      startup_url_(startup_url.empty() ? "https://example.com" : std::move(startup_url)),
+      startup_url_(startup_url.empty() ? kBootstrapUrl : std::move(startup_url)),
       pending_startup_url_(startup_url_) {}
 
 void AegisApp::OnBeforeCommandLineProcessing(
