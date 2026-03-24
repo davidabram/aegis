@@ -4,6 +4,7 @@ This is the practical control surface for agents.
 
 The production rule is simple:
 
+- run `aegis` with no arguments for the local human browser app
 - run one persistent `serve` process
 - control that runtime over the HTTP API
 - use `headless` or `headful` as modes of that same runtime

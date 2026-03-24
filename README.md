@@ -4,6 +4,7 @@ Aegis is an agentic web browser.
 
 It gives agents one persistent browser runtime, one local control plane, and one correct production path:
 
+- run `aegis` for the local headful browser app
 - start `aegis serve`
 - control the browser over the local HTTP API
 - run in `headless` or `headful` mode against the same session
@@ -50,6 +51,10 @@ Runtime state rules:
 ## CLI Surface
 
 The main binary is `aegis`.
+
+Human-use shortcut:
+
+- `aegis` with no arguments opens the local headful Aegis app
 
 Top-level commands:
 

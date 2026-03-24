@@ -85,6 +85,7 @@ pub async fn serve(
         tx,
         host_library,
     };
+    let startup_host_library = state.host_library.clone();
     let (startup_tx, startup_rx) = mpsc::channel::<Result<(), String>>();
 
     thread::spawn(move || {
@@ -121,6 +122,13 @@ pub async fn serve(
         Ok(Err(error)) => return Err(AegisError::Bridge(error)),
         Err(error) => return Err(AegisError::Bridge(error.to_string())),
     }
+
+    eprintln!(
+        "Aegis serve ready on http://{} ({:?}, host: {})",
+        addr,
+        browser_config.mode,
+        startup_host_library.display()
+    );
 
     loop {
         match rx.recv_timeout(IDLE_PUMP_INTERVAL) {

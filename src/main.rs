@@ -23,7 +23,7 @@ struct Cli {
     #[arg(long, global = true)]
     start_url: Option<String>,
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Clone, clap::ValueEnum)]
@@ -32,7 +32,7 @@ enum BrowserModeArg {
     Headful,
 }
 
-#[derive(Subcommand)]
+#[derive(Clone, Subcommand)]
 enum Commands {
     Serve {
         #[arg(long, default_value = "127.0.0.1:7878")]
@@ -48,12 +48,12 @@ enum Commands {
     },
 }
 
-#[derive(Subcommand)]
+#[derive(Clone, Subcommand)]
 enum TraceCommands {
     Replay { path: PathBuf },
 }
 
-#[derive(Subcommand)]
+#[derive(Clone, Subcommand)]
 enum NativeCommands {
     Status,
     Configure,
@@ -77,19 +77,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let workspace_root = resolve_workspace_root()?;
     maybe_reexec_runtime_command_from_bundle(&cli, &workspace_root)?;
+    let command = resolved_command(&cli);
     let browser_config = BrowserConfig {
-        mode: match cli.mode {
+        mode: match effective_mode(&cli) {
             BrowserModeArg::Headless => BrowserMode::Headless,
             BrowserModeArg::Headful => BrowserMode::Headful,
         },
         start_url: cli.start_url.clone(),
     };
 
-    match cli.command {
+    match &command {
         Commands::Trace {
             command: TraceCommands::Replay { path },
         } => {
-            let state = replay_trace(path)?;
+            let state = replay_trace(path.clone())?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
@@ -101,13 +102,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Ok(());
         }
         Commands::Native { command } => {
-            handle_native_command(command, &workspace_root)?;
+            handle_native_command(command.clone(), &workspace_root)?;
             return Ok(());
         }
         _ => {}
     }
 
-    match cli.command {
+    match command {
         Commands::Serve { addr } => {
             let host_lib = cli
                 .host_lib
@@ -136,6 +137,23 @@ fn resolve_workspace_root() -> Result<PathBuf, Box<dyn std::error::Error>> {
         return Ok(PathBuf::from(root));
     }
     Ok(std::env::current_dir()?)
+}
+
+fn resolved_command(cli: &Cli) -> Commands {
+    cli.command.clone().unwrap_or(Commands::Serve {
+        addr: SocketAddr::from(([127, 0, 0, 1], 7878)),
+    })
+}
+
+fn effective_mode(cli: &Cli) -> BrowserModeArg {
+    if cli.command.is_none() && !mode_flag_was_set() {
+        return BrowserModeArg::Headful;
+    }
+    cli.mode.clone()
+}
+
+fn mode_flag_was_set() -> bool {
+    std::env::args_os().any(|arg| arg == "--mode")
 }
 
 #[cfg(target_os = "macos")]
@@ -169,8 +187,12 @@ fn maybe_reexec_runtime_command_from_bundle(
     Ok(())
 }
 
-fn command_requires_runtime(command: &Commands) -> bool {
-    matches!(command, Commands::Serve { .. })
+fn command_requires_runtime(command: &Option<Commands>) -> bool {
+    match command {
+        None => true,
+        Some(Commands::Serve { .. }) => true,
+        Some(_) => false,
+    }
 }
 
 fn handle_native_command(
