@@ -186,7 +186,7 @@ impl CefBridge {
         Ok(BatchResponse {
             batch_id: 0,
             results: Vec::new(),
-            snapshot: Some(response.snapshot),
+            snapshot: response.snapshot,
             events: response.events,
         })
     }

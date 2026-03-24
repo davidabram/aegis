@@ -205,7 +205,8 @@ curl -X POST http://127.0.0.1:7878/execute \
 ```
 
 Notes:
-- `navigate` returns a full DOM snapshot for page resync
+- `navigate` returns quickly with ordered navigation/events and invalidates the cached DOM tree
+- `GET /dom` or a node-ID command such as `click` / `set_value` repopulates the DOM snapshot on demand
 - `execute` may return `"snapshot": null` for low-latency commands such as `eval` and `scroll`
 - agents should treat the event stream as the incremental source of truth between full snapshots
 
@@ -235,13 +236,14 @@ For robust control, use this sequence:
 
 1. start in `headless` for unattended tasks or `headful` for live debugging
 2. navigate to the target URL
-3. snapshot the DOM
-4. locate target node IDs from the snapshot
-5. execute `click` / `set_value` / `eval`
+3. use `eval` / `scroll` immediately if you do not need node IDs yet
+4. call `GET /dom` when you need a fresh structural view of the page
+5. locate target node IDs from the snapshot
+6. execute `click` / `set_value` / `eval`
    `scroll` is also available as a first-class command for viewport movement without ad hoc JS
-6. read incremental events with `since=<latest_sequence>`
-7. snapshot session if login or state matters
-8. enable traces for runs you may need to replay
+7. read incremental events with `since=<latest_sequence>`
+8. snapshot session if login or state matters
+9. enable traces for runs you may need to replay
 
 ## Constraints
 

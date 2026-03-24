@@ -49,7 +49,8 @@ pub struct NavigateRequest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NavigateResponse {
     pub url: String,
-    pub snapshot: DomSnapshot,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<DomSnapshot>,
     #[serde(default)]
     pub events: Vec<BridgeEventEnvelope>,
 }

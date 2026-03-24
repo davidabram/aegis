@@ -6,7 +6,8 @@ use aegis::{
     events::stream::{EventStream, EventType, SequencedEvent},
     replay_trace,
     transport::protocol::{
-        BatchWireResponse, EvalJsRequest, MessageKind, TraceFile, decode_message, encode_message,
+        BatchWireResponse, EvalJsRequest, MessageKind, NavigateResponse, TraceFile,
+        decode_message, encode_message,
     },
 };
 use std::collections::HashMap;
@@ -145,6 +146,24 @@ fn batch_wire_response_decodes_null_snapshot() {
     let payload: BatchWireResponse =
         decode_message(MessageKind::SendBatch, &frame).expect("frame decodes");
     assert_eq!(payload.batch_id, 5);
+    assert!(payload.snapshot.is_none());
+}
+
+#[test]
+fn navigate_response_decodes_null_snapshot() {
+    let frame = encode_message(
+        MessageKind::Navigate,
+        &NavigateResponse {
+            url: "https://example.com".into(),
+            snapshot: None,
+            events: Vec::new(),
+        },
+    )
+    .expect("frame encodes");
+
+    let payload: NavigateResponse =
+        decode_message(MessageKind::Navigate, &frame).expect("frame decodes");
+    assert_eq!(payload.url, "https://example.com");
     assert!(payload.snapshot.is_none());
 }
 
@@ -290,6 +309,65 @@ fn replay_trace_retains_last_non_null_snapshot() {
     assert_eq!(replay.final_snapshot.nodes.len(), 1);
     assert_eq!(replay.final_snapshot.nodes[0].tag, "html");
     assert_eq!(replay.final_snapshot.nodes[0].children, vec![2]);
+}
+
+#[test]
+fn replay_trace_clears_snapshot_on_navigation_without_snapshot() {
+    let path = env::temp_dir().join("aegis-trace-replay-nav-clear-test.json");
+    let _ = std::fs::remove_file(&path);
+
+    let mut recorder = TraceRecorder::new(
+        &path,
+        BrowserConfig {
+            mode: BrowserMode::Headful,
+            start_url: Some("https://example.com".into()),
+        },
+    );
+    recorder.record_batch(
+        BatchRequest {
+            batch_id: 1,
+            commands: vec![],
+        },
+        aegis::BatchResponse {
+            batch_id: 1,
+            results: Vec::new(),
+            snapshot: Some(DomSnapshot {
+                nodes: vec![DomNode {
+                    id: 1,
+                    tag: "html".into(),
+                    attrs: HashMap::new(),
+                    text: None,
+                    children: vec![2],
+                }],
+            }),
+            events: Vec::new(),
+        },
+        &[],
+    );
+    recorder.record_batch(
+        BatchRequest {
+            batch_id: 2,
+            commands: vec![],
+        },
+        aegis::BatchResponse {
+            batch_id: 2,
+            results: Vec::new(),
+            snapshot: None,
+            events: Vec::new(),
+        },
+        &[SequencedEvent {
+            sequence: 3,
+            timestamp_ms: 3,
+            event: RuntimeEvent::Navigation {
+                url: "https://www.wikipedia.org".into(),
+            },
+        }],
+    );
+    recorder.flush().expect("trace flushes");
+
+    let replay = replay_trace(&path).expect("trace replays");
+    assert!(replay.final_snapshot.nodes.is_empty());
+    assert_eq!(replay.events.latest_sequence(), 3);
 }
 
 #[test]

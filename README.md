@@ -159,7 +159,8 @@ Supported command types:
 
 Execution model:
 
-- `navigate` returns a full DOM snapshot
+- `navigate` returns ordered navigation/events quickly and invalidates the cached DOM tree
+- `GET /dom` or a node-ID command such as `click` / `set_value` materializes a fresh DOM snapshot on demand
 - `execute` can omit the snapshot for low-latency commands like `eval` and `scroll`
 - incremental state flows through `GET /events`
 

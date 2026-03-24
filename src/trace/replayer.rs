@@ -1,6 +1,6 @@
 use crate::browser::BrowserConfig;
 use crate::dom::node::DomSnapshot;
-use crate::events::stream::{EventStream, SequencedEvent};
+use crate::events::stream::{EventStream, RuntimeEvent, SequencedEvent};
 use crate::session::cookies::SessionState;
 use crate::trace::recorder::TraceRecorder;
 use crate::transport::bridge::AegisError;
@@ -21,6 +21,12 @@ pub fn replay_trace(path: impl Into<std::path::PathBuf>) -> Result<ReplayState, 
     for batch in &trace.batches {
         if let Some(snapshot) = &batch.response.snapshot {
             final_snapshot = snapshot.clone();
+        } else if batch
+            .emitted_events
+            .iter()
+            .any(|event| matches!(event.event, RuntimeEvent::Navigation { .. }))
+        {
+            final_snapshot = DomSnapshot::default();
         }
         for event in &batch.emitted_events {
             events.push(SequencedEvent {

@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::commands::command::{Command, CommandResult};
 use crate::dom::diff::DomMutation;
+use crate::dom::node::DomSnapshot;
 use crate::dom::tree::DomTree;
 use crate::events::stream::{EventStream, RuntimeEvent, SequencedEvent};
 use crate::runtime::scheduler::Scheduler;
@@ -36,6 +37,7 @@ pub struct AegisRuntime {
     trace_recorder: Option<TraceRecorder>,
     runtime_bootstrapped: bool,
     bootstrap_duration_ms: Option<u64>,
+    dom_snapshot_valid: bool,
 }
 
 impl AegisRuntime {
@@ -53,11 +55,12 @@ impl AegisRuntime {
             trace_recorder: None,
             runtime_bootstrapped: bootstrap_duration_ms.is_some(),
             bootstrap_duration_ms,
+            dom_snapshot_valid: false,
         })
     }
 
     pub fn execute(&mut self, commands: &[Command]) -> Result<ExecutionReport, AegisError> {
-        self.ensure_runtime_bootstrapped(false)?;
+        self.ensure_runtime_bootstrapped(self.commands_require_dom_snapshot(commands))?;
         let batch_id = self.scheduler.next_batch_id();
         let request = BatchRequest {
             batch_id,
@@ -91,8 +94,16 @@ impl AegisRuntime {
         &mut self,
         response: BatchResponse,
     ) -> Result<Vec<SequencedEvent>, AegisError> {
+        let has_navigation = response
+            .events
+            .iter()
+            .any(|event| matches!(event.event, RuntimeEvent::Navigation { .. }));
         if let Some(snapshot) = response.snapshot.clone() {
             self.dom.replace_snapshot(snapshot);
+            self.dom_snapshot_valid = true;
+        } else if has_navigation {
+            self.dom.replace_snapshot(DomSnapshot::default());
+            self.dom_snapshot_valid = false;
         }
 
         let raw_events = response.events;
@@ -108,6 +119,9 @@ impl AegisRuntime {
     }
 
     fn apply_dom_mutations(&mut self, events: &[BridgeEventEnvelope]) {
+        if !self.dom_snapshot_valid {
+            return;
+        }
         let mut changes = Vec::<DomMutation>::new();
         for event in events {
             if let RuntimeEvent::DomMutation { changes: event_changes } = &event.event {
@@ -189,10 +203,20 @@ impl AegisRuntime {
     }
 
     fn ensure_runtime_bootstrapped(&mut self, capture_snapshot: bool) -> Result<(), AegisError> {
-        if capture_snapshot {
+        if capture_snapshot && !self.dom_snapshot_valid {
             let snapshot = self.bridge.snapshot_dom()?;
             self.dom.replace_snapshot(snapshot);
+            self.dom_snapshot_valid = true;
         }
         Ok(())
+    }
+
+    fn commands_require_dom_snapshot(&self, commands: &[Command]) -> bool {
+        commands.iter().any(|command| {
+            matches!(
+                command,
+                Command::Click { .. } | Command::SetValue { .. }
+            )
+        })
     }
 }

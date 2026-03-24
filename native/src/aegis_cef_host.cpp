@@ -698,10 +698,6 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
 
     auto response = CefDictionaryValue::Create();
     response->SetString("url", CurrentUrl());
-    response->SetValue(
-        "snapshot",
-        ParseJsonValue(InvokeRendererReady(aegis::kOpSnapshotDom, "{}"),
-                       "navigation snapshot is not valid json"));
 
     auto events = CefListValue::Create();
     events->SetValue(0, NavigationEvent(CurrentUrl()));
