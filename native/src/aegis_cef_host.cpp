@@ -57,11 +57,16 @@ void AppendDebugLog(const std::string& message) {
   if (path == nullptr || *path == '\0') {
     return;
   }
+  static const auto start = std::chrono::steady_clock::now();
   std::ofstream output(path, std::ios::app);
   if (!output.is_open()) {
     return;
   }
-  output << message << '\n';
+  const auto elapsed_ms =
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now() - start)
+          .count();
+  output << "[" << elapsed_ms << "ms] " << message << '\n';
 }
 
 std::vector<std::uint8_t> CopyInput(const std::uint8_t* input_ptr, std::size_t input_len) {
