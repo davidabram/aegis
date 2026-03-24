@@ -39,18 +39,22 @@ Global flags:
 
 On macOS, runtime-backed CLI commands are re-execed through the bundled app path automatically.
 
+For local development, the canonical shell command should invoke the workspace binary after a
+fresh `cargo build`. That ensures the CLI you type and the bundled runtime CLI stay on the same
+build when `serve` re-execs through the app bundle.
+
 ## Fast Start
 
 Inspect native paths:
 
 ```bash
-cargo run -- native paths
+aegis native paths
 ```
 
 Start the API server:
 
 ```bash
-cargo run -- \
+aegis \
   --host-lib ./native/build-xcode/Debug/libaegis_host.dylib \
   --mode headful \
   serve --addr 127.0.0.1:7878
@@ -112,7 +116,7 @@ Runtime event types:
 Replay a recorded trace:
 
 ```bash
-cargo run -- trace replay traces/run.json
+aegis trace replay traces/run.json
 ```
 
 Use trace recording for:

@@ -58,6 +58,14 @@ That guide covers:
 
 The main binary is `aegis`.
 
+For local development on macOS, the recommended shell entrypoint is a wrapper that:
+
+- runs `cargo build` in this repo
+- executes `target/aarch64-apple-darwin/debug/aegis`
+- lets Aegis re-exec through the bundled app path automatically for runtime commands
+
+That keeps the shell command and bundled runtime CLI aligned on the latest workspace build.
+
 Top-level commands:
 
 - `serve`: run the local HTTP API
@@ -85,7 +93,7 @@ That means:
 Recommended startup:
 
 ```bash
-cargo run -- \
+aegis \
   --host-lib ./native/build-xcode/Debug/libaegis_host.dylib \
   --mode headful \
   serve --addr 127.0.0.1:7878
@@ -132,21 +140,21 @@ cargo test
 CLI help:
 
 ```bash
-cargo run -- --help
+aegis --help
 ```
 
 Native status / configure / build:
 
 ```bash
-cargo run -- native status
-cargo run -- native configure
-cargo run -- native build
+aegis native status
+aegis native configure
+aegis native build
 ```
 
 Run the local API server:
 
 ```bash
-cargo run -- \
+aegis \
   --host-lib ./native/build-xcode/Debug/libaegis_host.dylib \
   --mode headful \
   serve --addr 127.0.0.1:7878
