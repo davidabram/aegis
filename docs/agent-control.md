@@ -222,6 +222,9 @@ curl http://127.0.0.1:7878/dom
 curl 'http://127.0.0.1:7878/events?since=0'
 ```
 
+Notes:
+- `GET /events` drains pending native/browser events into the runtime stream before it responds
+
 ### Enable Trace
 
 ```bash

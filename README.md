@@ -184,6 +184,7 @@ Event stream semantics:
 
 - events are ordered
 - `sequence` is monotonically increasing
+- `GET /events` drains pending native/browser events into the runtime stream before it responds
 - `since=<n>` returns events with `sequence > n`
 
 Runtime event types:

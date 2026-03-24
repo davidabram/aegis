@@ -150,7 +150,7 @@ pub async fn serve(
                     let _ = reply.send(client.snapshot_dom());
                 }
                 ApiCommand::Events(since, reply) => {
-                    let _ = reply.send(Ok(client.events_since(since)));
+                    let _ = reply.send(client.events_since(since));
                 }
                 ApiCommand::EnableTrace(path, reply) => {
                     client.enable_trace_recording(path);

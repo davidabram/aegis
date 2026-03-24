@@ -106,7 +106,10 @@ impl AegisRuntime {
             self.dom_snapshot_valid = false;
         }
 
-        let raw_events = response.events;
+        Ok(self.apply_event_batch(response.events))
+    }
+
+    fn apply_event_batch(&mut self, raw_events: Vec<BridgeEventEnvelope>) -> Vec<SequencedEvent> {
         self.apply_dom_mutations(&raw_events);
 
         let events = raw_events
@@ -114,8 +117,7 @@ impl AegisRuntime {
             .map(|event| self.sequence_event(event))
             .collect::<Vec<_>>();
         self.events.push_all(events.clone());
-
-        Ok(events)
+        events
     }
 
     fn apply_dom_mutations(&mut self, events: &[BridgeEventEnvelope]) {
@@ -166,6 +168,11 @@ impl AegisRuntime {
 
     pub fn event_stream(&self) -> &EventStream {
         &self.events
+    }
+
+    pub fn drain_pending_events(&mut self) -> Result<Vec<SequencedEvent>, AegisError> {
+        let raw_events = self.bridge.drain_events()?;
+        Ok(self.apply_event_batch(raw_events))
     }
 
     pub fn bridge(&self) -> &CefBridge {
