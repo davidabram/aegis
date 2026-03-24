@@ -10,9 +10,13 @@ pub struct AegisClient {
 }
 
 impl AegisClient {
-    pub fn connect(bridge: CefBridge, browser_config: BrowserConfig) -> Result<Self, AegisError> {
+    pub fn connect(
+        bridge: CefBridge,
+        browser_config: BrowserConfig,
+        bootstrap_duration_ms: Option<u64>,
+    ) -> Result<Self, AegisError> {
         Ok(Self {
-            runtime: AegisRuntime::new(bridge, browser_config)?,
+            runtime: AegisRuntime::new(bridge, browser_config, bootstrap_duration_ms)?,
         })
     }
 

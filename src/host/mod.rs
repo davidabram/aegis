@@ -1,5 +1,6 @@
 use std::ops::{Deref, DerefMut};
 use std::path::Path;
+use std::time::Instant;
 
 use libloading::{Library, Symbol};
 use serde_json::to_vec;
@@ -82,9 +83,11 @@ pub struct LoadedAegisClient {
 
 impl LoadedAegisClient {
     pub fn connect(path: impl AsRef<Path>, config: BrowserConfig) -> Result<Self, AegisError> {
+        let started = Instant::now();
         let host = LoadedHost::open(path, &config)?;
         let bridge = host.bridge()?;
-        let client = AegisClient::connect(bridge, config)?;
+        let bootstrap_duration_ms = Some(started.elapsed().as_millis() as u64);
+        let client = AegisClient::connect(bridge, config, bootstrap_duration_ms)?;
         Ok(Self {
             _host: host,
             client,

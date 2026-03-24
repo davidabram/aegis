@@ -39,7 +39,11 @@ pub struct AegisRuntime {
 }
 
 impl AegisRuntime {
-    pub fn new(bridge: CefBridge, browser_config: BrowserConfig) -> Result<Self, AegisError> {
+    pub fn new(
+        bridge: CefBridge,
+        browser_config: BrowserConfig,
+        bootstrap_duration_ms: Option<u64>,
+    ) -> Result<Self, AegisError> {
         Ok(Self {
             bridge,
             browser_config,
@@ -47,8 +51,8 @@ impl AegisRuntime {
             events: EventStream::default(),
             scheduler: Scheduler::default(),
             trace_recorder: None,
-            runtime_bootstrapped: true,
-            bootstrap_duration_ms: Some(0),
+            runtime_bootstrapped: bootstrap_duration_ms.is_some(),
+            bootstrap_duration_ms,
         })
     }
 
