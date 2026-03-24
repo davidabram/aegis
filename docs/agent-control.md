@@ -9,6 +9,12 @@ The production rule is simple:
 - control that runtime over the HTTP API
 - use `headless` or `headful` as modes of that same runtime
 
+CLI guidance:
+
+- `aegis --help` gives the high-level command map and quick starts
+- `aegis usage` prints the recommended production workflow
+- `aegis examples` prints copy-pasteable commands for common tasks
+
 ## Mental Model
 
 Aegis exposes one browser runtime behind one control plane.

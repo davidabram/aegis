@@ -11,14 +11,40 @@ use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(name = "aegis")]
-#[command(about = "AEGIS agent-native browser runtime")]
+#[command(
+    about = "Agentic web browser CLI and runtime control plane",
+    long_about = "Aegis is an agentic web browser. Use it to launch the local browser, run one persistent serve process, manage Aegis-owned config and secrets, and control the runtime over a local HTTP API.",
+    after_help = CLI_AFTER_HELP
+)]
 struct Cli {
+    #[arg(
+        long,
+        global = true,
+        help = "Path to the native host dylib. Defaults to the canonical local Release build."
+    )]
     #[arg(long, global = true)]
     host_lib: Option<PathBuf>,
+    #[arg(
+        long,
+        global = true,
+        default_value = "default",
+        help = "Active Aegis profile name under ~/.aegis/profiles/<profile>/..."
+    )]
     #[arg(long, global = true, default_value = "default")]
     profile: String,
+    #[arg(
+        long,
+        global = true,
+        default_value = "headless",
+        help = "Browser mode for serve and runtime operations."
+    )]
     #[arg(long, global = true, default_value = "headless")]
     mode: BrowserModeArg,
+    #[arg(
+        long,
+        global = true,
+        help = "Initial URL for the runtime. Defaults to the local bootstrap page."
+    )]
     #[arg(long, global = true)]
     start_url: Option<String>,
     #[command(subcommand)]
@@ -33,18 +59,31 @@ enum BrowserModeArg {
 
 #[derive(Clone, Subcommand)]
 enum Commands {
+    #[command(about = "Start the persistent browser runtime and local HTTP control API")]
     Serve {
+        #[arg(
+            long,
+            default_value = "127.0.0.1:7878",
+            help = "Address to bind the local HTTP control API."
+        )]
         #[arg(long, default_value = "127.0.0.1:7878")]
         addr: SocketAddr,
     },
+    #[command(about = "Show practical usage guidance for the production CLI workflow")]
+    Usage,
+    #[command(about = "Show example commands for common Aegis workflows")]
+    Examples,
+    #[command(about = "Replay deterministic traces")]
     Trace {
         #[command(subcommand)]
         command: TraceCommands,
     },
+    #[command(about = "Manage Aegis-owned config, secrets, and credentials in ~/.aegis")]
     Config {
         #[command(subcommand)]
         command: ConfigCommands,
     },
+    #[command(about = "Inspect, build, and install native macOS artifacts")]
     Native {
         #[command(subcommand)]
         command: NativeCommands,
@@ -53,39 +92,45 @@ enum Commands {
 
 #[derive(Clone, Subcommand)]
 enum TraceCommands {
+    #[command(about = "Replay a recorded Aegis trace file")]
     Replay { path: PathBuf },
 }
 
 #[derive(Clone, Subcommand)]
 enum ConfigCommands {
-    Get {
-        concern: String,
-    },
+    #[command(about = "Read a config concern from ~/.aegis/settings/<concern>.json")]
+    Get { concern: String },
+    #[command(about = "Write a config concern into ~/.aegis/settings/<concern>.json")]
     Set {
         concern: String,
         #[arg(long)]
         json: String,
     },
+    #[command(about = "Read the raw secret payload for a profile")]
     SecretsGet {
         #[arg(long)]
         profile: Option<String>,
     },
+    #[command(about = "Write the raw secret payload for a profile")]
     SecretsSet {
         #[arg(long)]
         profile: Option<String>,
         #[arg(long)]
         json: String,
     },
+    #[command(about = "List Aegis-owned saved browser credentials for a profile")]
     CredentialsList {
         #[arg(long)]
         profile: Option<String>,
     },
+    #[command(about = "Insert or update one saved browser credential for a profile")]
     CredentialsSet {
         #[arg(long)]
         profile: Option<String>,
         #[arg(long)]
         json: String,
     },
+    #[command(about = "Remove one saved browser credential by origin and username")]
     CredentialsRemove {
         #[arg(long)]
         profile: Option<String>,
@@ -94,6 +139,7 @@ enum ConfigCommands {
         #[arg(long)]
         username: String,
     },
+    #[command(about = "Clear all saved browser credentials for a profile")]
     CredentialsClear {
         #[arg(long)]
         profile: Option<String>,
@@ -102,15 +148,20 @@ enum ConfigCommands {
 
 #[derive(Clone, Subcommand)]
 enum NativeCommands {
+    #[command(about = "Show resolved native paths and artifact status")]
     Status,
+    #[command(about = "Generate or refresh the Xcode project")]
     Configure,
+    #[command(about = "Build a native scheme with Xcode")]
     Build {
         #[arg(long, value_enum, default_value = "release")]
         configuration: NativeConfigurationArg,
         #[arg(long)]
         scheme: Option<String>,
     },
+    #[command(about = "Install the canonical local Release app bundle")]
     Install,
+    #[command(about = "Print the canonical native artifact paths")]
     Paths,
 }
 
@@ -119,6 +170,77 @@ enum NativeConfigurationArg {
     Debug,
     Release,
 }
+
+const CLI_AFTER_HELP: &str = "\
+Quick starts:
+  aegis
+      Open the local headful browser app from the canonical installed path.
+
+  aegis --mode headful serve --addr 127.0.0.1:7878
+      Start the visible browser runtime plus local HTTP API.
+
+  aegis config get credentials
+      Inspect credential auto-capture settings.
+
+  aegis examples
+      Show more end-to-end commands.";
+
+const USAGE_TEXT: &str = "\
+Aegis production usage
+
+1. Install or refresh the canonical local app:
+   ./install.sh
+
+2. Human browsing:
+   aegis
+
+3. Start the persistent automation runtime:
+   aegis --mode headless serve --addr 127.0.0.1:7878
+   aegis --mode headful serve --addr 127.0.0.1:7878
+
+4. Manage Aegis-owned state:
+   aegis config get agent
+   aegis config get credentials
+   aegis config credentials-list --profile default
+
+5. Native maintenance:
+   aegis native paths
+   aegis native build --configuration release --scheme aegis_host
+   aegis native install";
+
+const EXAMPLES_TEXT: &str = "\
+Aegis examples
+
+Launch the local browser app:
+  aegis
+
+Start a visible runtime for agent debugging:
+  aegis --mode headful --profile work serve --addr 127.0.0.1:7878
+
+Start a headless runtime:
+  aegis --mode headless serve --addr 127.0.0.1:7878
+
+Inspect local config:
+  aegis config get agent
+  aegis config get credentials
+
+Disable automatic credential capture:
+  aegis config set credentials --json '{\"auto_store\":false}'
+
+List cached credentials for a profile:
+  aegis config credentials-list --profile work
+
+Insert a credential manually:
+  aegis config credentials-set --profile work --json '{\"origin\":\"https://github.com\",\"username\":\"saint\",\"password\":\"...\",\"username_field\":\"login\",\"password_field\":\"password\",\"form_label\":\"Sign in\"}'
+
+Remove one credential:
+  aegis config credentials-remove --profile work --origin https://github.com --username saint
+
+Replay a trace:
+  aegis trace replay traces/run.fozzy
+
+Inspect native paths:
+  aegis native paths";
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -153,6 +275,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             handle_native_command(command.clone(), &workspace_root)?;
             return Ok(());
         }
+        Commands::Usage => {
+            println!("{USAGE_TEXT}");
+            return Ok(());
+        }
+        Commands::Examples => {
+            println!("{EXAMPLES_TEXT}");
+            return Ok(());
+        }
         Commands::Config { command } => {
             handle_config_command(command.clone(), &cli.profile)?;
             return Ok(());
@@ -178,6 +308,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Trace { command } => match command {
             TraceCommands::Replay { .. } => unreachable!("handled before host init"),
         },
+        Commands::Usage => unreachable!("handled before host init"),
+        Commands::Examples => unreachable!("handled before host init"),
         Commands::Config { .. } => unreachable!("handled before host init"),
         Commands::Native { .. } => unreachable!("handled before runtime startup"),
     }

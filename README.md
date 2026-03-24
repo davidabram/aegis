@@ -72,6 +72,8 @@ Human-use shortcut:
 Top-level commands:
 
 - `serve`
+- `usage`
+- `examples`
 - `config get`
 - `config set`
 - `config secrets-get`
@@ -93,6 +95,12 @@ Global runtime flags:
 - `--start-url <url>`
 - `--host-lib <path>`
 - `--profile <name>`
+
+Built-in CLI guidance:
+
+- `aegis --help` gives the high-level command map plus quick starts
+- `aegis usage` prints the recommended production workflow
+- `aegis examples` prints copy-pasteable commands for common tasks
 
 ## Install
 
