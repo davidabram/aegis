@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::sync::mpsc;
 use std::time::Duration;
 use std::thread;
@@ -27,6 +28,14 @@ const IDLE_PUMP_INTERVAL: Duration = Duration::from_millis(10);
 pub struct ApiState {
     tx: mpsc::Sender<ApiCommand>,
     host_library: PathBuf,
+    startup: Arc<Mutex<ServeStartupMetrics>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ServeStartupMetrics {
+    client_connect_ms: u64,
+    api_bind_ms: u64,
+    total_ready_ms: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -79,14 +88,24 @@ pub async fn serve(
     host_library: PathBuf,
     browser_config: BrowserConfig,
 ) -> Result<(), AegisError> {
+    let serve_started = std::time::Instant::now();
+    let client_connect_started = std::time::Instant::now();
     let mut client = LoadedAegisClient::connect(host_library.clone(), browser_config.clone())?;
+    let client_connect_ms = client_connect_started.elapsed().as_millis() as u64;
+    let api_bind_started = std::time::Instant::now();
     let (tx, rx) = mpsc::channel::<ApiCommand>();
+    let startup = Arc::new(Mutex::new(ServeStartupMetrics {
+        client_connect_ms,
+        api_bind_ms: 0,
+        total_ready_ms: 0,
+    }));
+    let (startup_tx, startup_rx) = mpsc::channel::<Result<(), String>>();
     let state = ApiState {
         tx,
         host_library,
+        startup: startup.clone(),
     };
     let startup_host_library = state.host_library.clone();
-    let (startup_tx, startup_rx) = mpsc::channel::<Result<(), String>>();
 
     thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -121,6 +140,15 @@ pub async fn serve(
         Ok(Ok(())) => {}
         Ok(Err(error)) => return Err(AegisError::Bridge(error)),
         Err(error) => return Err(AegisError::Bridge(error.to_string())),
+    }
+
+    let startup_metrics = ServeStartupMetrics {
+        client_connect_ms,
+        api_bind_ms: api_bind_started.elapsed().as_millis() as u64,
+        total_ready_ms: serve_started.elapsed().as_millis() as u64,
+    };
+    if let Ok(mut shared) = startup.lock() {
+        *shared = startup_metrics;
     }
 
     eprintln!(
@@ -192,6 +220,7 @@ struct RuntimeInfo {
     host_library: PathBuf,
     browser: BrowserConfig,
     runtime: RuntimeStatus,
+    startup: ServeStartupMetrics,
 }
 
 async fn runtime_info(State(state): State<ApiState>) -> Result<Json<RuntimeInfo>, ApiError> {
@@ -205,6 +234,15 @@ async fn runtime_info(State(state): State<ApiState>) -> Result<Json<RuntimeInfo>
         host_library: state.host_library,
         browser,
         runtime,
+        startup: state
+            .startup
+            .lock()
+            .map(|metrics| metrics.clone())
+            .unwrap_or(ServeStartupMetrics {
+                client_connect_ms: 0,
+                api_bind_ms: 0,
+                total_ready_ms: 0,
+            }),
     }))
 }
 

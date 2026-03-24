@@ -998,9 +998,11 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
 
       const auto framework_binary =
           paths_.framework_dir / "Chromium Embedded Framework";
+      AppendDebugLog("host: cef_load_library begin");
       if (!cef_load_library(framework_binary.string().c_str())) {
         throw std::runtime_error("failed to load Chromium Embedded Framework");
       }
+      AppendDebugLog("host: cef_load_library complete");
 
       CefMainArgs main_args;
       CefSettings settings;
@@ -1013,7 +1015,9 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       settings.log_severity = LOGSEVERITY_DISABLE;
 
       if (!options_.headless) {
+        AppendDebugLog("host: initialize_host_application begin");
         AegisInitializeBrowserHostApplication();
+        AppendDebugLog("host: initialize_host_application complete");
       }
 
       CefString(&settings.cache_path) = runtime_paths_.profile_dir.string();
@@ -1028,9 +1032,11 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       CefString(&settings.locales_dir_path) = paths_.locales_dir.string();
 
       app_ = new AegisApp(false);
+      AppendDebugLog("host: cef_initialize begin");
       if (!CefInitialize(main_args, settings, app_.get(), nullptr)) {
         throw std::runtime_error("CefInitialize failed");
       }
+      AppendDebugLog("host: cef_initialize complete");
       cef_initialized_ = true;
       AppendDebugLog("host: cef initialized");
 
