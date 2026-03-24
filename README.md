@@ -42,7 +42,7 @@ Local release rule:
 - install one stable local release app at `~/Applications/Aegis.app`
 - use its bundled CLI as the canonical runtime entrypoint
 - do not rebuild or reinstall during normal `aegis` usage
-- refresh artifacts explicitly with `cargo build --release && aegis-bin native install`
+- use `./install.sh` as the canonical one-shot local install path
 
 Runtime state rules:
 
@@ -87,6 +87,27 @@ Global runtime flags:
 - `--start-url <url>`
 - `--host-lib <path>`
 - `--profile <name>`
+
+## Install
+
+One-shot local install:
+
+```bash
+./install.sh
+```
+
+What it does:
+
+- builds the release binary
+- installs `~/Applications/Aegis.app`
+- installs the bundled CLI at `~/Applications/Aegis.app/Contents/MacOS/aegis_cli`
+- bootstraps and verifies the canonical `~/.aegis` state tree
+
+The older helper path now delegates to the same installer:
+
+```bash
+./scripts/install_local_release.sh
+```
 
 ## Config And Secrets
 
