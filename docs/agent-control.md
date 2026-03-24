@@ -209,6 +209,7 @@ For robust control, use this sequence:
 3. snapshot the DOM
 4. locate target node IDs from the snapshot
 5. execute `click` / `set_value` / `eval`
+   `scroll` is also available as a first-class command for viewport movement without ad hoc JS
 6. read incremental events with `since=<latest_sequence>`
 7. snapshot session if login or state matters
 8. enable traces for runs you may need to replay

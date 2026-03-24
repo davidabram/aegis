@@ -375,6 +375,16 @@ bool DispatchRendererOperation(const std::string& op,
           if (!EvalToString(frame, wrapped, &command_result, error)) {
             return false;
           }
+        } else if (type == "scroll") {
+          const auto x = std::to_string(command->GetInt("x"));
+          const auto y = std::to_string(command->GetInt("y"));
+          const auto wrapped =
+              "(() => { try { return JSON.stringify({ok:true,value:(window.__aegis ? window.__aegis.scrollToPosition(" +
+              x + "," + y +
+              ") : null)}); } catch (error) { return JSON.stringify({ok:false,error:String(error && error.message ? error.message : error)}); } })()";
+          if (!EvalToString(frame, wrapped, &command_result, error)) {
+            return false;
+          }
         } else {
           command_result = "{\"ok\":false,\"error\":\"unsupported command " + type + "\"}";
         }

@@ -5,6 +5,8 @@
 
   let nextId = 1;
   const queue = [];
+  const idByNode = new WeakMap();
+  const nodeById = new Map();
   const attrAllowList = new Set([
     "id",
     "class",
@@ -14,19 +16,20 @@
     "href",
     "src",
     "role",
-    "aria-label",
-    "data-aegis-id"
+    "aria-label"
   ]);
 
   function assignId(node) {
     if (!node || node.nodeType !== Node.ELEMENT_NODE) {
       return null;
     }
-    if (!node.__aegis_id) {
-      node.__aegis_id = nextId++;
-      node.setAttribute("data-aegis-id", String(node.__aegis_id));
+    let id = idByNode.get(node);
+    if (id == null) {
+      id = nextId++;
+      idByNode.set(node, id);
+      nodeById.set(id, node);
     }
-    return node.__aegis_id;
+    return id;
   }
 
   function serializeNode(node) {
@@ -76,8 +79,10 @@
     if (!node || node.nodeType !== Node.ELEMENT_NODE) {
       return;
     }
-    if (node.__aegis_id != null) {
-      output.push({ kind: "remove", id: node.__aegis_id });
+    const id = idByNode.get(node);
+    if (id != null) {
+      output.push({ kind: "remove", id });
+      nodeById.delete(id);
     }
     for (const child of Array.from(node.children || [])) {
       collectRemovedNodeIds(child, output);
@@ -99,7 +104,7 @@
   }
 
   function findById(id) {
-    return document.querySelector(`[data-aegis-id="${id}"]`);
+    return nodeById.get(id) || null;
   }
 
   function click(id) {
@@ -126,6 +131,13 @@
     return { id, value };
   }
 
+  function scrollToPosition(x, y) {
+    const nextX = Number.isFinite(x) ? x : window.scrollX;
+    const nextY = Number.isFinite(y) ? y : window.scrollY;
+    window.scrollTo({ left: nextX, top: nextY, behavior: "instant" });
+    return { x: window.scrollX, y: window.scrollY };
+  }
+
   function exec(commands) {
     return commands.map((command) => {
       try {
@@ -134,6 +146,8 @@
             return { ok: true, value: click(command.id) };
           case "set_value":
             return { ok: true, value: setValue(command.id, command.value) };
+          case "scroll":
+            return { ok: true, value: scrollToPosition(command.x, command.y) };
           case "eval":
             return { ok: true, value: Function(command.code)() };
           default:
@@ -234,6 +248,7 @@
     exec,
     click,
     setValue,
+    scrollToPosition,
     drainEvents,
     queue,
     assignId

@@ -8,6 +8,7 @@ pub type NodeId = u64;
 pub enum Command {
     Click { id: NodeId },
     SetValue { id: NodeId, value: String },
+    Scroll { x: i64, y: i64 },
     Eval { code: String },
 }
 

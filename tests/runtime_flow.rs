@@ -20,6 +20,7 @@ fn encodes_batch_request_with_stable_shape() {
                 id: 10,
                 value: "hello".into(),
             },
+            Command::Scroll { x: 0, y: 480 },
         ],
     };
 
@@ -27,6 +28,7 @@ fn encodes_batch_request_with_stable_shape() {
     assert!(encoded.contains("\"batch_id\":42"));
     assert!(encoded.contains("\"type\":\"click\""));
     assert!(encoded.contains("\"type\":\"set_value\""));
+    assert!(encoded.contains("\"type\":\"scroll\""));
 }
 
 #[test]
