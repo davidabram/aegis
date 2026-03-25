@@ -479,7 +479,7 @@ impl AegisRuntime {
                 target: target
                     .as_ref()
                     .map(|target| {
-                        self.resolve_target_id(&snapshot, target, Some(DesiredAction::Type))
+                        self.resolve_target_id(&snapshot, target, Some(DesiredAction::PressKey))
                     })
                     .transpose()?,
                 key: key.clone(),
