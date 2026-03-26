@@ -2,14 +2,6 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PLATFORM="$(uname -s)"
-if [[ "$PLATFORM" == "Darwin" ]]; then
-  INSTALLED_HOST_LIB="${HOME}/Applications/Aegis.app/Contents/Frameworks/libaegis_host.dylib"
-  WORKSPACE_HOST_LIB="${ROOT_DIR}/native/build/macos/Release/libaegis_host.dylib"
-else
-  INSTALLED_HOST_LIB="${HOME}/.local/share/aegis/Aegis/lib/libaegis_host.so"
-  WORKSPACE_HOST_LIB="${ROOT_DIR}/native/build/linux/release/libaegis_host.so"
-fi
 HOST_LIB="${AEGIS_SMOKE_HOST_LIB:-}"
 ADDR="${AEGIS_SMOKE_ADDR:-127.0.0.1:7881}"
 BASE_URL="http://${ADDR}"
@@ -17,8 +9,33 @@ TRACE_PATH="${ROOT_DIR}/.fozzy/host_backed_trace.fozzy"
 PROFILE="host-backed-smoke"
 MODE="${AEGIS_SMOKE_MODE:-headless}"
 
+DOCTOR_JSON="$(cargo run --quiet -- native doctor)"
+INSTALLED_HOST_LIB="$(AEGIS_NATIVE_DOCTOR_JSON="${DOCTOR_JSON}" python3 - <<'PY'
+import json
+import os
+import sys
+
+data = json.loads(os.environ["AEGIS_NATIVE_DOCTOR_JSON"])
+value = data.get("canonical_install_host_library")
+if isinstance(value, str):
+    print(value)
+PY
+)"
+WORKSPACE_HOST_LIB="$(AEGIS_NATIVE_DOCTOR_JSON="${DOCTOR_JSON}" python3 - <<'PY'
+import json
+import os
+import sys
+
+data = json.loads(os.environ["AEGIS_NATIVE_DOCTOR_JSON"])
+value = data.get("workspace_host_library")
+if not isinstance(value, str):
+    raise SystemExit("workspace_host_library missing from native doctor output")
+print(value)
+PY
+)"
+
 if [[ -z "${HOST_LIB}" ]]; then
-  if [[ -f "${INSTALLED_HOST_LIB}" ]]; then
+  if [[ -n "${INSTALLED_HOST_LIB}" && -f "${INSTALLED_HOST_LIB}" ]]; then
     HOST_LIB="${INSTALLED_HOST_LIB}"
   else
     HOST_LIB="${WORKSPACE_HOST_LIB}"

@@ -153,6 +153,8 @@ enum ConfigCommands {
 enum NativeCommands {
     #[command(about = "Show resolved native paths and artifact status")]
     Status,
+    #[command(about = "Show native preflight readiness, tools, and canonical install paths")]
+    Doctor,
     #[command(about = "Generate or refresh native build files")]
     Configure,
     #[command(about = "Build a native target")]
@@ -211,7 +213,8 @@ Aegis production usage
    aegis config credentials-list --profile default
 
 5. Native maintenance:
-   aegis native paths
+ aegis native paths
+  aegis native doctor
   aegis native build --configuration release --target aegis_host
   aegis native install";
 
@@ -416,6 +419,12 @@ fn handle_native_command(
             println!(
                 "{}",
                 serde_json::to_string_pretty(&native::status(workspace_root))?
+            );
+        }
+        NativeCommands::Doctor => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&native::doctor(workspace_root))?
             );
         }
         NativeCommands::Configure => {

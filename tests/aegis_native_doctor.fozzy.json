@@ -1,0 +1,51 @@
+{
+  "version": 1,
+  "name": "aegis-native-doctor",
+  "steps": [
+    {
+      "type": "proc_when",
+      "cmd": "cargo",
+      "args": [
+        "run",
+        "--quiet",
+        "--",
+        "native",
+        "doctor"
+      ],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "times": 1
+    },
+    {
+      "type": "proc_when",
+      "cmd": "cargo",
+      "args": [
+        "run",
+        "--quiet",
+        "--",
+        "native",
+        "paths"
+      ],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "times": 1
+    },
+    {
+      "type": "proc_when",
+      "cmd": "cargo",
+      "args": [
+        "run",
+        "--quiet",
+        "--",
+        "native",
+        "status"
+      ],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "times": 1
+    }
+  ]
+}

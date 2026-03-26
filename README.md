@@ -90,6 +90,7 @@ Top-level commands:
 - `config credentials-clear`
 - `trace replay`
 - `native status`
+- `native doctor`
 - `native configure`
 - `native build`
 - `native install`
@@ -406,6 +407,7 @@ Native helper commands:
 
 ```bash
 aegis native status
+aegis native doctor
 aegis native configure
 aegis native build
 aegis native install
@@ -430,6 +432,10 @@ Run the Fozzy verification gate directly:
 ./scripts/run_fozzy_full.sh
 ```
 
+Use `aegis native doctor` when you need one canonical preflight report for expected CEF paths,
+canonical install paths, workspace build outputs, required tools, and configure/build/install
+readiness.
+
 That installs a stable local app, installs the canonical `aegis` launcher, and gives the runtime
 a stable local app path. On macOS it also clears quarantine attributes and supports code signing.
 
@@ -437,6 +443,7 @@ The Fozzy gate is the canonical validation surface:
 
 - `tests/aegis_core.fozzy.json` validates core Rust/test/clippy behavior
 - `tests/aegis_host_backed.fozzy.json` validates the host-backed runtime flow
+- `tests/aegis_native_doctor.fozzy.json` validates the shared native preflight contract
 - `fozzy.toml` pins `.fozzy/` as the artifact root
 
 For distribution-grade macOS installs, `aegis native install` and `./install.sh` also honor:

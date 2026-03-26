@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_DIR="${ROOT_DIR}/.fozzy/aegis"
 CORE_SCENARIO="tests/aegis_core.fozzy.json"
 HOST_SCENARIO="tests/aegis_host_backed.fozzy.json"
+DOCTOR_SCENARIO="tests/aegis_native_doctor.fozzy.json"
 FUZZ_SCENARIO="tests/aegis_native_server_main_state_config_executor_host_memory_fuzz.fozzy.json"
 EXPLORE_SCENARIO="tests/aegis_native_server_main_state_config_executor_explore.fozzy.json"
 SHRINK_SCENARIO="tests/aegis_native_server_main_state_config_executor_fail_shrink.fozzy.json"
@@ -38,6 +39,7 @@ run_json "${OUT_DIR}/map.suites.json" \
 for scenario in \
   "${CORE_SCENARIO}" \
   "${HOST_SCENARIO}" \
+  "${DOCTOR_SCENARIO}" \
   "${FUZZ_SCENARIO}" \
   "${SHRINK_SCENARIO}"; do
   name="$(basename "${scenario}" .fozzy.json)"
@@ -47,7 +49,7 @@ done
 
 echo "[fozzy] deterministic tests"
 run_json "${OUT_DIR}/test.det.json" \
-  fozzy test "${CORE_SCENARIO}" "${FUZZ_SCENARIO}" --det
+  fozzy test "${CORE_SCENARIO}" "${DOCTOR_SCENARIO}" "${FUZZ_SCENARIO}" --det
 
 echo "[fozzy] deterministic anchor trace"
 run_json "${OUT_DIR}/core.run.json" \
@@ -61,6 +63,13 @@ run_json "${OUT_DIR}/core.ci.json" fozzy ci "${CORE_TRACE}"
 echo "[fozzy] host-backed run"
 run_json "${OUT_DIR}/host.run.json" \
   fozzy run "${HOST_SCENARIO}" \
+    --proc-backend host \
+    --http-backend host \
+    --fs-backend host
+
+echo "[fozzy] native doctor surface"
+run_json "${OUT_DIR}/doctor.run.json" \
+  fozzy run "${DOCTOR_SCENARIO}" \
     --proc-backend host \
     --http-backend host \
     --fs-backend host

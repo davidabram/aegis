@@ -33,6 +33,32 @@ pub struct NativeStatus {
     pub default_host_library_present: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct NativeToolStatus {
+    pub name: String,
+    pub found: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct NativeDoctor {
+    pub status: NativeStatus,
+    pub canonical_install_dir: Option<PathBuf>,
+    pub canonical_install_app_executable: Option<PathBuf>,
+    pub canonical_install_cli: Option<PathBuf>,
+    pub canonical_install_host_library: Option<PathBuf>,
+    pub workspace_app_dir: PathBuf,
+    pub workspace_app_executable: PathBuf,
+    pub workspace_app_executable_present: bool,
+    pub workspace_host_library: PathBuf,
+    pub workspace_host_library_present: bool,
+    pub required_tools: Vec<NativeToolStatus>,
+    pub missing_tools: Vec<String>,
+    pub ready_for_configure: bool,
+    pub ready_for_build: bool,
+    pub ready_for_install: bool,
+    pub notes: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum NativeConfiguration {
     Debug,
@@ -90,6 +116,93 @@ pub fn status(root: impl AsRef<Path>) -> NativeStatus {
         default_app_executable,
         default_host_library_present: default_host_library.exists(),
         default_host_library,
+    }
+}
+
+pub fn doctor(root: impl AsRef<Path>) -> NativeDoctor {
+    let root = root.as_ref();
+    let status = status(root);
+    let platform = status.platform;
+    let canonical_install_dir = canonical_install_dir(platform);
+    let canonical_install_app_executable = canonical_install_dir
+        .as_ref()
+        .map(|app_dir| canonical_app_executable_path(app_dir, platform));
+    let canonical_install_cli = canonical_install_dir
+        .as_ref()
+        .map(|app_dir| bundled_cli_path(app_dir, platform));
+    let canonical_install_host_library = canonical_install_dir
+        .as_ref()
+        .map(|app_dir| bundled_host_library(app_dir, platform));
+    let workspace_app_dir = default_workspace_app_dir(root, platform);
+    let workspace_app_executable = app_executable(&workspace_app_dir, platform);
+    let workspace_host_library = workspace_host_library(root, platform);
+    let required_tools = required_command_names(platform)
+        .into_iter()
+        .map(|name| NativeToolStatus {
+            name: name.to_string(),
+            found: command_exists(name),
+        })
+        .collect::<Vec<_>>();
+    let missing_tools = required_tools
+        .iter()
+        .filter(|tool| !tool.found)
+        .map(|tool| tool.name.clone())
+        .collect::<Vec<_>>();
+    let mut notes = Vec::new();
+
+    if !status.cef_sdk_present {
+        notes.push(format!(
+            "Install the platform CEF bundle under {} before configuring or building native artifacts.",
+            status.cef_sdk_root.display()
+        ));
+    }
+    if !status.configure_artifact_present {
+        notes.push("Run `aegis native configure` to generate native build files.".into());
+    }
+    if !workspace_host_library.exists() {
+        notes.push(format!(
+            "Build the native host library so {} exists.",
+            workspace_host_library.display()
+        ));
+    }
+    if !workspace_app_executable.exists() {
+        notes.push(format!(
+            "Build the native app target so {} exists.",
+            workspace_app_executable.display()
+        ));
+    }
+    if canonical_install_cli
+        .as_ref()
+        .is_some_and(|path| !path.exists())
+    {
+        notes.push(
+            "Run `aegis native install` or `./install.sh` to refresh the canonical local app."
+                .into(),
+        );
+    }
+
+    let ready_for_configure = missing_tools.is_empty() && status.cef_sdk_present;
+    let ready_for_build = ready_for_configure && status.configure_artifact_present;
+    let ready_for_install =
+        ready_for_configure && workspace_host_library.exists() && workspace_app_executable.exists();
+
+    NativeDoctor {
+        status,
+        canonical_install_dir,
+        canonical_install_app_executable,
+        canonical_install_cli,
+        canonical_install_host_library,
+        workspace_app_dir,
+        workspace_app_executable_present: workspace_app_executable.exists(),
+        workspace_app_executable,
+        workspace_host_library_present: workspace_host_library.exists(),
+        workspace_host_library,
+        required_tools,
+        missing_tools,
+        ready_for_configure,
+        ready_for_build,
+        ready_for_install,
+        notes,
     }
 }
 
@@ -357,16 +470,20 @@ fn default_workspace_app_dir(root: &Path, platform: NativePlatform) -> PathBuf {
 }
 
 fn installed_app_dir(platform: NativePlatform) -> Option<PathBuf> {
+    let path = canonical_install_dir(platform)?;
+    path.exists().then_some(path)
+}
+
+fn canonical_install_dir(platform: NativePlatform) -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
-    let path = match platform {
+    Some(match platform {
         NativePlatform::Macos => PathBuf::from(home).join("Applications").join("Aegis.app"),
         NativePlatform::Linux => PathBuf::from(home)
             .join(".local")
             .join("share")
             .join("aegis")
             .join("Aegis"),
-    };
-    path.exists().then_some(path)
+    })
 }
 
 fn workspace_host_library(root: &Path, platform: NativePlatform) -> PathBuf {
@@ -393,6 +510,20 @@ fn bundled_host_library(app_dir: &Path, platform: NativePlatform) -> PathBuf {
             .join("Frameworks")
             .join("libaegis_host.dylib"),
         NativePlatform::Linux => app_dir.join("lib").join("libaegis_host.so"),
+    }
+}
+
+fn bundled_cli_path(app_dir: &Path, platform: NativePlatform) -> PathBuf {
+    match platform {
+        NativePlatform::Macos => app_dir.join("Contents").join("MacOS").join("aegis_cli"),
+        NativePlatform::Linux => app_dir.join("bin").join("aegis_cli"),
+    }
+}
+
+fn canonical_app_executable_path(app_dir: &Path, platform: NativePlatform) -> PathBuf {
+    match platform {
+        NativePlatform::Macos => app_executable(app_dir, platform),
+        NativePlatform::Linux => app_dir.join("bin").join(DEFAULT_TARGET),
     }
 }
 
@@ -643,6 +774,20 @@ fn run_checked(program: &str, args: &[&str], root: &Path) -> Result<(), AegisErr
     )))
 }
 
+fn command_exists(name: &str) -> bool {
+    Command::new("sh")
+        .args(["-c", &format!("command -v {} >/dev/null 2>&1", name)])
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+fn required_command_names(platform: NativePlatform) -> Vec<&'static str> {
+    match platform {
+        NativePlatform::Macos => vec!["cargo", "cmake", "python3", "xcodebuild", "codesign"],
+        NativePlatform::Linux => vec!["cargo", "cmake", "python3"],
+    }
+}
+
 fn apple_arch() -> &'static str {
     match std::env::consts::ARCH {
         "aarch64" => "arm64",
@@ -685,6 +830,60 @@ mod tests {
         if current_platform() == NativePlatform::Linux {
             assert_eq!(status.default_host_library, workspace_host);
             assert!(status.default_host_library_present);
+        }
+    }
+
+    #[test]
+    fn linux_doctor_reports_expected_canonical_install_paths() {
+        let temp = tempfile::tempdir().expect("temporary dir should be created");
+        let repo_root = temp.path().join("repo");
+        let home_dir = temp.path().join("home");
+
+        fs::create_dir_all(&repo_root).expect("repo root should be created");
+        unsafe {
+            std::env::set_var("HOME", &home_dir);
+        }
+
+        let doctor = doctor(&repo_root);
+        if current_platform() == NativePlatform::Linux {
+            assert_eq!(
+                doctor.canonical_install_dir,
+                Some(
+                    home_dir
+                        .join(".local")
+                        .join("share")
+                        .join("aegis")
+                        .join("Aegis")
+                )
+            );
+            assert_eq!(
+                doctor.canonical_install_host_library,
+                Some(
+                    home_dir
+                        .join(".local")
+                        .join("share")
+                        .join("aegis")
+                        .join("Aegis")
+                        .join("lib")
+                        .join("libaegis_host.so")
+                )
+            );
+            assert_eq!(
+                doctor.canonical_install_cli,
+                Some(
+                    home_dir
+                        .join(".local")
+                        .join("share")
+                        .join("aegis")
+                        .join("Aegis")
+                        .join("bin")
+                        .join("aegis_cli")
+                )
+            );
+        }
+
+        unsafe {
+            std::env::remove_var("HOME");
         }
     }
 

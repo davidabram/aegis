@@ -17,6 +17,17 @@ from statistics import median
 IS_MACOS = sys.platform == "darwin"
 
 
+def load_native_doctor(root: Path) -> dict:
+    result = subprocess.run(
+        ["cargo", "run", "--quiet", "--", "native", "doctor"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return json.loads(result.stdout)
+
+
 def http_get_json(url: str, timeout: float) -> dict:
     with urllib.request.urlopen(url, timeout=timeout) as response:
         return json.loads(response.read().decode())
@@ -111,19 +122,15 @@ def main() -> int:
     args = parser.parse_args()
 
     root = Path(__file__).resolve().parents[1]
-    installed_cli = (
-        (
-            Path.home()
-            / "Applications"
-            / "Aegis.app"
-            / "Contents"
-            / "MacOS"
-            / "aegis_cli"
-        )
-        if IS_MACOS
-        else Path.home() / ".local" / "share" / "aegis" / "Aegis" / "bin" / "aegis_cli"
+    doctor = load_native_doctor(root)
+    installed_cli_raw = doctor.get("canonical_install_cli")
+    workspace_host_lib_raw = doctor.get("workspace_host_library")
+    installed_cli = Path(installed_cli_raw) if isinstance(installed_cli_raw, str) else None
+    binary = (
+        installed_cli
+        if installed_cli is not None and installed_cli.exists()
+        else root / "target" / "release" / "aegis"
     )
-    binary = installed_cli if installed_cli.exists() else root / "target" / "release" / "aegis"
     base_url = f"http://{args.addr}"
     host, port_text = args.addr.rsplit(":", 1)
     ensure_port_free(host, int(port_text))
@@ -133,6 +140,10 @@ def main() -> int:
     env["AEGIS_WORKSPACE_ROOT"] = str(root)
     env["AEGIS_BUNDLED_CLI"] = "1"
 
+    host_lib = args.host_lib
+    if host_lib == parser.get_default("host_lib") and isinstance(workspace_host_lib_raw, str):
+        host_lib = workspace_host_lib_raw
+
     command = [
         str(binary),
         "--mode",
@@ -140,7 +151,7 @@ def main() -> int:
         "--start-url",
         args.start_url,
         "--host-lib",
-        args.host_lib,
+        host_lib,
         "serve",
         "--addr",
         args.addr,

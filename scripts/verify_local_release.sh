@@ -3,18 +3,29 @@ set -euo pipefail
 
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 PLATFORM="$(uname -s)"
-if [[ "$PLATFORM" == "Darwin" ]]; then
-  INSTALLED_APP="${HOME}/Applications/Aegis.app"
-else
-  INSTALLED_APP="${HOME}/.local/share/aegis/Aegis"
-fi
 DEFAULT_ENTITLEMENTS="${REPO_ROOT}/native/mac/aegis.entitlements"
+DOCTOR_JSON=""
+INSTALLED_APP=""
 
 cd "${REPO_ROOT}"
 
 if [[ "${AEGIS_CODESIGN_ENTITLEMENTS:-}" == "" && -f "${DEFAULT_ENTITLEMENTS}" ]]; then
   export AEGIS_CODESIGN_ENTITLEMENTS="${DEFAULT_ENTITLEMENTS}"
 fi
+
+DOCTOR_JSON="$(cargo run --quiet -- native doctor)"
+INSTALLED_APP="$(AEGIS_NATIVE_DOCTOR_JSON="${DOCTOR_JSON}" python3 - <<'PY'
+import json
+import os
+import sys
+
+data = json.loads(os.environ["AEGIS_NATIVE_DOCTOR_JSON"])
+value = data.get("canonical_install_dir")
+if not isinstance(value, str):
+    raise SystemExit("canonical_install_dir missing from native doctor output")
+print(value)
+PY
+)"
 
 echo "==> Installing local release"
 cargo run --quiet -- native install

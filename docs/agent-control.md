@@ -80,7 +80,10 @@ Fozzy is the canonical verification driver:
 - `fozzy.toml` sets `.fozzy/` as the runtime artifact root
 - `tests/aegis_core.fozzy.json` covers the core deterministic gate
 - `tests/aegis_host_backed.fozzy.json` covers the host-backed runtime path
+- `tests/aegis_native_doctor.fozzy.json` covers the shared native preflight contract
 - `./scripts/run_fozzy_full.sh` is the full local Fozzy gate
+Use `aegis native doctor` whenever you need the canonical install paths, workspace artifact paths,
+missing-tool report, or configure/build/install readiness from one source of truth.
 Normal `aegis` usage should not rebuild or reinstall anything.
 
 ## Fast Start
@@ -89,6 +92,7 @@ Inspect native paths:
 
 ```bash
 aegis native paths
+aegis native doctor
 ```
 
 Install or refresh the stable local release app:

@@ -23,8 +23,8 @@ pub use config_store::{
 pub use dom::node::{DomNode, DomSnapshot};
 pub use events::stream::{EventReadWindow, EventStream, EventType, RuntimeEvent, SequencedEvent};
 pub use native::{
-    NativeConfiguration, NativePlatform, NativeStatus, app_executable, artifact_for_target,
-    build_native, configure_native,
+    NativeConfiguration, NativeDoctor, NativePlatform, NativeStatus, app_executable,
+    artifact_for_target, build_native, configure_native,
 };
 pub use runtime::executor::{AegisRuntime, ExecutionReport};
 pub use session::cookies::{Cookie, SessionState};

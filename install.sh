@@ -10,21 +10,9 @@ PLATFORM="$(uname -s)"
 RELEASE_BIN="$REPO_ROOT/target/release/aegis"
 LAUNCHER_DIR=""
 LAUNCHER_PATH=""
-
-case "$PLATFORM" in
-  Darwin)
-    INSTALLED_APP_DIR="$HOME/Applications/Aegis.app"
-    INSTALLED_CLI="$INSTALLED_APP_DIR/Contents/MacOS/aegis_cli"
-    ;;
-  Linux)
-    INSTALLED_APP_DIR="$HOME/.local/share/aegis/Aegis"
-    INSTALLED_CLI="$INSTALLED_APP_DIR/bin/aegis_cli"
-    ;;
-  *)
-    printf 'Unsupported platform: %s\n' "$PLATFORM" >&2
-    exit 1
-    ;;
-esac
+INSTALLED_APP_DIR=""
+INSTALLED_CLI=""
+NATIVE_DOCTOR_JSON=""
 
 if [[ -t 1 ]]; then
   C_RESET=$'\033[0m'
@@ -135,6 +123,24 @@ resolve_path_command() {
   type -P "$1" 2>/dev/null || true
 }
 
+doctor_json_field() {
+  local field_name="$1"
+  AEGIS_NATIVE_DOCTOR_JSON="${NATIVE_DOCTOR_JSON}" python3 - "$field_name" <<'PY'
+import json
+import os
+import sys
+
+field = sys.argv[1]
+data = json.loads(os.environ["AEGIS_NATIVE_DOCTOR_JSON"])
+value = data.get(field)
+if value is None:
+    sys.exit(1)
+if not isinstance(value, str):
+    raise SystemExit(f"{field} is not a string field")
+print(value)
+PY
+}
+
 install_launcher() {
   mkdir -p "$LAUNCHER_DIR"
   cat >"$LAUNCHER_PATH" <<EOF
@@ -195,6 +201,10 @@ if [[ ! -d "$REPO_ROOT/third_party/cef" ]]; then
 fi
 
 cd "$REPO_ROOT"
+CURRENT_STEP="checking native preflight readiness"
+NATIVE_DOCTOR_JSON="$(cargo run --quiet -- native doctor)"
+INSTALLED_APP_DIR="$(doctor_json_field canonical_install_dir)" || fail "Unable to resolve canonical install dir from `aegis native doctor`."
+INSTALLED_CLI="$(doctor_json_field canonical_install_cli)" || fail "Unable to resolve canonical install CLI from `aegis native doctor`."
 LAUNCHER_DIR="$(select_launcher_dir)"
 LAUNCHER_PATH="$LAUNCHER_DIR/aegis"
 
