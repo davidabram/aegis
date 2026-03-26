@@ -4,6 +4,7 @@
 
 #include "include/aegis_platform.h"
 #include "include/cef_application_mac.h"
+#include "include/wrapper/cef_library_loader.h"
 
 #include <stdexcept>
 #include <string>
@@ -61,6 +62,10 @@ int AegisPlatformRunMain(AegisPlatformMainEntry entry, int argc, char* argv[]) {
   }
 }
 
+bool AegisPlatformIsMainThread() {
+  return [NSThread isMainThread];
+}
+
 void AegisPlatformInitializeMainApplication(bool embedded_command_mode) {
   [AegisApplication sharedApplication];
   if (!embedded_command_mode) {
@@ -85,6 +90,21 @@ void AegisInstallModalAlertSuppression() {
     Method replacement = class_getInstanceMethod([NSAlert class], @selector(aegis_runModal));
     method_exchangeImplementations(original, replacement);
   });
+}
+
+bool AegisPlatformLoadCefRuntime(const std::filesystem::path& cef_library,
+                                 std::string* error) {
+  if (cef_load_library(cef_library.string().c_str())) {
+    return true;
+  }
+  if (error != nullptr) {
+    *error = "failed to load Chromium Embedded Framework runtime";
+  }
+  return false;
+}
+
+void AegisPlatformUnloadCefRuntime() {
+  cef_unload_library();
 }
 
 void AegisConfigureCefSettings(const AegisCefBootstrapOptions& options,
@@ -195,5 +215,15 @@ AegisPlatformPaths AegisResolvePlatformPaths(
 }
 
 bool AegisUseExternalBrowserHostWindow() { return true; }
+
+void AegisPlatformConfigureTopLevelWindow(CefWindowInfo* window_info,
+                                          const std::string& title,
+                                          int width,
+                                          int height) {
+  if (window_info == nullptr) {
+    return;
+  }
+  window_info->SetAsPopup(kNullWindowHandle, title);
+}
 
 #include "aegis_browser_host_mac.inc"

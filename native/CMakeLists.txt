@@ -16,14 +16,34 @@ if(NOT DEFINED AEGIS_TARGET_PLATFORM)
   endif()
 endif()
 
-if(NOT DEFINED CEF_ROOT)
-  if(AEGIS_TARGET_PLATFORM STREQUAL "macos")
-    set(CEF_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/cef/cef_binary_146.0.6+g68649e2+chromium-146.0.7680.154_macosarm64")
-  elseif(AEGIS_TARGET_PLATFORM STREQUAL "linux")
-    set(CEF_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/cef/cef_binary_146.0.6+g68649e2+chromium-146.0.7680.154_linux64")
+if(NOT DEFINED AEGIS_TARGET_ARCH)
+  if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+    set(AEGIS_TARGET_ARCH "arm64")
+  elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
+    set(AEGIS_TARGET_ARCH "x86_64")
   else()
-    message(FATAL_ERROR "Unsupported AEGIS_TARGET_PLATFORM=${AEGIS_TARGET_PLATFORM}")
+    message(FATAL_ERROR "Unsupported architecture ${CMAKE_SYSTEM_PROCESSOR}")
   endif()
+endif()
+
+if(NOT DEFINED PROJECT_ARCH)
+  set(PROJECT_ARCH "${AEGIS_TARGET_ARCH}")
+endif()
+
+if(NOT DEFINED CEF_ROOT)
+  set(AEGIS_CEF_VERSION "146.0.6+g68649e2+chromium-146.0.7680.154")
+  if(AEGIS_TARGET_PLATFORM STREQUAL "macos" AND AEGIS_TARGET_ARCH STREQUAL "arm64")
+    set(AEGIS_CEF_PLATFORM_SUFFIX "macosarm64")
+  elseif(AEGIS_TARGET_PLATFORM STREQUAL "macos" AND AEGIS_TARGET_ARCH STREQUAL "x86_64")
+    set(AEGIS_CEF_PLATFORM_SUFFIX "macosx64")
+  elseif(AEGIS_TARGET_PLATFORM STREQUAL "linux" AND AEGIS_TARGET_ARCH STREQUAL "arm64")
+    set(AEGIS_CEF_PLATFORM_SUFFIX "linuxarm64")
+  elseif(AEGIS_TARGET_PLATFORM STREQUAL "linux" AND AEGIS_TARGET_ARCH STREQUAL "x86_64")
+    set(AEGIS_CEF_PLATFORM_SUFFIX "linux64")
+  else()
+    message(FATAL_ERROR "Unsupported AEGIS target ${AEGIS_TARGET_PLATFORM}/${AEGIS_TARGET_ARCH}")
+  endif()
+  set(CEF_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/cef/cef_binary_${AEGIS_CEF_VERSION}_${AEGIS_CEF_PLATFORM_SUFFIX}")
 endif()
 
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CEF_ROOT}/cmake")
@@ -54,6 +74,10 @@ add_custom_command(
 add_custom_target(aegis_runtime_header DEPENDS ${AEGIS_RUNTIME_SCRIPT_HEADER})
 
 SET_CEF_TARGET_OUT_DIR()
+
+if(AEGIS_TARGET_PLATFORM STREQUAL "linux")
+  ADD_LOGICAL_TARGET("libcef_lib" "${CEF_LIB_DEBUG}" "${CEF_LIB_RELEASE}")
+endif()
 
 if(AEGIS_TARGET_PLATFORM STREQUAL "macos")
   set(AEGIS_PLATFORM_SOURCES
@@ -169,7 +193,11 @@ add_dependencies(${AEGIS_NATIVE_TARGET} aegis_runtime_header)
 aegis_target_includes(${AEGIS_NATIVE_TARGET})
 target_compile_options(${AEGIS_NATIVE_TARGET} PRIVATE -fexceptions)
 target_compile_definitions(${AEGIS_NATIVE_TARGET} PRIVATE AEGIS_STANDALONE_APP=1)
-target_link_libraries(${AEGIS_NATIVE_TARGET} PRIVATE libcef_dll_wrapper ${CEF_STANDARD_LIBS})
+if(AEGIS_TARGET_PLATFORM STREQUAL "linux")
+  target_link_libraries(${AEGIS_NATIVE_TARGET} PRIVATE libcef_lib libcef_dll_wrapper ${CEF_STANDARD_LIBS})
+else()
+  target_link_libraries(${AEGIS_NATIVE_TARGET} PRIVATE libcef_dll_wrapper ${CEF_STANDARD_LIBS})
+endif()
 aegis_target_output_dirs(${AEGIS_NATIVE_TARGET})
 aegis_set_linux_rpath(${AEGIS_NATIVE_TARGET} "$ORIGIN;$ORIGIN/../lib")
 if(AEGIS_TARGET_PLATFORM STREQUAL "macos")
@@ -185,11 +213,20 @@ add_library(${AEGIS_SHARED_SUPPORT_TARGET} STATIC
 )
 add_dependencies(${AEGIS_SHARED_SUPPORT_TARGET} aegis_runtime_header)
 aegis_target_includes(${AEGIS_SHARED_SUPPORT_TARGET})
+set_target_properties(${AEGIS_SHARED_SUPPORT_TARGET} PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_compile_features(${AEGIS_SHARED_SUPPORT_TARGET} PRIVATE cxx_std_20)
-target_link_libraries(${AEGIS_SHARED_SUPPORT_TARGET} PRIVATE
-  libcef_dll_wrapper
-  ${CEF_STANDARD_LIBS}
-)
+if(AEGIS_TARGET_PLATFORM STREQUAL "linux")
+  target_link_libraries(${AEGIS_SHARED_SUPPORT_TARGET} PRIVATE
+    libcef_lib
+    libcef_dll_wrapper
+    ${CEF_STANDARD_LIBS}
+  )
+else()
+  target_link_libraries(${AEGIS_SHARED_SUPPORT_TARGET} PRIVATE
+    libcef_dll_wrapper
+    ${CEF_STANDARD_LIBS}
+  )
+endif()
 if(AEGIS_TARGET_PLATFORM STREQUAL "macos")
   target_link_libraries(${AEGIS_SHARED_SUPPORT_TARGET} PRIVATE "-framework QuartzCore")
 endif()
@@ -197,11 +234,20 @@ endif()
 add_library(${AEGIS_HOST_LIBRARY_TARGET} SHARED ${AEGIS_HOST_LIBRARY_SOURCES})
 aegis_target_includes(${AEGIS_HOST_LIBRARY_TARGET})
 target_compile_features(${AEGIS_HOST_LIBRARY_TARGET} PRIVATE cxx_std_20)
-target_link_libraries(${AEGIS_HOST_LIBRARY_TARGET} PRIVATE
-  ${AEGIS_SHARED_SUPPORT_TARGET}
-  libcef_dll_wrapper
-  ${CEF_STANDARD_LIBS}
-)
+if(AEGIS_TARGET_PLATFORM STREQUAL "linux")
+  target_link_libraries(${AEGIS_HOST_LIBRARY_TARGET} PRIVATE
+    ${AEGIS_SHARED_SUPPORT_TARGET}
+    libcef_lib
+    libcef_dll_wrapper
+    ${CEF_STANDARD_LIBS}
+  )
+else()
+  target_link_libraries(${AEGIS_HOST_LIBRARY_TARGET} PRIVATE
+    ${AEGIS_SHARED_SUPPORT_TARGET}
+    libcef_dll_wrapper
+    ${CEF_STANDARD_LIBS}
+  )
+endif()
 set_target_properties(${AEGIS_HOST_LIBRARY_TARGET} PROPERTIES OUTPUT_NAME "aegis_host")
 aegis_target_output_dirs(${AEGIS_HOST_LIBRARY_TARGET})
 aegis_set_linux_rpath(${AEGIS_HOST_LIBRARY_TARGET} "$ORIGIN")
@@ -228,7 +274,11 @@ else()
 endif()
 add_dependencies(${AEGIS_HELPER_TARGET} aegis_runtime_header)
 aegis_target_includes(${AEGIS_HELPER_TARGET})
-target_link_libraries(${AEGIS_HELPER_TARGET} PRIVATE libcef_dll_wrapper ${CEF_STANDARD_LIBS})
+if(AEGIS_TARGET_PLATFORM STREQUAL "linux")
+  target_link_libraries(${AEGIS_HELPER_TARGET} PRIVATE libcef_lib libcef_dll_wrapper ${CEF_STANDARD_LIBS})
+else()
+  target_link_libraries(${AEGIS_HELPER_TARGET} PRIVATE libcef_dll_wrapper ${CEF_STANDARD_LIBS})
+endif()
 aegis_target_output_dirs(${AEGIS_HELPER_TARGET})
 aegis_set_linux_rpath(${AEGIS_HELPER_TARGET} "$ORIGIN;$ORIGIN/../lib")
 if(AEGIS_TARGET_PLATFORM STREQUAL "macos")
@@ -268,14 +318,14 @@ elseif(AEGIS_TARGET_PLATFORM STREQUAL "linux")
   add_dependencies(${AEGIS_NATIVE_TARGET} ${AEGIS_HOST_LIBRARY_TARGET} ${AEGIS_HELPER_TARGET})
   foreach(_runtime_file
       libcef.so
+      libEGL.so
+      libGLESv2.so
+      libvk_swiftshader.so
+      libvulkan.so.1
       chrome-sandbox
       icudtl.dat
       snapshot_blob.bin
-      v8_context_snapshot.bin
-      vk_swiftshader_icd.json
-      chrome_100_percent.pak
-      chrome_200_percent.pak
-      resources.pak)
+      v8_context_snapshot.bin)
     if(EXISTS "${CEF_ROOT}/Release/${_runtime_file}")
       add_custom_command(
         TARGET ${AEGIS_NATIVE_TARGET}
@@ -287,14 +337,31 @@ elseif(AEGIS_TARGET_PLATFORM STREQUAL "linux")
       )
     endif()
   endforeach()
-  foreach(_runtime_dir locales swiftshader)
-    if(EXISTS "${CEF_ROOT}/Release/${_runtime_dir}")
+  foreach(_resource_file
+      icudtl.dat
+      vk_swiftshader_icd.json
+      chrome_100_percent.pak
+      chrome_200_percent.pak
+      resources.pak)
+    if(EXISTS "${CEF_ROOT}/Resources/${_resource_file}")
+      add_custom_command(
+        TARGET ${AEGIS_NATIVE_TARGET}
+        POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${CEF_ROOT}/Resources/${_resource_file}"
+                "${CMAKE_BINARY_DIR}/release/${_resource_file}"
+        VERBATIM
+      )
+    endif()
+  endforeach()
+  foreach(_resource_dir locales swiftshader)
+    if(EXISTS "${CEF_ROOT}/Resources/${_resource_dir}")
       add_custom_command(
         TARGET ${AEGIS_NATIVE_TARGET}
         POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_directory
-                "${CEF_ROOT}/Release/${_runtime_dir}"
-                "${CMAKE_BINARY_DIR}/release/${_runtime_dir}"
+                "${CEF_ROOT}/Resources/${_resource_dir}"
+                "${CMAKE_BINARY_DIR}/release/${_resource_dir}"
         VERBATIM
       )
     endif()

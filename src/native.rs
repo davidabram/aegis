@@ -9,6 +9,7 @@ use crate::transport::bridge::AegisError;
 const NATIVE_DIR: &str = "native";
 const DEFAULT_TARGET: &str = "aegis_native";
 const HOST_LIBRARY_TARGET: &str = "aegis_host";
+const CEF_VERSION: &str = "146.0.6+g68649e2+chromium-146.0.7680.154";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -17,9 +18,17 @@ pub enum NativePlatform {
     Linux,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeArch {
+    X86_64,
+    Arm64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct NativeStatus {
     pub platform: NativePlatform,
+    pub arch: NativeArch,
     pub cef_sdk_root: PathBuf,
     pub cef_sdk_present: bool,
     pub build_dir: PathBuf,
@@ -93,18 +102,28 @@ pub fn current_platform() -> NativePlatform {
     }
 }
 
+pub fn current_arch() -> NativeArch {
+    match std::env::consts::ARCH {
+        "x86_64" => NativeArch::X86_64,
+        "aarch64" => NativeArch::Arm64,
+        other => panic!("unsupported architecture: {other}"),
+    }
+}
+
 pub fn status(root: impl AsRef<Path>) -> NativeStatus {
     let root = root.as_ref();
     let platform = current_platform();
-    let cef_sdk_root = root.join(cef_sdk_dir(platform));
-    let build_dir = build_dir(root, platform);
-    let configure_artifact = configure_artifact(root, platform);
+    let arch = current_arch();
+    let cef_sdk_root = root.join(cef_sdk_dir(platform, arch));
+    let build_dir = build_dir(root, platform, arch);
+    let configure_artifact = configure_artifact(root, platform, arch);
     let default_app_dir = preferred_app_dir(root, platform);
     let default_app_executable = app_executable(&default_app_dir, platform);
     let default_host_library = preferred_host_library(root, platform, &default_app_dir);
 
     NativeStatus {
         platform,
+        arch,
         cef_sdk_root: cef_sdk_root.clone(),
         cef_sdk_present: cef_sdk_root.exists(),
         build_dir: build_dir.clone(),
@@ -216,8 +235,9 @@ fn configure_native_for(
 ) -> Result<PathBuf, AegisError> {
     let root = root.as_ref();
     let platform = current_platform();
+    let arch = current_arch();
     let native_dir = root.join(NATIVE_DIR);
-    let build_dir = build_dir(root, platform);
+    let build_dir = build_dir(root, platform, arch);
     fs::create_dir_all(&build_dir)?;
 
     let mut args = vec![
@@ -226,9 +246,10 @@ fn configure_native_for(
         "-B".to_string(),
         path_str(&build_dir)?.to_string(),
         format!("-DAEGIS_TARGET_PLATFORM={}", platform.as_str()),
+        format!("-DAEGIS_TARGET_ARCH={}", arch.as_str()),
         format!(
             "-DCEF_ROOT={}",
-            path_str(&root.join(cef_sdk_dir(platform)))?
+            path_str(&root.join(cef_sdk_dir(platform, arch)))?
         ),
     ];
     if let Some(generator) = configure_generator(platform) {
@@ -238,11 +259,12 @@ fn configure_native_for(
     if platform == NativePlatform::Macos {
         args.push(format!("-DPROJECT_ARCH={}", apple_arch()));
     } else {
+        args.push(format!("-DPROJECT_ARCH={}", arch.as_str()));
         args.push(format!("-DCMAKE_BUILD_TYPE={}", configuration.as_str()));
     }
     let borrowed = args.iter().map(String::as_str).collect::<Vec<_>>();
     run_checked("cmake", &borrowed, root)?;
-    Ok(configure_artifact(root, platform))
+    Ok(configure_artifact(root, platform, arch))
 }
 
 pub fn build_native(
@@ -252,7 +274,8 @@ pub fn build_native(
 ) -> Result<PathBuf, AegisError> {
     let root = root.as_ref();
     let platform = current_platform();
-    let build_dir = build_dir(root, platform);
+    let arch = current_arch();
+    let build_dir = build_dir(root, platform, arch);
     configure_native_for(root, configuration)?;
 
     let target = target.unwrap_or(DEFAULT_TARGET);
@@ -281,7 +304,7 @@ pub fn artifact_for_target(
 ) -> PathBuf {
     let root = root.as_ref();
     let platform = current_platform();
-    let output_dir = artifact_output_dir(root, platform, configuration);
+    let output_dir = artifact_output_dir(root, platform, current_arch(), configuration);
     match (platform, target) {
         (NativePlatform::Macos, HOST_LIBRARY_TARGET) => output_dir.join("libaegis_host.dylib"),
         (NativePlatform::Linux, HOST_LIBRARY_TARGET) => output_dir.join("libaegis_host.so"),
@@ -322,8 +345,8 @@ pub fn install_local_release(
     let root = root.as_ref();
     let source_executable = source_executable.as_ref();
     let platform = current_platform();
-    let install_dir = installed_app_dir(platform).ok_or_else(|| {
-        AegisError::Bridge("HOME is not set; cannot resolve local app install path".into())
+    let install_dir = canonical_install_dir(platform).ok_or_else(|| {
+        AegisError::Bridge("could not resolve canonical local app install path".into())
     })?;
     let build_output_dir = artifact_for_target(root, NativeConfiguration::Release, DEFAULT_TARGET);
     let built_host_library =
@@ -414,6 +437,15 @@ impl NativePlatform {
     }
 }
 
+impl NativeArch {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::X86_64 => "x86_64",
+            Self::Arm64 => "arm64",
+        }
+    }
+}
+
 fn configure_generator(platform: NativePlatform) -> Option<&'static str> {
     match platform {
         NativePlatform::Macos => Some("Xcode"),
@@ -421,12 +453,14 @@ fn configure_generator(platform: NativePlatform) -> Option<&'static str> {
     }
 }
 
-fn build_dir(root: &Path, platform: NativePlatform) -> PathBuf {
-    root.join("native").join("build").join(platform.as_str())
+fn build_dir(root: &Path, platform: NativePlatform, arch: NativeArch) -> PathBuf {
+    root.join("native")
+        .join("build")
+        .join(format!("{}-{}", platform.as_str(), arch.as_str()))
 }
 
-fn configure_artifact(root: &Path, platform: NativePlatform) -> PathBuf {
-    let build_dir = build_dir(root, platform);
+fn configure_artifact(root: &Path, platform: NativePlatform, arch: NativeArch) -> PathBuf {
+    let build_dir = build_dir(root, platform, arch);
     match platform {
         NativePlatform::Macos => build_dir.join("aegis_native.xcodeproj"),
         NativePlatform::Linux => build_dir.join("CMakeCache.txt"),
@@ -436,24 +470,24 @@ fn configure_artifact(root: &Path, platform: NativePlatform) -> PathBuf {
 fn artifact_output_dir(
     root: &Path,
     platform: NativePlatform,
+    arch: NativeArch,
     configuration: NativeConfiguration,
 ) -> PathBuf {
-    let build_dir = build_dir(root, platform);
+    let build_dir = build_dir(root, platform, arch);
     match platform {
         NativePlatform::Macos => build_dir.join(configuration.as_str()),
         NativePlatform::Linux => build_dir.join(configuration.as_str().to_ascii_lowercase()),
     }
 }
 
-fn cef_sdk_dir(platform: NativePlatform) -> &'static str {
-    match platform {
-        NativePlatform::Macos => {
-            "third_party/cef/cef_binary_146.0.6+g68649e2+chromium-146.0.7680.154_macosarm64"
-        }
-        NativePlatform::Linux => {
-            "third_party/cef/cef_binary_146.0.6+g68649e2+chromium-146.0.7680.154_linux64"
-        }
-    }
+fn cef_sdk_dir(platform: NativePlatform, arch: NativeArch) -> String {
+    let platform_suffix = match (platform, arch) {
+        (NativePlatform::Macos, NativeArch::Arm64) => "macosarm64",
+        (NativePlatform::Macos, NativeArch::X86_64) => "macosx64",
+        (NativePlatform::Linux, NativeArch::Arm64) => "linuxarm64",
+        (NativePlatform::Linux, NativeArch::X86_64) => "linux64",
+    };
+    format!("third_party/cef/cef_binary_{CEF_VERSION}_{platform_suffix}")
 }
 
 fn preferred_app_dir(root: &Path, platform: NativePlatform) -> PathBuf {
@@ -465,7 +499,7 @@ fn default_workspace_app_dir(root: &Path, platform: NativePlatform) -> PathBuf {
         NativePlatform::Macos => {
             artifact_for_target(root, NativeConfiguration::Release, DEFAULT_TARGET)
         }
-        NativePlatform::Linux => root.join("native/build/linux/release"),
+        NativePlatform::Linux => build_dir(root, platform, current_arch()).join("release"),
     }
 }
 
@@ -475,7 +509,7 @@ fn installed_app_dir(platform: NativePlatform) -> Option<PathBuf> {
 }
 
 fn canonical_install_dir(platform: NativePlatform) -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
+    let home = resolve_home_dir()?;
     Some(match platform {
         NativePlatform::Macos => PathBuf::from(home).join("Applications").join("Aegis.app"),
         NativePlatform::Linux => PathBuf::from(home)
@@ -488,10 +522,14 @@ fn canonical_install_dir(platform: NativePlatform) -> Option<PathBuf> {
 
 fn workspace_host_library(root: &Path, platform: NativePlatform) -> PathBuf {
     match platform {
-        NativePlatform::Macos => artifact_output_dir(root, platform, NativeConfiguration::Release)
-            .join("libaegis_host.dylib"),
-        NativePlatform::Linux => artifact_output_dir(root, platform, NativeConfiguration::Release)
-            .join("libaegis_host.so"),
+        NativePlatform::Macos => {
+            artifact_output_dir(root, platform, current_arch(), NativeConfiguration::Release)
+                .join("libaegis_host.dylib")
+        }
+        NativePlatform::Linux => {
+            artifact_output_dir(root, platform, current_arch(), NativeConfiguration::Release)
+                .join("libaegis_host.so")
+        }
     }
 }
 
@@ -527,6 +565,26 @@ fn canonical_app_executable_path(app_dir: &Path, platform: NativePlatform) -> Pa
     }
 }
 
+fn resolve_home_dir() -> Option<PathBuf> {
+    if let Some(home) = std::env::var_os("HOME").filter(|home| !home.is_empty()) {
+        return Some(PathBuf::from(home));
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    unsafe {
+        let uid = libc::geteuid();
+        let passwd = libc::getpwuid(uid);
+        if passwd.is_null() || (*passwd).pw_dir.is_null() {
+            return None;
+        }
+        let home = std::ffi::CStr::from_ptr((*passwd).pw_dir);
+        return Some(PathBuf::from(home.to_string_lossy().into_owned()));
+    }
+
+    #[allow(unreachable_code)]
+    None
+}
+
 #[cfg(target_os = "macos")]
 fn macos_bundle_executable_name(bundle: &Path) -> Option<String> {
     let plist = bundle.join("Contents").join("Info");
@@ -559,36 +617,52 @@ fn copy_file_with_mode(source: &Path, target: &Path) -> Result<(), AegisError> {
     Ok(())
 }
 
-fn copy_linux_runtime_artifacts(source_dir: &Path, target_dir: &Path) -> Result<(), AegisError> {
-    fs::create_dir_all(target_dir)?;
+fn copy_linux_runtime_artifacts(source_dir: &Path, lib_dir: &Path) -> Result<(), AegisError> {
+    fs::create_dir_all(lib_dir)?;
     for entry in fs::read_dir(source_dir)? {
         let entry = entry?;
         let path = entry.path();
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        let should_copy = name == "libcef.so"
+        let is_library = name == "libcef.so"
+            || name == "libEGL.so"
+            || name == "libGLESv2.so"
+            || name == "libvk_swiftshader.so"
+            || name == "libvulkan.so.1"
             || name == "chrome-sandbox"
+            || name == "icudtl.dat"
+            || name == "aegis_helper"
             || name == "snapshot_blob.bin"
             || name == "v8_context_snapshot.bin"
-            || name == "icudtl.dat"
             || name == "vk_swiftshader_icd.json"
             || name.ends_with(".pak")
             || name == "locales"
             || name == "swiftshader";
-        if !should_copy {
+        if !is_library {
             continue;
         }
-        let target = target_dir.join(entry.file_name());
+        let target = lib_dir.join(entry.file_name());
         if path.is_dir() {
             copy_dir_recursive(&path, &target)?;
         } else {
             copy_file_with_mode(&path, &target)?;
         }
     }
-    let helper = source_dir.join("aegis_helper");
-    if helper.exists() {
-        copy_file_with_mode(&helper, &target_dir.join("aegis_helper"))?;
+
+    let workspace_resources_dir = source_dir.join("resources");
+    if workspace_resources_dir.exists() {
+        for entry in fs::read_dir(&workspace_resources_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let target = lib_dir.join(entry.file_name());
+            if path.is_dir() {
+                copy_dir_recursive(&path, &target)?;
+            } else {
+                copy_file_with_mode(&path, &target)?;
+            }
+        }
     }
+
     Ok(())
 }
 
@@ -812,6 +886,7 @@ mod tests {
     fn linux_status_falls_back_to_workspace_host_library_without_installed_bundle() {
         let temp = tempfile::tempdir().expect("temporary dir should be created");
         let repo_root = temp.path().join("repo");
+        let home_dir = temp.path().join("home");
         let workspace_host = workspace_host_library(&repo_root, NativePlatform::Linux);
 
         fs::create_dir_all(
@@ -821,9 +896,10 @@ mod tests {
         )
         .expect("workspace host dir should be created");
         fs::write(&workspace_host, b"host").expect("workspace host should be created");
+        fs::create_dir_all(&home_dir).expect("home dir should be created");
 
         unsafe {
-            std::env::remove_var("HOME");
+            std::env::set_var("HOME", &home_dir);
         }
 
         let status = status(&repo_root);
@@ -846,6 +922,7 @@ mod tests {
 
         let doctor = doctor(&repo_root);
         if current_platform() == NativePlatform::Linux {
+            assert_eq!(doctor.status.arch, current_arch());
             assert_eq!(
                 doctor.canonical_install_dir,
                 Some(
@@ -880,10 +957,73 @@ mod tests {
                         .join("aegis_cli")
                 )
             );
+            if current_arch() == NativeArch::Arm64 {
+                assert!(
+                    doctor
+                        .status
+                        .cef_sdk_root
+                        .to_string_lossy()
+                        .contains("linuxarm64")
+                );
+            }
         }
 
         unsafe {
             std::env::remove_var("HOME");
+        }
+    }
+
+    #[test]
+    fn canonical_install_dir_resolves_before_first_install() {
+        let temp = tempfile::tempdir().expect("temporary dir should be created");
+        let repo_root = temp.path().join("repo");
+        let home_dir = temp.path().join("home");
+        fs::create_dir_all(home_dir.join(".local").join("share"))
+            .expect("home share dir should be created");
+        fs::create_dir_all(&repo_root).expect("repo root should be created");
+
+        unsafe {
+            std::env::set_var("HOME", &home_dir);
+        }
+
+        let install_dir =
+            canonical_install_dir(current_platform()).expect("install dir should resolve");
+        assert!(
+            !install_dir.exists(),
+            "first-install destination should start absent"
+        );
+        assert_eq!(installed_app_dir(current_platform()), None);
+        assert_eq!(
+            preferred_app_dir(&repo_root, current_platform()),
+            default_workspace_app_dir(&repo_root, current_platform())
+        );
+
+        unsafe {
+            std::env::remove_var("HOME");
+        }
+    }
+
+    #[test]
+    fn canonical_install_dir_falls_back_to_account_home() {
+        let original_home = std::env::var_os("HOME");
+
+        unsafe {
+            std::env::remove_var("HOME");
+        }
+
+        let resolved = canonical_install_dir(current_platform());
+        assert!(
+            resolved.is_some(),
+            "canonical install dir should resolve from account metadata without HOME"
+        );
+
+        match original_home {
+            Some(home) => unsafe {
+                std::env::set_var("HOME", home);
+            },
+            None => unsafe {
+                std::env::remove_var("HOME");
+            },
         }
     }
 

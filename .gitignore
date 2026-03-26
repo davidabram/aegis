@@ -1,3 +1,5 @@
 .fozzy/
 target/
 fozzy-host-memory-fuzz.txt
+native/build/
+third_party/

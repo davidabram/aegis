@@ -68,7 +68,16 @@ trap cleanup EXIT
 
 cd "${ROOT_DIR}"
 mkdir -p "$(dirname "${TRACE_PATH}")"
-cargo run --quiet -- \
+RUNTIME_CMD=(cargo run --quiet --)
+if [[ "$(uname -s)" == "Linux" && "${MODE}" == "headless" && -z "${DISPLAY:-}" ]]; then
+  if command -v xvfb-run >/dev/null 2>&1; then
+    RUNTIME_CMD=(xvfb-run -a "${RUNTIME_CMD[@]}")
+  else
+    echo "headless Linux runtime requires a display backend; install xvfb or set DISPLAY" >&2
+    exit 1
+  fi
+fi
+"${RUNTIME_CMD[@]}" \
   --host-lib "${HOST_LIB}" \
   --mode "${MODE}" \
   --profile "${PROFILE}" \

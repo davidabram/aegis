@@ -15,6 +15,7 @@ from pathlib import Path
 from statistics import median
 
 IS_MACOS = sys.platform == "darwin"
+IS_LINUX = sys.platform.startswith("linux")
 
 
 def load_native_doctor(root: Path) -> dict:
@@ -156,6 +157,14 @@ def main() -> int:
         "--addr",
         args.addr,
     ]
+    if IS_LINUX and args.mode == "headless" and not env.get("DISPLAY"):
+        xvfb_run = shutil.which("xvfb-run")
+        if xvfb_run:
+            command = [xvfb_run, "-a", *command]
+        else:
+            raise RuntimeError(
+                "Linux headless startup requires a display backend; install xvfb or set DISPLAY"
+            )
 
     def run_sample(sample_index: int) -> dict:
         debug_log = args.debug_log

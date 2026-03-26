@@ -34,14 +34,19 @@ struct AegisCefBootstrapOptions {
 };
 
 using AegisPlatformMainEntry = int (*)(int argc, char* argv[]);
+class CefWindowInfo;
 
 std::string AegisStandaloneRootCachePath();
 std::string AegisStandaloneCachePath();
 int AegisPlatformRunMain(AegisPlatformMainEntry entry, int argc, char* argv[]);
+bool AegisPlatformIsMainThread();
 void AegisPlatformInitializeMainApplication(bool embedded_command_mode);
 void AegisPlatformConfigureActivation(bool embedded_command_mode, bool headful_mode);
 void AegisInstallModalAlertSuppression();
 void AegisInitializeBrowserHostApplication();
+bool AegisPlatformLoadCefRuntime(const std::filesystem::path& cef_library,
+                                 std::string* error);
+void AegisPlatformUnloadCefRuntime();
 void AegisConfigureCefSettings(const AegisCefBootstrapOptions& options,
                                CefSettings* settings);
 bool AegisExecuteProcessAndInitialize(const CefMainArgs& main_args,
@@ -52,6 +57,10 @@ bool AegisExecuteProcessAndInitialize(const CefMainArgs& main_args,
 AegisPlatformPaths AegisResolvePlatformPaths(
     const std::filesystem::path& library_dir);
 bool AegisUseExternalBrowserHostWindow();
+void AegisPlatformConfigureTopLevelWindow(CefWindowInfo* window_info,
+                                          const std::string& title,
+                                          int width,
+                                          int height);
 CefWindowHandle AegisCreateBrowserHostView(const std::string& title,
                                            int width,
                                            int height);

@@ -2,7 +2,12 @@
 
 #include "include/cef_app.h"
 
+#include <sys/syscall.h>
+#include <unistd.h>
+
+#include <fstream>
 #include <stdexcept>
+#include <vector>
 
 namespace {
 
@@ -13,10 +18,39 @@ std::filesystem::path DetectInstallRoot(const std::filesystem::path& library_dir
   return library_dir;
 }
 
+std::vector<std::string> ReadProcessCommandLine() {
+  std::ifstream input("/proc/self/cmdline", std::ios::binary);
+  if (!input.is_open()) {
+    return {};
+  }
+
+  std::vector<std::string> argv;
+  std::string current;
+  char ch = '\0';
+  while (input.get(ch)) {
+    if (ch == '\0') {
+      if (!current.empty()) {
+        argv.push_back(current);
+        current.clear();
+      }
+      continue;
+    }
+    current.push_back(ch);
+  }
+  if (!current.empty()) {
+    argv.push_back(current);
+  }
+  return argv;
+}
+
 }  // namespace
 
 int AegisPlatformRunMain(AegisPlatformMainEntry entry, int argc, char* argv[]) {
   return entry(argc, argv);
+}
+
+bool AegisPlatformIsMainThread() {
+  return static_cast<pid_t>(syscall(SYS_gettid)) == getpid();
 }
 
 void AegisPlatformInitializeMainApplication(bool embedded_command_mode) {
@@ -31,6 +65,15 @@ void AegisPlatformConfigureActivation(bool embedded_command_mode, bool headful_m
 void AegisInstallModalAlertSuppression() {}
 
 void AegisInitializeBrowserHostApplication() {}
+
+bool AegisPlatformLoadCefRuntime(const std::filesystem::path& cef_library,
+                                 std::string* error) {
+  static_cast<void>(cef_library);
+  static_cast<void>(error);
+  return true;
+}
+
+void AegisPlatformUnloadCefRuntime() {}
 
 void AegisConfigureCefSettings(const AegisCefBootstrapOptions& options,
                                CefSettings* settings) {
@@ -66,21 +109,34 @@ bool AegisExecuteProcessAndInitialize(const CefMainArgs& main_args,
                                       CefRefPtr<CefApp> app,
                                       int* subprocess_exit_code,
                                       std::string* error) {
+  static_cast<void>(main_args);
   if (options.initialize_browser_host_application) {
     AegisInitializeBrowserHostApplication();
   }
 
+  auto argv_storage = ReadProcessCommandLine();
+  if (argv_storage.empty()) {
+    argv_storage.emplace_back("/proc/self/exe");
+  }
+  std::vector<char*> argv;
+  argv.reserve(argv_storage.size());
+  for (auto& arg : argv_storage) {
+    argv.push_back(arg.data());
+  }
+  CefMainArgs resolved_main_args(static_cast<int>(argv.size()), argv.data());
+
   CefSettings settings;
   AegisConfigureCefSettings(options, &settings);
 
-  const int execute_process_result = CefExecuteProcess(main_args, app.get(), nullptr);
+  const int execute_process_result =
+      CefExecuteProcess(resolved_main_args, app.get(), nullptr);
   if (subprocess_exit_code != nullptr) {
     *subprocess_exit_code = execute_process_result;
   }
   if (execute_process_result >= 0) {
     return false;
   }
-  if (!CefInitialize(main_args, settings, app.get(), nullptr)) {
+  if (!CefInitialize(resolved_main_args, settings, app.get(), nullptr)) {
     if (error != nullptr) {
       *error = "CefInitialize failed";
     }
@@ -124,13 +180,24 @@ AegisPlatformPaths AegisResolvePlatformPaths(
     throw std::runtime_error("libcef.so is missing next to the host library");
   }
   if (!std::filesystem::exists(paths.locales_dir)) {
-    throw std::runtime_error("CEF locales are missing next to the host library");
+    throw std::runtime_error("CEF locales are missing from the Linux runtime resources");
   }
 
   return paths;
 }
 
 bool AegisUseExternalBrowserHostWindow() { return false; }
+
+void AegisPlatformConfigureTopLevelWindow(CefWindowInfo* window_info,
+                                          const std::string& title,
+                                          int width,
+                                          int height) {
+  if (window_info == nullptr) {
+    return;
+  }
+  CefString(&window_info->window_name) = title;
+  window_info->bounds = CefRect(0, 0, width, height);
+}
 
 CefWindowHandle AegisCreateBrowserHostView(const std::string& title,
                                            int width,
