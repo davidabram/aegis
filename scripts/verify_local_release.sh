@@ -2,7 +2,12 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-APP_BUNDLE="${HOME}/Applications/Aegis.app"
+PLATFORM="$(uname -s)"
+if [[ "$PLATFORM" == "Darwin" ]]; then
+  INSTALLED_APP="${HOME}/Applications/Aegis.app"
+else
+  INSTALLED_APP="${HOME}/.local/share/aegis/Aegis"
+fi
 DEFAULT_ENTITLEMENTS="${REPO_ROOT}/native/mac/aegis.entitlements"
 
 cd "${REPO_ROOT}"
@@ -17,14 +22,18 @@ cargo run --quiet -- native install
 echo "==> Checking native paths"
 cargo run --quiet -- native status
 
-echo "==> Verifying bundle signature"
-codesign --verify --strict --verbose=2 "${APP_BUNDLE}"
+if [[ "$PLATFORM" == "Darwin" ]]; then
+  echo "==> Verifying bundle signature"
+  codesign --verify --strict --verbose=2 "${INSTALLED_APP}"
 
-if [[ "${AEGIS_CODESIGN_IDENTITY:-}" != "" && "${AEGIS_CODESIGN_IDENTITY:-}" != "-" ]]; then
-  echo "==> Assessing bundle with Gatekeeper"
-  spctl --assess --type execute --verbose=4 "${APP_BUNDLE}"
+  if [[ "${AEGIS_CODESIGN_IDENTITY:-}" != "" && "${AEGIS_CODESIGN_IDENTITY:-}" != "-" ]]; then
+    echo "==> Assessing bundle with Gatekeeper"
+    spctl --assess --type execute --verbose=4 "${INSTALLED_APP}"
+  else
+    echo "==> Skipping Gatekeeper assessment for ad hoc signature"
+  fi
 else
-  echo "==> Skipping Gatekeeper assessment for ad hoc signature"
+  echo "==> Linux install verified at ${INSTALLED_APP}"
 fi
 
 echo "==> Running host-backed smoke"

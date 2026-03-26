@@ -59,18 +59,22 @@ Production state model:
 - if `--start-url` is omitted, the runtime boots into a local no-network bootstrap page
 - Aegis does not use Chrome/Brave Safe Storage or browser login/profile databases in the production path
 
-For local production-like use, the canonical path is one installed release app at
-`~/Applications/Aegis.app` plus its bundled CLI at
-`~/Applications/Aegis.app/Contents/MacOS/aegis_cli`, fronted by the installed shell launcher at
-`~/.local/bin/aegis` or `~/bin/aegis`.
+For local production-like use, the canonical path is one installed release app at a
+platform-native location:
 
-For production-signing workflows, the installer honors `AEGIS_CODESIGN_IDENTITY`,
-`AEGIS_CODESIGN_OPTIONS`, and `AEGIS_CODESIGN_ENTITLEMENTS`. It signs nested helpers/frameworks
-explicitly, verifies the installed bundle with `codesign --verify --strict`, and runs
-`spctl --assess` when a real signing identity is configured.
-For the strongest local-only workflow without a paid Apple account, run
-`./scripts/verify_local_release.sh`. It installs the canonical app, verifies the bundle signature,
-skips Gatekeeper assessment for ad hoc signing, and then runs the host-backed smoke test.
+- macOS app path: `~/Applications/Aegis.app`
+- macOS bundled CLI path: `~/Applications/Aegis.app/Contents/MacOS/aegis_cli`
+- Linux app path: `~/.local/share/aegis/Aegis`
+- Linux bundled CLI path: `~/.local/share/aegis/Aegis/bin/aegis_cli`
+- installed shell launcher: `~/.local/bin/aegis` or `~/bin/aegis`
+
+For production-signing workflows on macOS, the installer honors `AEGIS_CODESIGN_IDENTITY`,
+`AEGIS_CODESIGN_OPTIONS`, and `AEGIS_CODESIGN_ENTITLEMENTS`. It signs nested
+helpers/frameworks explicitly, verifies the installed bundle with `codesign --verify --strict`,
+and runs `spctl --assess` when a real signing identity is configured.
+For the strongest local verification workflow, run `./scripts/verify_local_release.sh`. It
+installs the canonical app, runs platform-appropriate verification, and then runs the host-backed
+smoke test.
 Normal `aegis` usage should not rebuild or reinstall anything.
 
 ## Fast Start
@@ -402,7 +406,7 @@ For robust control, use this sequence:
 
 - `serve` defaults to the release host library if it exists
 - the canonical local command path uses the installed bundled CLI, not an on-demand rebuild
-- native macOS builds require the local CEF SDK under `third_party/cef/...`
+- native builds require the platform CEF SDK under `third_party/cef/...`
 - the published GitHub repo intentionally excludes the vendored CEF binary payload
-- local ad hoc signing can reduce repeated local trust noise, but it does not bypass macOS
+- local ad hoc signing can reduce repeated local trust noise on macOS, but it does not bypass macOS
   Automation, Accessibility, or other privacy approvals
