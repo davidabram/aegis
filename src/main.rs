@@ -5,7 +5,8 @@ use std::path::PathBuf;
 use aegis::api::server;
 use aegis::{
     AegisConfigStore, AegisSecretStore, AegisStatePaths, BrowserConfig, BrowserMode,
-    CredentialInput, NativeConfiguration, build_xcode, configure_xcode, native, replay_trace,
+    CredentialInput, NativeConfiguration, app_executable, build_native, configure_native, native,
+    replay_trace,
 };
 use clap::{Parser, Subcommand};
 
@@ -20,7 +21,7 @@ struct Cli {
     #[arg(
         long,
         global = true,
-        help = "Path to the native host dylib. Defaults to the canonical local Release build."
+        help = "Path to the native host library. Defaults to the canonical local Release build."
     )]
     #[arg(long, global = true)]
     host_lib: Option<PathBuf>,
@@ -85,7 +86,7 @@ enum Commands {
         #[command(subcommand)]
         command: ConfigCommands,
     },
-    #[command(about = "Inspect, build, and install native macOS artifacts")]
+    #[command(about = "Inspect, build, and install native runtime artifacts")]
     Native {
         #[command(subcommand)]
         command: NativeCommands,
@@ -152,16 +153,16 @@ enum ConfigCommands {
 enum NativeCommands {
     #[command(about = "Show resolved native paths and artifact status")]
     Status,
-    #[command(about = "Generate or refresh the Xcode project")]
+    #[command(about = "Generate or refresh native build files")]
     Configure,
-    #[command(about = "Build a native scheme with Xcode")]
+    #[command(about = "Build a native target")]
     Build {
         #[arg(long, value_enum, default_value = "release")]
         configuration: NativeConfigurationArg,
         #[arg(long)]
-        scheme: Option<String>,
+        target: Option<String>,
     },
-    #[command(about = "Install the canonical local Release app bundle")]
+    #[command(about = "Install the canonical local Release app")]
     Install,
     #[command(about = "Print the canonical native artifact paths")]
     Paths,
@@ -211,8 +212,8 @@ Aegis production usage
 
 5. Native maintenance:
    aegis native paths
-   aegis native build --configuration release --scheme aegis_host
-   aegis native install";
+  aegis native build --configuration release --target aegis_host
+  aegis native install";
 
 const EXAMPLES_TEXT: &str = "\
 Aegis examples
@@ -299,7 +300,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             #[cfg(not(target_os = "macos"))]
             {
-                return Err("`aegis open` is only supported on macOS".into());
+                let app_dir = native::open_local_app(&workspace_root)?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "opened_app_dir": app_dir,
+                    }))?
+                );
+                return Ok(());
             }
         }
         Commands::Usage => {
@@ -325,7 +333,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or_else(|| native::status(&workspace_root).default_host_library);
             if !host_lib.exists() {
                 return Err(format!(
-                    "host library not found at {}. Run `aegis native build --configuration release --scheme aegis_host` first or pass --host-lib.",
+                    "host library not found at {}. Run `aegis native build --configuration release --target aegis_host` first or pass --host-lib.",
                     host_lib.display()
                 )
                 .into());
@@ -411,58 +419,54 @@ fn handle_native_command(
             );
         }
         NativeCommands::Configure => {
-            let project = configure_xcode(workspace_root)?;
+            let artifact = configure_native(workspace_root)?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
-                    "xcode_project": project,
+                    "configure_artifact": artifact,
                 }))?
             );
         }
         NativeCommands::Build {
             configuration,
-            scheme,
+            target,
         } => {
             let configuration = match configuration {
                 NativeConfigurationArg::Debug => NativeConfiguration::Debug,
                 NativeConfigurationArg::Release => NativeConfiguration::Release,
             };
-            let artifact = build_xcode(workspace_root, configuration, scheme.as_deref())?;
+            let artifact = build_native(workspace_root, configuration, target.as_deref())?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
                     "configuration": configuration.as_str(),
-                    "scheme": scheme.unwrap_or_else(|| "aegis_native".to_string()),
+                    "target": target.unwrap_or_else(|| "aegis_native".to_string()),
                     "artifact": artifact,
                 }))?
             );
         }
         NativeCommands::Install => {
-            #[cfg(target_os = "macos")]
-            {
-                let current_exe = std::env::current_exe()?;
-                let bundle = native::install_local_release(workspace_root, &current_exe)?;
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "installed_app_bundle": bundle,
-                        "installed_app_executable": native::bundle_executable(&bundle),
-                    }))?
-                );
-            }
-            #[cfg(not(target_os = "macos"))]
-            {
-                return Err("`aegis native install` is only supported on macOS".into());
-            }
+            let current_exe = std::env::current_exe()?;
+            let app_dir = native::install_local_release(workspace_root, &current_exe)?;
+            let status = native::status(workspace_root);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "installed_app_dir": app_dir,
+                    "installed_app_executable": app_executable(&app_dir, status.platform),
+                    "installed_host_library": status.default_host_library,
+                }))?
+            );
         }
         NativeCommands::Paths => {
             let status = native::status(workspace_root);
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
+                    "platform": status.platform,
                     "cef_sdk_root": status.cef_sdk_root,
-                    "xcode_project": status.xcode_project,
-                    "default_app_bundle": status.default_app_bundle,
+                    "configure_artifact": status.configure_artifact,
+                    "default_app_dir": status.default_app_dir,
                     "default_app_executable": status.default_app_executable,
                     "default_host_library": status.default_host_library,
                 }))?
@@ -625,7 +629,7 @@ mod tests {
     #[test]
     fn finds_workspace_root_from_built_binary_path() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let binary = root.join("target/aarch64-apple-darwin/debug/aegis");
+        let binary = root.join("target/debug/aegis");
         assert_eq!(find_aegis_workspace_root(&binary).as_deref(), Some(root));
     }
 }

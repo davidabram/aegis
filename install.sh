@@ -6,11 +6,25 @@ if [[ -n "${BASH_VERSION:-}" ]]; then
 fi
 
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-RELEASE_BIN="$REPO_ROOT/target/aarch64-apple-darwin/release/aegis"
-INSTALLED_APP="$HOME/Applications/Aegis.app"
-INSTALLED_CLI="$INSTALLED_APP/Contents/MacOS/aegis_cli"
+PLATFORM="$(uname -s)"
+RELEASE_BIN="$REPO_ROOT/target/release/aegis"
 LAUNCHER_DIR=""
 LAUNCHER_PATH=""
+
+case "$PLATFORM" in
+  Darwin)
+    INSTALLED_APP_DIR="$HOME/Applications/Aegis.app"
+    INSTALLED_CLI="$INSTALLED_APP_DIR/Contents/MacOS/aegis_cli"
+    ;;
+  Linux)
+    INSTALLED_APP_DIR="$HOME/.local/share/aegis/Aegis"
+    INSTALLED_CLI="$INSTALLED_APP_DIR/bin/aegis_cli"
+    ;;
+  *)
+    printf 'Unsupported platform: %s\n' "$PLATFORM" >&2
+    exit 1
+    ;;
+esac
 
 if [[ -t 1 ]]; then
   C_RESET=$'\033[0m'
@@ -144,7 +158,7 @@ print_summary() {
   local resolved_aegis
   resolved_aegis="$(resolve_path_command aegis)"
   log_section "Install Complete"
-  log_success "Installed app bundle: $INSTALLED_APP"
+  log_success "Installed app dir: $INSTALLED_APP_DIR"
   log_success "Installed CLI: $INSTALLED_CLI"
   log_success "Canonical launcher: $LAUNCHER_PATH"
   log_success "Canonical state root: ${AEGIS_HOME:-$HOME/.aegis}"
@@ -163,17 +177,21 @@ print_summary() {
 
 log_section "Aegis Installer"
 log_info "Repo: $REPO_ROOT"
-log_info "This will build the release binary, install the local app bundle, and bootstrap ~/.aegis."
+log_info "Platform: $PLATFORM"
+log_info "This will build the release binary, install the local app, and bootstrap ~/.aegis."
 
 CURRENT_STEP="checking local prerequisites"
 require_command cargo
 require_command cmake
-require_command xcodebuild
-require_command codesign
 require_command python3
 
+if [[ "$PLATFORM" == "Darwin" ]]; then
+  require_command xcodebuild
+  require_command codesign
+fi
+
 if [[ ! -d "$REPO_ROOT/third_party/cef" ]]; then
-  fail "CEF SDK is missing under $REPO_ROOT/third_party/cef. Install the local CEF bundle before running install."
+  fail "CEF SDK is missing under $REPO_ROOT/third_party/cef. Install the platform CEF bundle before running install."
 fi
 
 cd "$REPO_ROOT"
@@ -188,7 +206,7 @@ if [[ ! -x "$RELEASE_BIN" ]]; then
 fi
 
 log_section "Install"
-run_quiet_step "installing the local Aegis app bundle" "$RELEASE_BIN" native install
+run_quiet_step "installing the local Aegis app" "$RELEASE_BIN" native install
 
 if [[ ! -x "$INSTALLED_CLI" ]]; then
   fail "Expected installed CLI at $INSTALLED_CLI, but it was not found."

@@ -25,7 +25,7 @@ Core capabilities:
 - deterministic traces
 - replayable browser runs
 
-The browser engine is a macOS CEF-backed runtime with a native Cocoa host.
+The browser engine is a CEF-backed native runtime with platform-specific host edges for macOS and Linux.
 
 ## Production Model
 
@@ -39,7 +39,9 @@ There is no production per-command relaunch path.
 
 Local release rule:
 
-- install one stable local release app at `~/Applications/Aegis.app`
+- install one stable local release app at a platform-native path
+- macOS: `~/Applications/Aegis.app`
+- Linux: `~/.local/share/aegis/Aegis`
 - use its bundled CLI as the canonical runtime entrypoint
 - do not rebuild or reinstall during normal `aegis` usage
 - use `./install.sh` as the canonical one-shot local install path
@@ -68,7 +70,9 @@ Human-use shortcut:
 
 - `aegis` with no arguments opens the local headful Aegis app
 - `aegis open` explicitly opens the same installed app
-- `aegis ...` with arguments uses the installed bundled CLI at `~/Applications/Aegis.app/Contents/MacOS/aegis_cli`
+- `aegis ...` with arguments uses the installed bundled CLI
+- macOS bundled CLI path: `~/Applications/Aegis.app/Contents/MacOS/aegis_cli`
+- Linux bundled CLI path: `~/.local/share/aegis/Aegis/bin/aegis_cli`
 
 Top-level commands:
 
@@ -115,8 +119,8 @@ One-shot local install:
 What it does:
 
 - builds the release binary
-- installs `~/Applications/Aegis.app`
-- installs the bundled CLI at `~/Applications/Aegis.app/Contents/MacOS/aegis_cli`
+- installs the platform-native local app directory
+- installs the bundled CLI into that app directory
 - installs the canonical shell launcher at `~/.local/bin/aegis` or `~/bin/aegis`
 - bootstraps and verifies the canonical `~/.aegis` state tree
 
@@ -387,8 +391,10 @@ When `--samples` is greater than `1`, the harness prints median and max timings 
 
 Aegis uses a local native host library:
 
-- packaged installs use `~/Applications/Aegis.app/Contents/Frameworks/libaegis_host.dylib`
-- workspace builds use `native/build-xcode/Release/libaegis_host.dylib`
+- macOS packaged installs use `~/Applications/Aegis.app/Contents/Frameworks/libaegis_host.dylib`
+- Linux packaged installs use `~/.local/share/aegis/Aegis/lib/libaegis_host.so`
+- macOS workspace builds use `native/build/macos/Release/libaegis_host.dylib`
+- Linux workspace builds use `native/build/linux/release/libaegis_host.so`
 
 Native helper commands:
 
@@ -412,19 +418,18 @@ Run the full local production-like verification flow:
 ./scripts/verify_local_release.sh
 ```
 
-That installs a locally ad hoc signed app at `~/Applications/Aegis.app`, clears quarantine
-attributes, installs the canonical `aegis` launcher, and gives the runtime a stable local app
-path without requiring a paid Apple Developer account.
+That installs a stable local app, installs the canonical `aegis` launcher, and gives the runtime
+a stable local app path. On macOS it also clears quarantine attributes and supports code signing.
 
-For distribution-grade installs, `aegis native install` and `./install.sh` also honor:
+For distribution-grade macOS installs, `aegis native install` and `./install.sh` also honor:
 
 - `AEGIS_CODESIGN_IDENTITY="Developer ID Application: ..."` to sign the bundle with a real identity
 - `AEGIS_CODESIGN_OPTIONS="runtime"` to opt into hardened runtime options during signing
 - `AEGIS_CODESIGN_ENTITLEMENTS=/absolute/path/to/entitlements.plist` to attach app entitlements
 
-The installer now signs nested helpers/frameworks explicitly and runs `codesign --verify --strict`
-after installation. When a real signing identity is provided, it also runs `spctl --assess` so
-the install fails immediately if Gatekeeper would reject the bundle.
+On macOS, the installer signs nested helpers/frameworks explicitly and runs
+`codesign --verify --strict` after installation. When a real signing identity is provided, it
+also runs `spctl --assess` so the install fails immediately if Gatekeeper would reject the bundle.
 
 The checked-in local entitlements template lives at `native/mac/aegis.entitlements`. The local
 verification script exports that file automatically unless `AEGIS_CODESIGN_ENTITLEMENTS` is already
@@ -432,7 +437,7 @@ set.
 
 ## Local Signing Limits
 
-Without a paid Apple Developer account, Aegis can still do a lot locally:
+Without a paid Apple Developer account, Aegis can still do a lot locally on macOS:
 
 - build release binaries
 - use one stable installed app path
@@ -448,9 +453,10 @@ Those system approvals still require one user approval path in macOS.
 
 ## Dependencies
 
-The macOS native build expects the local CEF SDK at:
+The native build expects the platform CEF SDK at:
 
-- `third_party/cef/cef_binary_146.0.6+g68649e2+chromium-146.0.7680.154_macosarm64`
+- macOS: `third_party/cef/cef_binary_146.0.6+g68649e2+chromium-146.0.7680.154_macosarm64`
+- Linux: `third_party/cef/cef_binary_146.0.6+g68649e2+chromium-146.0.7680.154_linux64`
 
 That binary payload is intentionally not tracked in Git.
 
@@ -458,4 +464,4 @@ That binary payload is intentionally not tracked in Git.
 
 The practical agent guide lives at:
 
-- [docs/agent-control.md](/Users/deepsaint/Desktop/aegis/docs/agent-control.md)
+- `docs/agent-control.md`

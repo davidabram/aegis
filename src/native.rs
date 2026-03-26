@@ -1,7 +1,4 @@
-use std::env;
 use std::fs;
-#[cfg(target_os = "macos")]
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -10,31 +7,26 @@ use serde::Serialize;
 use crate::transport::bridge::AegisError;
 
 const NATIVE_DIR: &str = "native";
-const XCODE_BUILD_DIR: &str = "native/build-xcode";
-const XCODE_PROJECT: &str = "native/build-xcode/aegis_native.xcodeproj";
-const DEFAULT_SCHEME: &str = "aegis_native";
-pub const DEFAULT_APP_BUNDLE_PATH: &str = "native/build-xcode/Release/aegis_native.app";
-#[cfg(target_os = "macos")]
-const DEFAULT_BUNDLED_CLI_NAME: &str = "aegis_cli";
-#[cfg(target_os = "macos")]
-const DEFAULT_BUNDLED_HOST_LIBRARY_NAME: &str = "libaegis_host.dylib";
-#[cfg(target_os = "macos")]
-const LOCAL_INSTALL_APP_NAME: &str = "Aegis.app";
-#[cfg(target_os = "macos")]
-const DEFAULT_CODESIGN_IDENTITY: &str = "-";
-#[cfg(target_os = "macos")]
-const DEFAULT_CODESIGN_OPTIONS: &str = "runtime";
-const CEF_SDK_DIR: &str =
-    "third_party/cef/cef_binary_146.0.6+g68649e2+chromium-146.0.7680.154_macosarm64";
+const DEFAULT_TARGET: &str = "aegis_native";
+const HOST_LIBRARY_TARGET: &str = "aegis_host";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativePlatform {
+    Macos,
+    Linux,
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct NativeStatus {
+    pub platform: NativePlatform,
     pub cef_sdk_root: PathBuf,
     pub cef_sdk_present: bool,
-    pub xcode_project: PathBuf,
-    pub xcode_project_present: bool,
-    pub default_app_bundle: PathBuf,
-    pub default_app_bundle_present: bool,
+    pub build_dir: PathBuf,
+    pub configure_artifact: PathBuf,
+    pub configure_artifact_present: bool,
+    pub default_app_dir: PathBuf,
+    pub default_app_dir_present: bool,
     pub default_app_executable: PathBuf,
     pub default_app_executable_present: bool,
     pub default_host_library: PathBuf,
@@ -64,21 +56,36 @@ impl NativeConfiguration {
     }
 }
 
+pub fn current_platform() -> NativePlatform {
+    #[cfg(target_os = "macos")]
+    {
+        NativePlatform::Macos
+    }
+    #[cfg(target_os = "linux")]
+    {
+        NativePlatform::Linux
+    }
+}
+
 pub fn status(root: impl AsRef<Path>) -> NativeStatus {
     let root = root.as_ref();
-    let cef_sdk_root = root.join(CEF_SDK_DIR);
-    let xcode_project = root.join(XCODE_PROJECT);
-    let default_app_bundle = preferred_app_bundle(root);
-    let default_app_executable = bundle_executable(&default_app_bundle);
-    let default_host_library = preferred_host_library(root, &default_app_bundle);
+    let platform = current_platform();
+    let cef_sdk_root = root.join(cef_sdk_dir(platform));
+    let build_dir = build_dir(root, platform);
+    let configure_artifact = configure_artifact(root, platform);
+    let default_app_dir = preferred_app_dir(root, platform);
+    let default_app_executable = app_executable(&default_app_dir, platform);
+    let default_host_library = preferred_host_library(root, platform, &default_app_dir);
 
     NativeStatus {
+        platform,
+        cef_sdk_root: cef_sdk_root.clone(),
         cef_sdk_present: cef_sdk_root.exists(),
-        cef_sdk_root,
-        xcode_project_present: xcode_project.exists(),
-        xcode_project,
-        default_app_bundle_present: default_app_bundle.exists(),
-        default_app_bundle,
+        build_dir: build_dir.clone(),
+        configure_artifact_present: configure_artifact.exists(),
+        configure_artifact,
+        default_app_dir_present: default_app_dir.exists(),
+        default_app_dir,
         default_app_executable_present: default_app_executable.exists(),
         default_app_executable,
         default_host_library_present: default_host_library.exists(),
@@ -86,113 +93,303 @@ pub fn status(root: impl AsRef<Path>) -> NativeStatus {
     }
 }
 
-#[cfg(target_os = "macos")]
+pub fn configure_native(root: impl AsRef<Path>) -> Result<PathBuf, AegisError> {
+    let root = root.as_ref();
+    let platform = current_platform();
+    let native_dir = root.join(NATIVE_DIR);
+    let build_dir = build_dir(root, platform);
+    fs::create_dir_all(&build_dir)?;
+
+    let mut args = vec![
+        "-S".to_string(),
+        path_str(&native_dir)?.to_string(),
+        "-B".to_string(),
+        path_str(&build_dir)?.to_string(),
+        format!("-DAEGIS_TARGET_PLATFORM={}", platform.as_str()),
+        format!(
+            "-DCEF_ROOT={}",
+            path_str(&root.join(cef_sdk_dir(platform)))?
+        ),
+    ];
+    if let Some(generator) = configure_generator(platform) {
+        args.push("-G".to_string());
+        args.push(generator.to_string());
+    }
+    if platform == NativePlatform::Macos {
+        args.push(format!("-DPROJECT_ARCH={}", apple_arch()));
+    } else {
+        args.push(format!(
+            "-DCMAKE_BUILD_TYPE={}",
+            NativeConfiguration::Release.as_str()
+        ));
+    }
+    let borrowed = args.iter().map(String::as_str).collect::<Vec<_>>();
+    run_checked("cmake", &borrowed, root)?;
+    Ok(configure_artifact(root, platform))
+}
+
+pub fn build_native(
+    root: impl AsRef<Path>,
+    configuration: NativeConfiguration,
+    target: Option<&str>,
+) -> Result<PathBuf, AegisError> {
+    let root = root.as_ref();
+    let platform = current_platform();
+    let build_dir = build_dir(root, platform);
+    configure_native(root)?;
+
+    let target = target.unwrap_or(DEFAULT_TARGET);
+    let mut args = vec![
+        "--build".to_string(),
+        path_str(&build_dir)?.to_string(),
+        "--target".to_string(),
+        target.to_string(),
+    ];
+    if platform == NativePlatform::Macos {
+        args.push("--config".to_string());
+        args.push(configuration.as_str().to_string());
+    } else if let Some(parallelism) = std::thread::available_parallelism().ok() {
+        args.push("--parallel".to_string());
+        args.push(parallelism.get().to_string());
+    }
+    let borrowed = args.iter().map(String::as_str).collect::<Vec<_>>();
+    run_checked("cmake", &borrowed, root)?;
+    Ok(artifact_for_target(root, configuration, target))
+}
+
+pub fn artifact_for_target(
+    root: impl AsRef<Path>,
+    configuration: NativeConfiguration,
+    target: &str,
+) -> PathBuf {
+    let root = root.as_ref();
+    let platform = current_platform();
+    let output_dir = artifact_output_dir(root, platform, configuration);
+    match (platform, target) {
+        (NativePlatform::Macos, HOST_LIBRARY_TARGET) => output_dir.join("libaegis_host.dylib"),
+        (NativePlatform::Linux, HOST_LIBRARY_TARGET) => output_dir.join("libaegis_host.so"),
+        (NativePlatform::Macos, _) => output_dir.join("aegis_native.app"),
+        (NativePlatform::Linux, "aegis_helper") => output_dir.join("aegis_helper"),
+        (NativePlatform::Linux, _) => output_dir.join("aegis_native"),
+    }
+}
+
+pub fn app_executable(app_dir: impl AsRef<Path>, platform: NativePlatform) -> PathBuf {
+    match platform {
+        NativePlatform::Macos => {
+            let app_dir = app_dir.as_ref();
+            let binary_name = macos_bundle_executable_name(app_dir).unwrap_or_else(|| {
+                app_dir
+                    .file_stem()
+                    .map(|stem| stem.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| DEFAULT_TARGET.to_string())
+            });
+            app_dir.join("Contents").join("MacOS").join(binary_name)
+        }
+        NativePlatform::Linux => {
+            let app_dir = app_dir.as_ref();
+            let bundled = app_dir.join("bin").join(DEFAULT_TARGET);
+            if bundled.exists() || app_dir.join("bin").exists() {
+                bundled
+            } else {
+                app_dir.join(DEFAULT_TARGET)
+            }
+        }
+    }
+}
+
 pub fn install_local_release(
     root: impl AsRef<Path>,
     source_executable: impl AsRef<Path>,
 ) -> Result<PathBuf, AegisError> {
     let root = root.as_ref();
     let source_executable = source_executable.as_ref();
-    let build_output_bundle = root.join(DEFAULT_APP_BUNDLE_PATH);
-    let install_bundle = installed_app_bundle().ok_or_else(|| {
+    let platform = current_platform();
+    let install_dir = installed_app_dir(platform).ok_or_else(|| {
         AegisError::Bridge("HOME is not set; cannot resolve local app install path".into())
     })?;
+    let build_output_dir = artifact_for_target(root, NativeConfiguration::Release, DEFAULT_TARGET);
+    let built_host_library =
+        artifact_for_target(root, NativeConfiguration::Release, HOST_LIBRARY_TARGET);
 
-    build_xcode(root, NativeConfiguration::Release, Some("aegis_host"))?;
-    build_xcode(root, NativeConfiguration::Release, None)?;
-
-    if install_bundle.exists() {
-        fs::remove_dir_all(&install_bundle)?;
-    }
-    if let Some(parent) = install_bundle.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    copy_dir_recursive(&build_output_bundle, &install_bundle)?;
-
-    let bundled_cli = install_bundle
-        .join("Contents")
-        .join("MacOS")
-        .join(DEFAULT_BUNDLED_CLI_NAME);
-    fs::copy(source_executable, &bundled_cli)?;
-    let mode = fs::metadata(source_executable)?.permissions().mode();
-    fs::set_permissions(&bundled_cli, fs::Permissions::from_mode(mode))?;
-
-    let built_host_library = artifact_for_scheme(root, NativeConfiguration::Release, "aegis_host");
-    let bundled_host_library = bundled_host_library(&install_bundle);
-    if let Some(parent) = bundled_host_library.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::copy(&built_host_library, &bundled_host_library)?;
-    let host_mode = fs::metadata(&built_host_library)?.permissions().mode();
-    fs::set_permissions(&bundled_host_library, fs::Permissions::from_mode(host_mode))?;
-
-    clear_quarantine_attribute(&install_bundle);
-    sign_bundle_for_distribution(&install_bundle)?;
-    verify_signed_bundle(&install_bundle)?;
-
-    Ok(install_bundle)
-}
-
-pub fn configure_xcode(root: impl AsRef<Path>) -> Result<PathBuf, AegisError> {
-    let root = root.as_ref();
-    let native_dir = root.join(NATIVE_DIR);
-    let build_dir = root.join(XCODE_BUILD_DIR);
-
-    run_checked(
-        "cmake",
-        &[
-            "-S",
-            native_dir.to_str().ok_or_else(path_encoding_error)?,
-            "-B",
-            build_dir.to_str().ok_or_else(path_encoding_error)?,
-            "-G",
-            "Xcode",
-            &format!("-DPROJECT_ARCH={}", apple_arch()),
-        ],
+    build_native(
         root,
+        NativeConfiguration::Release,
+        Some(HOST_LIBRARY_TARGET),
     )?;
+    build_native(root, NativeConfiguration::Release, None)?;
 
-    Ok(root.join(XCODE_PROJECT))
+    if install_dir.exists() {
+        fs::remove_dir_all(&install_dir)?;
+    }
+    if let Some(parent) = install_dir.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    match platform {
+        NativePlatform::Macos => {
+            copy_dir_recursive(&build_output_dir, &install_dir)?;
+            let bundled_cli = install_dir.join("Contents").join("MacOS").join("aegis_cli");
+            copy_file_with_mode(source_executable, &bundled_cli)?;
+            let bundled_host_library = bundled_host_library(&install_dir, platform);
+            if let Some(parent) = bundled_host_library.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            copy_file_with_mode(&built_host_library, &bundled_host_library)?;
+            clear_quarantine_attribute(&install_dir);
+            sign_bundle_for_distribution(&install_dir)?;
+            verify_signed_bundle(&install_dir)?;
+        }
+        NativePlatform::Linux => {
+            fs::create_dir_all(install_dir.join("bin"))?;
+            fs::create_dir_all(install_dir.join("lib"))?;
+            copy_file_with_mode(
+                &build_output_dir,
+                &install_dir.join("bin").join(DEFAULT_TARGET),
+            )?;
+            copy_file_with_mode(
+                source_executable,
+                &install_dir.join("bin").join("aegis_cli"),
+            )?;
+            copy_file_with_mode(
+                &built_host_library,
+                &install_dir.join("lib").join("libaegis_host.so"),
+            )?;
+            let workspace_lib_dir = build_output_dir
+                .parent()
+                .ok_or_else(|| AegisError::Bridge("linux build output missing parent".into()))?;
+            copy_linux_runtime_artifacts(workspace_lib_dir, &install_dir.join("lib"))?;
+        }
+    }
+
+    Ok(install_dir)
 }
 
-pub fn build_xcode(
-    root: impl AsRef<Path>,
+pub fn open_local_app(root: impl AsRef<Path>) -> Result<PathBuf, AegisError> {
+    let platform = current_platform();
+    let app_dir = preferred_app_dir(root.as_ref(), platform);
+    let executable = app_executable(&app_dir, platform);
+    if !executable.exists() {
+        return Err(AegisError::Bridge(format!(
+            "app executable not found at {}. Run `./install.sh` to install the canonical local release first.",
+            executable.display()
+        )));
+    }
+
+    match platform {
+        NativePlatform::Macos => {
+            run_checked("open", &[path_str(&app_dir)?], Path::new("/"))?;
+        }
+        NativePlatform::Linux => {
+            Command::new(&executable).spawn()?;
+        }
+    }
+
+    Ok(app_dir)
+}
+
+impl NativePlatform {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Macos => "macos",
+            Self::Linux => "linux",
+        }
+    }
+}
+
+fn configure_generator(platform: NativePlatform) -> Option<&'static str> {
+    match platform {
+        NativePlatform::Macos => Some("Xcode"),
+        NativePlatform::Linux => None,
+    }
+}
+
+fn build_dir(root: &Path, platform: NativePlatform) -> PathBuf {
+    root.join("native").join("build").join(platform.as_str())
+}
+
+fn configure_artifact(root: &Path, platform: NativePlatform) -> PathBuf {
+    let build_dir = build_dir(root, platform);
+    match platform {
+        NativePlatform::Macos => build_dir.join("aegis_native.xcodeproj"),
+        NativePlatform::Linux => build_dir.join("CMakeCache.txt"),
+    }
+}
+
+fn artifact_output_dir(
+    root: &Path,
+    platform: NativePlatform,
     configuration: NativeConfiguration,
-    scheme: Option<&str>,
-) -> Result<PathBuf, AegisError> {
-    let root = root.as_ref();
-    let project = root.join(XCODE_PROJECT);
-    configure_xcode(root)?;
-    let scheme = scheme.unwrap_or(DEFAULT_SCHEME);
-
-    run_checked(
-        "xcodebuild",
-        &[
-            "-project",
-            project.to_str().ok_or_else(path_encoding_error)?,
-            "-scheme",
-            scheme,
-            "-configuration",
-            configuration.as_str(),
-            "-arch",
-            apple_arch(),
-            "build",
-        ],
-        root,
-    )?;
-
-    Ok(artifact_for_scheme(root, configuration, scheme))
+) -> PathBuf {
+    let build_dir = build_dir(root, platform);
+    match platform {
+        NativePlatform::Macos => build_dir.join(configuration.as_str()),
+        NativePlatform::Linux => build_dir.join(configuration.as_str().to_ascii_lowercase()),
+    }
 }
 
-pub fn bundle_executable(bundle: impl AsRef<Path>) -> PathBuf {
-    let bundle = bundle.as_ref();
-    let binary_name = macos_bundle_executable_name(bundle).unwrap_or_else(|| {
-        bundle
-            .file_stem()
-            .map(|stem| stem.to_string_lossy().into_owned())
-            .unwrap_or_else(|| DEFAULT_SCHEME.to_string())
-    });
-    bundle.join("Contents").join("MacOS").join(binary_name)
+fn cef_sdk_dir(platform: NativePlatform) -> &'static str {
+    match platform {
+        NativePlatform::Macos => {
+            "third_party/cef/cef_binary_146.0.6+g68649e2+chromium-146.0.7680.154_macosarm64"
+        }
+        NativePlatform::Linux => {
+            "third_party/cef/cef_binary_146.0.6+g68649e2+chromium-146.0.7680.154_linux64"
+        }
+    }
+}
+
+fn preferred_app_dir(root: &Path, platform: NativePlatform) -> PathBuf {
+    installed_app_dir(platform).unwrap_or_else(|| default_workspace_app_dir(root, platform))
+}
+
+fn default_workspace_app_dir(root: &Path, platform: NativePlatform) -> PathBuf {
+    match platform {
+        NativePlatform::Macos => {
+            artifact_for_target(root, NativeConfiguration::Release, DEFAULT_TARGET)
+        }
+        NativePlatform::Linux => root.join("native/build/linux/release"),
+    }
+}
+
+fn installed_app_dir(platform: NativePlatform) -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    let path = match platform {
+        NativePlatform::Macos => PathBuf::from(home).join("Applications").join("Aegis.app"),
+        NativePlatform::Linux => PathBuf::from(home)
+            .join(".local")
+            .join("share")
+            .join("aegis")
+            .join("Aegis"),
+    };
+    path.exists().then_some(path)
+}
+
+fn workspace_host_library(root: &Path, platform: NativePlatform) -> PathBuf {
+    match platform {
+        NativePlatform::Macos => artifact_output_dir(root, platform, NativeConfiguration::Release)
+            .join("libaegis_host.dylib"),
+        NativePlatform::Linux => artifact_output_dir(root, platform, NativeConfiguration::Release)
+            .join("libaegis_host.so"),
+    }
+}
+
+fn preferred_host_library(root: &Path, platform: NativePlatform, app_dir: &Path) -> PathBuf {
+    let bundled = bundled_host_library(app_dir, platform);
+    if bundled.exists() {
+        return bundled;
+    }
+    workspace_host_library(root, platform)
+}
+
+fn bundled_host_library(app_dir: &Path, platform: NativePlatform) -> PathBuf {
+    match platform {
+        NativePlatform::Macos => app_dir
+            .join("Contents")
+            .join("Frameworks")
+            .join("libaegis_host.dylib"),
+        NativePlatform::Linux => app_dir.join("lib").join("libaegis_host.so"),
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -217,82 +414,47 @@ fn macos_bundle_executable_name(_bundle: &Path) -> Option<String> {
     None
 }
 
-pub fn artifact_for_scheme(
-    root: impl AsRef<Path>,
-    configuration: NativeConfiguration,
-    scheme: &str,
-) -> PathBuf {
-    let base = root
-        .as_ref()
-        .join("native/build-xcode")
-        .join(configuration.as_str());
-    match scheme {
-        "aegis_host" => base.join("libaegis_host.dylib"),
-        _ => bundle_executable(base.join("aegis_native.app")),
+fn copy_file_with_mode(source: &Path, target: &Path) -> Result<(), AegisError> {
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)?;
     }
+    fs::copy(source, target)?;
+    let permissions = fs::metadata(source)?.permissions();
+    fs::set_permissions(target, permissions)?;
+    Ok(())
 }
 
-#[cfg(target_os = "macos")]
-pub fn bundled_host_library(bundle: impl AsRef<Path>) -> PathBuf {
-    bundle
-        .as_ref()
-        .join("Contents")
-        .join("Frameworks")
-        .join(DEFAULT_BUNDLED_HOST_LIBRARY_NAME)
-}
-
-#[cfg(target_os = "macos")]
-pub fn open_local_app(root: impl AsRef<Path>) -> Result<PathBuf, AegisError> {
-    let bundle = preferred_app_bundle(root.as_ref());
-    if !bundle.exists() {
-        return Err(AegisError::Bridge(format!(
-            "app bundle not found at {}. Run `./install.sh` to install the canonical local release first.",
-            bundle.display()
-        )));
-    }
-
-    run_checked(
-        "open",
-        &[bundle.to_str().ok_or_else(path_encoding_error)?],
-        Path::new("/"),
-    )?;
-
-    Ok(bundle)
-}
-
-#[cfg(target_os = "macos")]
-fn preferred_app_bundle(root: &Path) -> PathBuf {
-    installed_app_bundle().unwrap_or_else(|| root.join(DEFAULT_APP_BUNDLE_PATH))
-}
-
-#[cfg(not(target_os = "macos"))]
-fn preferred_app_bundle(root: &Path) -> PathBuf {
-    root.join(DEFAULT_APP_BUNDLE_PATH)
-}
-
-#[cfg(target_os = "macos")]
-fn installed_app_bundle() -> Option<PathBuf> {
-    let home = env::var_os("HOME")?;
-    let bundle = PathBuf::from(home)
-        .join("Applications")
-        .join(LOCAL_INSTALL_APP_NAME);
-    bundle.exists().then_some(bundle)
-}
-
-fn workspace_host_library(root: &Path) -> PathBuf {
-    root.join("native/build-xcode/Release/libaegis_host.dylib")
-}
-
-fn preferred_host_library(root: &Path, app_bundle: &Path) -> PathBuf {
-    #[cfg(target_os = "macos")]
-    {
-        let bundled = bundled_host_library(app_bundle);
-        if bundled.exists() {
-            return bundled;
+fn copy_linux_runtime_artifacts(source_dir: &Path, target_dir: &Path) -> Result<(), AegisError> {
+    fs::create_dir_all(target_dir)?;
+    for entry in fs::read_dir(source_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let should_copy = name == "libcef.so"
+            || name == "chrome-sandbox"
+            || name == "snapshot_blob.bin"
+            || name == "v8_context_snapshot.bin"
+            || name == "icudtl.dat"
+            || name == "vk_swiftshader_icd.json"
+            || name.ends_with(".pak")
+            || name == "locales"
+            || name == "swiftshader";
+        if !should_copy {
+            continue;
+        }
+        let target = target_dir.join(entry.file_name());
+        if path.is_dir() {
+            copy_dir_recursive(&path, &target)?;
+        } else {
+            copy_file_with_mode(&path, &target)?;
         }
     }
-
-    workspace_host_library(root)
+    let helper = source_dir.join("aegis_helper");
+    if helper.exists() {
+        copy_file_with_mode(&helper, &target_dir.join("aegis_helper"))?;
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -300,19 +462,25 @@ fn clear_quarantine_attribute(bundle: &Path) {
     let _ = Command::new("xattr").args(["-cr"]).arg(bundle).output();
 }
 
+#[cfg(not(target_os = "macos"))]
+fn clear_quarantine_attribute(_bundle: &Path) {}
+
 #[cfg(target_os = "macos")]
 fn load_code_signing_config() -> CodeSigningConfig {
-    let identity = env::var("AEGIS_CODESIGN_IDENTITY")
+    const DEFAULT_CODESIGN_IDENTITY: &str = "-";
+    const DEFAULT_CODESIGN_OPTIONS: &str = "runtime";
+
+    let identity = std::env::var("AEGIS_CODESIGN_IDENTITY")
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_CODESIGN_IDENTITY.to_string());
-    let options = env::var("AEGIS_CODESIGN_OPTIONS")
+    let options = std::env::var("AEGIS_CODESIGN_OPTIONS")
         .ok()
         .filter(|value| !value.trim().is_empty())
         .or_else(|| {
             (identity != DEFAULT_CODESIGN_IDENTITY).then(|| DEFAULT_CODESIGN_OPTIONS.into())
         });
-    let entitlements = env::var_os("AEGIS_CODESIGN_ENTITLEMENTS")
+    let entitlements = std::env::var_os("AEGIS_CODESIGN_ENTITLEMENTS")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from);
 
@@ -330,6 +498,11 @@ fn sign_bundle_for_distribution(bundle: &Path) -> Result<(), AegisError> {
         sign_path(&nested_code, &config, false)?;
     }
     sign_path(bundle, &config, true)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn sign_bundle_for_distribution(_bundle: &Path) -> Result<(), AegisError> {
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -353,7 +526,7 @@ fn nested_code_targets(bundle: &Path) -> Result<Vec<PathBuf>, AegisError> {
         }
     }
 
-    let bundled_cli = macos_dir.join(DEFAULT_BUNDLED_CLI_NAME);
+    let bundled_cli = macos_dir.join("aegis_cli");
     if bundled_cli.exists() {
         targets.push(bundled_cli);
     }
@@ -379,14 +552,9 @@ fn sign_path(
     }
     if apply_entitlements && let Some(entitlements) = &config.entitlements {
         args.push("--entitlements".to_string());
-        args.push(
-            entitlements
-                .to_str()
-                .ok_or_else(path_encoding_error)?
-                .to_string(),
-        );
+        args.push(path_str(entitlements)?.to_string());
     }
-    args.push(path.to_str().ok_or_else(path_encoding_error)?.to_string());
+    args.push(path_str(path)?.to_string());
     let borrowed = args.iter().map(String::as_str).collect::<Vec<_>>();
     run_checked("codesign", &borrowed, Path::new("/"))
 }
@@ -395,17 +563,12 @@ fn sign_path(
 fn verify_signed_bundle(bundle: &Path) -> Result<(), AegisError> {
     run_checked(
         "codesign",
-        &[
-            "--verify",
-            "--strict",
-            "--verbose=2",
-            bundle.to_str().ok_or_else(path_encoding_error)?,
-        ],
+        &["--verify", "--strict", "--verbose=2", path_str(bundle)?],
         Path::new("/"),
     )?;
 
     let signing = load_code_signing_config();
-    if signing.identity != DEFAULT_CODESIGN_IDENTITY {
+    if signing.identity != "-" {
         run_checked(
             "spctl",
             &[
@@ -413,7 +576,7 @@ fn verify_signed_bundle(bundle: &Path) -> Result<(), AegisError> {
                 "--type",
                 "execute",
                 "--verbose=4",
-                bundle.to_str().ok_or_else(path_encoding_error)?,
+                path_str(bundle)?,
             ],
             Path::new("/"),
         )?;
@@ -422,7 +585,11 @@ fn verify_signed_bundle(bundle: &Path) -> Result<(), AegisError> {
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(not(target_os = "macos"))]
+fn verify_signed_bundle(_bundle: &Path) -> Result<(), AegisError> {
+    Ok(())
+}
+
 fn copy_dir_recursive(source: &Path, target: &Path) -> Result<(), AegisError> {
     fs::create_dir_all(target)?;
     for entry in fs::read_dir(source)? {
@@ -434,9 +601,10 @@ fn copy_dir_recursive(source: &Path, target: &Path) -> Result<(), AegisError> {
             copy_dir_recursive(&source_path, &target_path)?;
         } else if file_type.is_symlink() {
             let link_target = fs::read_link(&source_path)?;
+            #[cfg(unix)]
             std::os::unix::fs::symlink(&link_target, &target_path)?;
         } else {
-            fs::copy(&source_path, &target_path)?;
+            copy_file_with_mode(&source_path, &target_path)?;
         }
     }
     Ok(())
@@ -479,6 +647,10 @@ fn apple_arch() -> &'static str {
     }
 }
 
+fn path_str(path: &Path) -> Result<&str, AegisError> {
+    path.to_str().ok_or_else(path_encoding_error)
+}
+
 fn path_encoding_error() -> AegisError {
     AegisError::Bridge("path is not valid utf-8".into())
 }
@@ -488,12 +660,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn status_prefers_bundled_host_library_for_installed_app() {
+    fn linux_status_falls_back_to_workspace_host_library_without_installed_bundle() {
+        let temp = tempfile::tempdir().expect("temporary dir should be created");
+        let repo_root = temp.path().join("repo");
+        let workspace_host = workspace_host_library(&repo_root, NativePlatform::Linux);
+
+        fs::create_dir_all(
+            workspace_host
+                .parent()
+                .expect("workspace host library should have a parent"),
+        )
+        .expect("workspace host dir should be created");
+        fs::write(&workspace_host, b"host").expect("workspace host should be created");
+
+        unsafe {
+            std::env::remove_var("HOME");
+        }
+
+        let status = status(&repo_root);
+        if current_platform() == NativePlatform::Linux {
+            assert_eq!(status.default_host_library, workspace_host);
+            assert!(status.default_host_library_present);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_status_prefers_bundled_host_library_for_installed_app() {
         let temp = tempfile::tempdir().expect("temporary dir should be created");
         let repo_root = temp.path().join("repo");
         let home_dir = temp.path().join("home");
-        let install_bundle = home_dir.join("Applications").join("Aegis.app");
-        let installed_host = bundled_host_library(&install_bundle);
+        let install_dir = home_dir.join("Applications").join("Aegis.app");
+        let installed_host = bundled_host_library(&install_dir, NativePlatform::Macos);
 
         fs::create_dir_all(
             installed_host
@@ -515,28 +713,5 @@ mod tests {
         unsafe {
             std::env::remove_var("HOME");
         }
-    }
-
-    #[test]
-    fn status_falls_back_to_workspace_host_library_without_installed_bundle() {
-        let temp = tempfile::tempdir().expect("temporary dir should be created");
-        let repo_root = temp.path().join("repo");
-        let workspace_host = workspace_host_library(&repo_root);
-
-        fs::create_dir_all(
-            workspace_host
-                .parent()
-                .expect("workspace host library should have a parent"),
-        )
-        .expect("workspace host dir should be created");
-        fs::write(&workspace_host, b"host").expect("workspace host should be created");
-
-        unsafe {
-            std::env::remove_var("HOME");
-        }
-
-        let status = status(&repo_root);
-        assert_eq!(status.default_host_library, workspace_host);
-        assert!(status.default_host_library_present);
     }
 }

@@ -8,9 +8,9 @@
 #include "aegis_client.h"
 #include "aegis_messages.h"
 #include "aegis_state_paths.h"
-#include "build-xcode/generated/aegis_runtime_script.h"
+#include "aegis_runtime_script.h"
 #if defined(AEGIS_STANDALONE_APP)
-#include "aegis_native_mac.h"
+#include "include/aegis_platform.h"
 #endif
 #include "include/cef_browser.h"
 #include "include/cef_command_line.h"
@@ -710,8 +710,12 @@ void AegisApp::CreateHeadfulBrowser(const std::string& url) {
 
   CefRefPtr<AegisClient> client(new AegisClient(false, this));
   CefWindowInfo window_info;
-  window_info.SetAsChild(AegisCreateBrowserHostView("Aegis", 1280, 800),
-                         CefRect(0, 0, 1280, 800));
+  if (AegisUseExternalBrowserHostWindow()) {
+    window_info.SetAsChild(AegisCreateBrowserHostView("Aegis", 1280, 800),
+                           CefRect(0, 0, 1280, 800));
+  } else {
+    window_info.SetAsPopup(kNullWindowHandle, "Aegis");
+  }
   window_info.runtime_style = CEF_RUNTIME_STYLE_ALLOY;
 
   if (!CefBrowserHost::CreateBrowser(window_info, client, url, settings, nullptr,
@@ -825,11 +829,13 @@ void AegisApp::OnPrimaryBrowserCreated(CefRefPtr<CefBrowser> browser) {
   }
 #if defined(AEGIS_STANDALONE_APP)
   if (browser) {
-    AegisSetBrowserHostAddress(browser->GetMainFrame()->GetURL().ToString());
-    AegisSetBrowserHostNavigationState(browser->CanGoBack(), browser->CanGoForward(),
-                                       browser->IsLoading());
-    AegisAttachBrowserToHostWindow(browser);
-    AegisShowBrowserHostWindow();
+    if (AegisUseExternalBrowserHostWindow()) {
+      AegisSetBrowserHostAddress(browser->GetMainFrame()->GetURL().ToString());
+      AegisSetBrowserHostNavigationState(browser->CanGoBack(), browser->CanGoForward(),
+                                         browser->IsLoading());
+      AegisAttachBrowserToHostWindow(browser);
+      AegisShowBrowserHostWindow();
+    }
   }
 #endif
 }

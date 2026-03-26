@@ -28,8 +28,8 @@
 #include "../aegis_app.h"
 #include "../aegis_client.h"
 #include "../aegis_messages.h"
-#include "../aegis_native_mac.h"
 #include "../aegis_state_paths.h"
+#include "../include/aegis_platform.h"
 #include "include/base/cef_bind.h"
 #include "include/cef_app.h"
 #include "include/cef_browser.h"
@@ -255,61 +255,32 @@ std::optional<std::string> UrlPath(const std::string& url) {
   return path;
 }
 
-std::filesystem::path DetectAppBundle(const std::filesystem::path& anchor) {
-  for (auto current = anchor; !current.empty(); current = current.parent_path()) {
-    if (current.extension() == ".app") {
-      return current;
-    }
-    if (current == current.root_path()) {
-      break;
-    }
-  }
-  return {};
-}
-
 struct HostPaths {
   std::filesystem::path library_dir;
-  std::filesystem::path app_bundle;
+  std::filesystem::path app_root;
   std::filesystem::path main_executable;
   std::filesystem::path helper_executable;
+  std::filesystem::path cef_library;
   std::filesystem::path framework_dir;
   std::filesystem::path resources_dir;
   std::filesystem::path locales_dir;
+  std::filesystem::path main_bundle_path;
 };
 
 HostPaths ResolveHostPaths() {
   const auto anchor_dir = LibraryDirectory();
-  auto app_bundle = DetectAppBundle(anchor_dir);
-  const auto library_dir =
-      !app_bundle.empty() ? app_bundle.parent_path().parent_path() : anchor_dir;
-  if (app_bundle.empty()) {
-    app_bundle = library_dir / "aegis_native.app";
-  }
-  HostPaths paths{
-      .library_dir = library_dir,
-      .app_bundle = app_bundle,
-      .main_executable = app_bundle / "Contents" / "MacOS" / "aegis_native",
-      .helper_executable = app_bundle / "Contents" / "Frameworks" /
-                           "aegis_native Helper.app" / "Contents" / "MacOS" / "aegis_native Helper",
-      .framework_dir = app_bundle / "Contents" / "Frameworks" /
-                       "Chromium Embedded Framework.framework",
-      .resources_dir = app_bundle / "Contents" / "Frameworks" /
-                       "Chromium Embedded Framework.framework" / "Resources",
-      .locales_dir = app_bundle / "Contents" / "Frameworks" /
-                     "Chromium Embedded Framework.framework" / "Resources" / "locales",
+  const auto resolved = AegisResolvePlatformPaths(anchor_dir);
+  return HostPaths{
+      .library_dir = resolved.library_dir,
+      .app_root = resolved.app_root,
+      .main_executable = resolved.main_executable,
+      .helper_executable = resolved.helper_executable,
+      .cef_library = resolved.cef_library,
+      .framework_dir = resolved.framework_dir,
+      .resources_dir = resolved.resources_dir,
+      .locales_dir = resolved.locales_dir,
+      .main_bundle_path = resolved.main_bundle_path,
   };
-
-  if (!std::filesystem::exists(paths.app_bundle)) {
-    throw std::runtime_error("aegis_native.app is missing; build the native app bundle first");
-  }
-  if (!std::filesystem::exists(paths.helper_executable)) {
-    throw std::runtime_error("aegis_native Helper is missing; build the native helper bundle first");
-  }
-  if (!std::filesystem::exists(paths.framework_dir)) {
-    throw std::runtime_error("Chromium Embedded Framework.framework is missing from the app bundle");
-  }
-
-  return paths;
 }
 
 struct BrowserOptions {
@@ -830,7 +801,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       }
       cv_.notify_all();
     }
-    if (!options_.headless && browser) {
+    if (!options_.headless && browser && AegisUseExternalBrowserHostWindow()) {
       AegisSetBrowserHostAddress(browser->GetMainFrame()->GetURL().ToString());
       AegisSetBrowserHostNavigationState(browser->CanGoBack(), browser->CanGoForward(),
                                          browser->IsLoading());
@@ -1123,11 +1094,9 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       AppendDebugLog("host: start");
       RequireOwnerThread();
 
-      const auto framework_binary =
-          paths_.framework_dir / "Chromium Embedded Framework";
       AppendDebugLog("host: cef_load_library begin");
-      if (!cef_load_library(framework_binary.string().c_str())) {
-        throw std::runtime_error("failed to load Chromium Embedded Framework");
+      if (!cef_load_library(paths_.cef_library.string().c_str())) {
+        throw std::runtime_error("failed to load Chromium Embedded Framework runtime");
       }
       AppendDebugLog("host: cef_load_library complete");
 
@@ -1138,7 +1107,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       bootstrap_options.initialize_browser_host_application = !options_.headless;
       bootstrap_options.browser_subprocess_path = paths_.helper_executable.string();
       bootstrap_options.framework_dir_path = paths_.framework_dir.string();
-      bootstrap_options.main_bundle_path = paths_.app_bundle.string();
+      bootstrap_options.main_bundle_path = paths_.main_bundle_path.string();
       bootstrap_options.resources_dir_path = paths_.resources_dir.string();
       bootstrap_options.locales_dir_path = paths_.locales_dir.string();
       bootstrap_options.root_cache_path = runtime_session_paths_.instance_dir.string();
@@ -1260,8 +1229,12 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
         return;
       }
       CefWindowInfo window_info;
-      window_info.SetAsChild(AegisCreateBrowserHostView("Aegis", 1280, 800),
-                             CefRect(0, 0, 1280, 800));
+      if (AegisUseExternalBrowserHostWindow()) {
+        window_info.SetAsChild(AegisCreateBrowserHostView("Aegis", 1280, 800),
+                               CefRect(0, 0, 1280, 800));
+      } else {
+        window_info.SetAsPopup(kNullWindowHandle, "Aegis");
+      }
       window_info.runtime_style = CEF_RUNTIME_STYLE_ALLOY;
       if (!CefBrowserHost::CreateBrowser(window_info, client_, initial_url, settings, nullptr,
                                          request_context_)) {

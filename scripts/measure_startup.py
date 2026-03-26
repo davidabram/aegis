@@ -13,6 +13,8 @@ import urllib.request
 from pathlib import Path
 from statistics import median
 
+IS_MACOS = sys.platform == "darwin"
+
 
 def http_get_json(url: str, timeout: float) -> dict:
     with urllib.request.urlopen(url, timeout=timeout) as response:
@@ -82,7 +84,14 @@ def main() -> int:
         "--start-url",
         default="data:text/html,%3C!doctype%20html%3E%3Chtml%3E%3Chead%3E%3Cmeta%20charset%3D%22utf-8%22%3E%3Ctitle%3EAegis%20Bootstrap%3C%2Ftitle%3E%3C%2Fhead%3E%3Cbody%3E%3C%2Fbody%3E%3C%2Fhtml%3E",
     )
-    parser.add_argument("--host-lib", default="native/build-xcode/Release/libaegis_host.dylib")
+    parser.add_argument(
+        "--host-lib",
+        default=(
+            "native/build/macos/Release/libaegis_host.dylib"
+            if IS_MACOS
+            else "native/build/linux/release/libaegis_host.so"
+        ),
+    )
     parser.add_argument("--timeout", type=float, default=20.0)
     parser.add_argument("--debug-log", default="/tmp/aegis-measure-startup.log")
     parser.add_argument("--samples", type=int, default=1)
@@ -90,18 +99,18 @@ def main() -> int:
 
     root = Path(__file__).resolve().parents[1]
     installed_cli = (
-        Path.home()
-        / "Applications"
-        / "Aegis.app"
-        / "Contents"
-        / "MacOS"
-        / "aegis_cli"
+        (
+            Path.home()
+            / "Applications"
+            / "Aegis.app"
+            / "Contents"
+            / "MacOS"
+            / "aegis_cli"
+        )
+        if IS_MACOS
+        else Path.home() / ".local" / "share" / "aegis" / "Aegis" / "bin" / "aegis_cli"
     )
-    binary = (
-        installed_cli
-        if installed_cli.exists()
-        else root / "target" / "aarch64-apple-darwin" / "release" / "aegis"
-    )
+    binary = installed_cli if installed_cli.exists() else root / "target" / "release" / "aegis"
     base_url = f"http://{args.addr}"
     host, port_text = args.addr.rsplit(":", 1)
     ensure_port_free(host, int(port_text))

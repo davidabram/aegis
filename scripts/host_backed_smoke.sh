@@ -2,8 +2,14 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-INSTALLED_HOST_LIB="${HOME}/Applications/Aegis.app/Contents/Frameworks/libaegis_host.dylib"
-WORKSPACE_HOST_LIB="${ROOT_DIR}/native/build-xcode/Release/libaegis_host.dylib"
+PLATFORM="$(uname -s)"
+if [[ "$PLATFORM" == "Darwin" ]]; then
+  INSTALLED_HOST_LIB="${HOME}/Applications/Aegis.app/Contents/Frameworks/libaegis_host.dylib"
+  WORKSPACE_HOST_LIB="${ROOT_DIR}/native/build/macos/Release/libaegis_host.dylib"
+else
+  INSTALLED_HOST_LIB="${HOME}/.local/share/aegis/Aegis/lib/libaegis_host.so"
+  WORKSPACE_HOST_LIB="${ROOT_DIR}/native/build/linux/release/libaegis_host.so"
+fi
 HOST_LIB="${AEGIS_SMOKE_HOST_LIB:-}"
 ADDR="${AEGIS_SMOKE_ADDR:-127.0.0.1:7881}"
 BASE_URL="http://${ADDR}"
