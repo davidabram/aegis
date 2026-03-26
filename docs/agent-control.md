@@ -75,6 +75,12 @@ and runs `spctl --assess` when a real signing identity is configured.
 For the strongest local verification workflow, run `./scripts/verify_local_release.sh`. It
 installs the canonical app, runs platform-appropriate verification, and then runs the host-backed
 smoke test.
+Fozzy is the canonical verification driver:
+
+- `fozzy.toml` sets `.fozzy/` as the runtime artifact root
+- `tests/aegis_core.fozzy.json` covers the core deterministic gate
+- `tests/aegis_host_backed.fozzy.json` covers the host-backed runtime path
+- `./scripts/run_fozzy_full.sh` is the full local Fozzy gate
 Normal `aegis` usage should not rebuild or reinstall anything.
 
 ## Fast Start

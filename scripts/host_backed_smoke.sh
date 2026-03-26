@@ -50,6 +50,7 @@ cleanup() {
 trap cleanup EXIT
 
 cd "${ROOT_DIR}"
+mkdir -p "$(dirname "${TRACE_PATH}")"
 cargo run --quiet -- \
   --host-lib "${HOST_LIB}" \
   --mode "${MODE}" \

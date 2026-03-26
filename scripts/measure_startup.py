@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -67,12 +68,24 @@ def ensure_port_free(host: str, port: int) -> None:
         if sock.connect_ex((host, port)) != 0:
             return
 
-    subprocess.run(
-        ["zsh", "-lc", f"lsof -ti tcp:{port} | xargs -r kill -9"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
+    if shutil.which("lsof"):
+        subprocess.run(
+            ["bash", "-lc", f"lsof -ti tcp:{port} | xargs -r kill -9"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    elif shutil.which("fuser"):
+        subprocess.run(
+            ["fuser", "-k", f"{port}/tcp"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    else:
+        raise RuntimeError(
+            f"port {port} is already in use and neither lsof nor fuser is available to clear it"
+        )
     time.sleep(0.2)
 
 

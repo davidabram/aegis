@@ -36,7 +36,7 @@ else
   echo "==> Linux install verified at ${INSTALLED_APP}"
 fi
 
-echo "==> Running host-backed smoke"
-bash scripts/host_backed_smoke.sh
+echo "==> Running Fozzy full verification"
+bash scripts/run_fozzy_full.sh
 
 echo "==> Local release verification complete"

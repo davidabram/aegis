@@ -130,6 +130,12 @@ The older helper path now delegates to the same installer:
 ./scripts/install_local_release.sh
 ```
 
+Canonical verification uses Fozzy:
+
+```bash
+./scripts/run_fozzy_full.sh
+```
+
 ## Config And Secrets
 
 Inspect or set Aegis-owned config:
@@ -418,8 +424,20 @@ Run the full local production-like verification flow:
 ./scripts/verify_local_release.sh
 ```
 
+Run the Fozzy verification gate directly:
+
+```bash
+./scripts/run_fozzy_full.sh
+```
+
 That installs a stable local app, installs the canonical `aegis` launcher, and gives the runtime
 a stable local app path. On macOS it also clears quarantine attributes and supports code signing.
+
+The Fozzy gate is the canonical validation surface:
+
+- `tests/aegis_core.fozzy.json` validates core Rust/test/clippy behavior
+- `tests/aegis_host_backed.fozzy.json` validates the host-backed runtime flow
+- `fozzy.toml` pins `.fozzy/` as the artifact root
 
 For distribution-grade macOS installs, `aegis native install` and `./install.sh` also honor:
 

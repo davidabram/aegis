@@ -94,6 +94,13 @@ pub fn status(root: impl AsRef<Path>) -> NativeStatus {
 }
 
 pub fn configure_native(root: impl AsRef<Path>) -> Result<PathBuf, AegisError> {
+    configure_native_for(root, NativeConfiguration::Release)
+}
+
+fn configure_native_for(
+    root: impl AsRef<Path>,
+    configuration: NativeConfiguration,
+) -> Result<PathBuf, AegisError> {
     let root = root.as_ref();
     let platform = current_platform();
     let native_dir = root.join(NATIVE_DIR);
@@ -118,10 +125,7 @@ pub fn configure_native(root: impl AsRef<Path>) -> Result<PathBuf, AegisError> {
     if platform == NativePlatform::Macos {
         args.push(format!("-DPROJECT_ARCH={}", apple_arch()));
     } else {
-        args.push(format!(
-            "-DCMAKE_BUILD_TYPE={}",
-            NativeConfiguration::Release.as_str()
-        ));
+        args.push(format!("-DCMAKE_BUILD_TYPE={}", configuration.as_str()));
     }
     let borrowed = args.iter().map(String::as_str).collect::<Vec<_>>();
     run_checked("cmake", &borrowed, root)?;
@@ -136,7 +140,7 @@ pub fn build_native(
     let root = root.as_ref();
     let platform = current_platform();
     let build_dir = build_dir(root, platform);
-    configure_native(root)?;
+    configure_native_for(root, configuration)?;
 
     let target = target.unwrap_or(DEFAULT_TARGET);
     let mut args = vec![
