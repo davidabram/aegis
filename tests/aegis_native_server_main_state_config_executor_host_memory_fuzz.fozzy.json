@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "name": "aegis-native-server-main-state-config-executor-host-memory-fuzz",
+  "steps": [
+    {
+      "type": "trace_event",
+      "name": "coverage_hints: native aegis_cef_host aegis_app aegis_native_main aegis_platform_linux aegis_client src server measure_startup main state config_store executor scripts measure startup",
+      "fields": {
+        "target": "topology_policy_coverage",
+        "suite": "host_memory_fuzz"
+      }
+    },
+    {
+      "type": "fs_write",
+      "path": "fozzy-host-memory-fuzz.txt",
+      "data": "ok"
+    },
+    {
+      "type": "fs_read_assert",
+      "path": "fozzy-host-memory-fuzz.txt",
+      "equals": "ok"
+    },
+    {
+      "type": "memory_limit_mb",
+      "mb": 64
+    },
+    {
+      "type": "memory_alloc",
+      "bytes": 64,
+      "key": "buf",
+      "tag": "coverage"
+    },
+    {
+      "type": "memory_assert_in_use_bytes",
+      "equals": 64
+    },
+    {
+      "type": "memory_free",
+      "key": "buf"
+    },
+    {
+      "type": "memory_checkpoint",
+      "name": "after-free"
+    },
+    {
+      "type": "memory_assert_in_use_bytes",
+      "equals": 0
+    },
+    {
+      "type": "assert_eq_str",
+      "a": "ready",
+      "b": "ready",
+      "msg": null
+    }
+  ]
+}

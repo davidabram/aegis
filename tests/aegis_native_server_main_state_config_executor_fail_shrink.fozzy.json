@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "name": "aegis-native-server-main-state-config-executor-fail-shrink",
+  "steps": [
+    {
+      "type": "trace_event",
+      "name": "coverage_hints: native aegis_cef_host aegis_app aegis_native_main aegis_platform_linux aegis_client src server measure_startup main state config_store executor scripts measure startup",
+      "fields": {
+        "target": "topology_policy_coverage",
+        "suite": "fail_shrink"
+      }
+    },
+    {
+      "type": "fail",
+      "message": "intentional shrink surface for Aegis Fozzy coverage"
+    }
+  ]
+}

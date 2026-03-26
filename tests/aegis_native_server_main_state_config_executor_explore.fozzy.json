@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "name": "aegis-native-server-main-state-config-executor-explore",
+  "distributed": {
+    "node_count": 3,
+    "steps": [
+      {
+        "type": "client_put",
+        "node": "n0",
+        "key": "coverage_hints_native_aegis_cef_host_aegis_app_aegis_native_main_aegis_platform_linux_aegis_client_src_server_measure_startup_main_state_config_store_executor_scripts_measure_startup",
+        "value": "v1"
+      },
+      {
+        "type": "client_put",
+        "node": "n1",
+        "key": "coverage_hints_native_aegis_cef_host_aegis_app_aegis_native_main_aegis_platform_linux_aegis_client_src_server_measure_startup_main_state_config_store_executor_scripts_measure_startup",
+        "value": "v1"
+      },
+      {
+        "type": "client_put",
+        "node": "n2",
+        "key": "coverage_hints_native_aegis_cef_host_aegis_app_aegis_native_main_aegis_platform_linux_aegis_client_src_server_measure_startup_main_state_config_store_executor_scripts_measure_startup",
+        "value": "v1"
+      },
+      {
+        "type": "partition",
+        "a": "n0",
+        "b": "n1"
+      },
+      {
+        "type": "client_put",
+        "node": "n0",
+        "key": "coverage_hints_native_aegis_cef_host_aegis_app_aegis_native_main_aegis_platform_linux_aegis_client_src_server_measure_startup_main_state_config_store_executor_scripts_measure_startup",
+        "value": "v1"
+      },
+      {
+        "type": "heal",
+        "a": "n0",
+        "b": "n1"
+      }
+    ],
+    "invariants": [
+      {
+        "type": "kv_present_on_all",
+        "key": "coverage_hints_native_aegis_cef_host_aegis_app_aegis_native_main_aegis_platform_linux_aegis_client_src_server_measure_startup_main_state_config_store_executor_scripts_measure_startup"
+      }
+    ]
+  }
+}
