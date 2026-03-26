@@ -12,7 +12,9 @@
 #include <string>
 #include <vector>
 
-int main(int argc, char* argv[]) {
+namespace {
+
+int RunAegisMain(int argc, char* argv[]) {
   CefScopedLibraryLoader loader;
   if (!loader.LoadInMain()) {
     return 1;
@@ -179,4 +181,10 @@ int main(int argc, char* argv[]) {
   CefRunMessageLoop();
   CefShutdown();
   return 0;
+}
+
+}  // namespace
+
+int main(int argc, char* argv[]) {
+  return AegisPlatformRunMain(&RunAegisMain, argc, argv);
 }

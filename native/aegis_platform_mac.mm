@@ -55,6 +55,12 @@ std::filesystem::path DetectAppBundle(const std::filesystem::path& anchor) {
 
 }  // namespace
 
+int AegisPlatformRunMain(AegisPlatformMainEntry entry, int argc, char* argv[]) {
+  @autoreleasepool {
+    return entry(argc, argv);
+  }
+}
+
 void AegisPlatformInitializeMainApplication(bool embedded_command_mode) {
   [AegisApplication sharedApplication];
   if (!embedded_command_mode) {

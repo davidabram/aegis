@@ -15,6 +15,10 @@ std::filesystem::path DetectInstallRoot(const std::filesystem::path& library_dir
 
 }  // namespace
 
+int AegisPlatformRunMain(AegisPlatformMainEntry entry, int argc, char* argv[]) {
+  return entry(argc, argv);
+}
+
 void AegisPlatformInitializeMainApplication(bool embedded_command_mode) {
   static_cast<void>(embedded_command_mode);
 }

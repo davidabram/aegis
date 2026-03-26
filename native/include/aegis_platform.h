@@ -33,8 +33,11 @@ struct AegisCefBootstrapOptions {
   std::string cache_path;
 };
 
+using AegisPlatformMainEntry = int (*)(int argc, char* argv[]);
+
 std::string AegisStandaloneRootCachePath();
 std::string AegisStandaloneCachePath();
+int AegisPlatformRunMain(AegisPlatformMainEntry entry, int argc, char* argv[]);
 void AegisPlatformInitializeMainApplication(bool embedded_command_mode);
 void AegisPlatformConfigureActivation(bool embedded_command_mode, bool headful_mode);
 void AegisInstallModalAlertSuppression();
