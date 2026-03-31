@@ -60,7 +60,7 @@ enum BrowserModeArg {
 
 #[derive(Clone, Subcommand)]
 enum Commands {
-    #[command(about = "Open the canonical local headful browser app")]
+    #[command(about = "Start the headful runtime and open the Linux dashboard")]
     Open,
     #[command(about = "Start the persistent browser runtime and local HTTP control API")]
     Serve {
@@ -179,10 +179,10 @@ enum NativeConfigurationArg {
 const CLI_AFTER_HELP: &str = "\
 Quick starts:
   aegis
-      Open the local headful browser app from the canonical installed path.
+      Start the headful Linux runtime and open the dashboard in your browser.
 
   aegis open
-      Open the canonical local app explicitly.
+      Do the same explicitly.
 
   aegis --mode headful serve --addr 127.0.0.1:7878
       Start the visible browser runtime plus local HTTP API.
@@ -221,7 +221,7 @@ Aegis production usage
 const EXAMPLES_TEXT: &str = "\
 Aegis examples
 
-Launch the local browser app:
+Launch the Linux dashboard:
   aegis
   aegis open
 
@@ -289,30 +289,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             handle_native_command(command.clone(), &workspace_root)?;
             return Ok(());
         }
-        Commands::Open => {
-            #[cfg(target_os = "macos")]
-            {
-                let bundle = native::open_local_app(&workspace_root)?;
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "opened_app_bundle": bundle,
-                    }))?
-                );
-                return Ok(());
-            }
-            #[cfg(not(target_os = "macos"))]
-            {
-                let app_dir = native::open_local_app(&workspace_root)?;
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "opened_app_dir": app_dir,
-                    }))?
-                );
-                return Ok(());
-            }
-        }
         Commands::Usage => {
             println!("{USAGE_TEXT}");
             return Ok(());
@@ -341,9 +317,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
                 .into());
             }
-            server::serve(addr, host_lib, browser_config, cli.profile.clone()).await?;
+            server::serve(
+                addr,
+                host_lib,
+                browser_config,
+                cli.profile.clone(),
+                false,
+            )
+            .await?;
         }
-        Commands::Open => unreachable!("handled before runtime startup"),
+        Commands::Open => {
+            let addr = SocketAddr::from(([127, 0, 0, 1], 7878));
+            let host_lib = cli
+                .host_lib
+                .clone()
+                .unwrap_or_else(|| native::status(&workspace_root).default_host_library);
+            if !host_lib.exists() {
+                return Err(format!(
+                    "host library not found at {}. Run `aegis native build --configuration release --target aegis_host` first or pass --host-lib.",
+                    host_lib.display()
+                )
+                .into());
+            }
+            server::serve(
+                addr,
+                host_lib,
+                BrowserConfig {
+                    mode: BrowserMode::Headful,
+                    start_url: cli.start_url.clone(),
+                },
+                cli.profile.clone(),
+                true,
+            )
+            .await?;
+        }
         Commands::Trace { command } => match command {
             TraceCommands::Replay { .. } => unreachable!("handled before host init"),
         },

@@ -786,6 +786,65 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
     return {};
   }
 
+  std::vector<std::uint8_t> SnapshotChromeState(
+      const std::vector<std::uint8_t>& request) override {
+    static_cast<void>(request);
+    RequireOwnerThread();
+    std::lock_guard lock(mutex_);
+    std::string json = "{\"title\":\"";
+    json += EscapeJsonString(current_title_);
+    json += "\",\"url\":\"";
+    json += EscapeJsonString(current_url_);
+    json += "\",\"can_go_back\":";
+    json += can_go_back_ ? "true" : "false";
+    json += ",\"can_go_forward\":";
+    json += can_go_forward_ ? "true" : "false";
+    json += ",\"is_loading\":";
+    json += is_loading_ ? "true" : "false";
+    json += "}";
+    return std::vector<std::uint8_t>(json.begin(), json.end());
+  }
+
+  std::vector<std::uint8_t> GoBack(const std::vector<std::uint8_t>& request) override {
+    static_cast<void>(request);
+    RequireOwnerThread();
+    std::lock_guard lock(mutex_);
+    if (browser_.get() && browser_->CanGoBack()) {
+      browser_->GoBack();
+    }
+    return {};
+  }
+
+  std::vector<std::uint8_t> GoForward(const std::vector<std::uint8_t>& request) override {
+    static_cast<void>(request);
+    RequireOwnerThread();
+    std::lock_guard lock(mutex_);
+    if (browser_.get() && browser_->CanGoForward()) {
+      browser_->GoForward();
+    }
+    return {};
+  }
+
+  std::vector<std::uint8_t> ReloadPage(const std::vector<std::uint8_t>& request) override {
+    static_cast<void>(request);
+    RequireOwnerThread();
+    std::lock_guard lock(mutex_);
+    if (browser_.get()) {
+      browser_->Reload();
+    }
+    return {};
+  }
+
+  std::vector<std::uint8_t> StopLoad(const std::vector<std::uint8_t>& request) override {
+    static_cast<void>(request);
+    RequireOwnerThread();
+    std::lock_guard lock(mutex_);
+    if (browser_.get()) {
+      browser_->StopLoad();
+    }
+    return {};
+  }
+
   void OnPrimaryBrowserCreated(CefRefPtr<CefBrowser> browser) override {
     AppendDebugLog("host: on_browser_created");
     {
@@ -827,6 +886,9 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       if (!browser_.get() || !browser->IsSame(browser_)) {
         return;
       }
+      is_loading_ = is_loading;
+      can_go_back_ = browser->CanGoBack();
+      can_go_forward_ = browser->CanGoForward();
       page_ready_ = !is_loading;
       if (!is_loading) {
         current_url_ = browser->GetMainFrame()->GetURL().ToString();
@@ -857,6 +919,10 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
   void OnAddressChange(CefRefPtr<CefBrowser>,
                        CefRefPtr<CefFrame> frame,
                        const CefString& url) override {
+    if (frame.get() && frame->IsMain()) {
+      std::lock_guard lock(mutex_);
+      current_url_ = url.ToString();
+    }
     if (options_.headless || !frame.get() || !frame->IsMain()) {
       return;
     }
@@ -865,6 +931,10 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
 
   void OnTitleChange(CefRefPtr<CefBrowser>,
                      const CefString& title) override {
+    {
+      std::lock_guard lock(mutex_);
+      current_title_ = title.ToString();
+    }
     if (options_.headless) {
       return;
     }
@@ -1695,6 +1765,10 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
   bool browser_closed_ = false;
   std::string startup_error_;
   std::string current_url_ = "about:blank";
+  std::string current_title_ = "Aegis";
+  bool can_go_back_ = false;
+  bool can_go_forward_ = false;
+  bool is_loading_ = false;
   int next_request_id_ = 1;
   std::vector<std::pair<std::string, std::string>> network_overrides_;
   std::vector<ManagedCookie> cookie_jar_;
@@ -1824,6 +1898,46 @@ AegisHostStatus Pump(
   return Dispatch(ctx, input_ptr, input_len, output, &CefHost::Pump);
 }
 
+AegisHostStatus SnapshotChromeState(
+    AegisHostHandle ctx,
+    const std::uint8_t* input_ptr,
+    std::size_t input_len,
+    AegisHostBuffer* output) {
+  return Dispatch(ctx, input_ptr, input_len, output, &CefHost::SnapshotChromeState);
+}
+
+AegisHostStatus HostGoBack(
+    AegisHostHandle ctx,
+    const std::uint8_t* input_ptr,
+    std::size_t input_len,
+    AegisHostBuffer* output) {
+  return Dispatch(ctx, input_ptr, input_len, output, &CefHost::GoBack);
+}
+
+AegisHostStatus HostGoForward(
+    AegisHostHandle ctx,
+    const std::uint8_t* input_ptr,
+    std::size_t input_len,
+    AegisHostBuffer* output) {
+  return Dispatch(ctx, input_ptr, input_len, output, &CefHost::GoForward);
+}
+
+AegisHostStatus HostReloadPage(
+    AegisHostHandle ctx,
+    const std::uint8_t* input_ptr,
+    std::size_t input_len,
+    AegisHostBuffer* output) {
+  return Dispatch(ctx, input_ptr, input_len, output, &CefHost::ReloadPage);
+}
+
+AegisHostStatus HostStopLoad(
+    AegisHostHandle ctx,
+    const std::uint8_t* input_ptr,
+    std::size_t input_len,
+    AegisHostBuffer* output) {
+  return Dispatch(ctx, input_ptr, input_len, output, &CefHost::StopLoad);
+}
+
 void FreeBuffer(AegisHostHandle, AegisHostBuffer buffer) {
   delete[] buffer.ptr;
 }
@@ -1841,6 +1955,11 @@ AegisHostFunctionTable ExportFunctionTable() {
       .drain_events = DrainEvents,
       .navigate = Navigate,
       .pump = Pump,
+      .snapshot_chrome_state = SnapshotChromeState,
+      .go_back = HostGoBack,
+      .go_forward = HostGoForward,
+      .reload_page = HostReloadPage,
+      .stop_load = HostStopLoad,
       .free_buffer = FreeBuffer,
   };
 }

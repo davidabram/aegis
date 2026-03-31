@@ -381,8 +381,16 @@ pub fn install_local_release(
             verify_signed_bundle(&install_dir)?;
         }
         NativePlatform::Linux => {
+            let web_ui_source = root.join("web-ui").join("dist");
+            if !web_ui_source.is_dir() {
+                return Err(AegisError::Bridge(
+                    "web UI assets are missing; run `scripts/build-web-ui.sh` before `aegis native install`"
+                        .into(),
+                ));
+            }
             fs::create_dir_all(install_dir.join("bin"))?;
             fs::create_dir_all(install_dir.join("lib"))?;
+            fs::create_dir_all(install_dir.join("share"))?;
             copy_file_with_mode(
                 &build_output_dir,
                 &install_dir.join("bin").join(DEFAULT_TARGET),
@@ -399,6 +407,7 @@ pub fn install_local_release(
                 .parent()
                 .ok_or_else(|| AegisError::Bridge("linux build output missing parent".into()))?;
             copy_linux_runtime_artifacts(workspace_lib_dir, &install_dir.join("lib"))?;
+            copy_dir_recursive(&web_ui_source, &install_dir.join("share").join("web-ui"))?;
         }
     }
 
@@ -858,7 +867,9 @@ fn command_exists(name: &str) -> bool {
 fn required_command_names(platform: NativePlatform) -> Vec<&'static str> {
     match platform {
         NativePlatform::Macos => vec!["cargo", "cmake", "python3", "xcodebuild", "codesign"],
-        NativePlatform::Linux => vec!["cargo", "cmake", "python3"],
+        NativePlatform::Linux => {
+            vec!["cargo", "cmake", "python3", "npm", "Xvfb", "x11vnc", "xdg-open"]
+        }
     }
 }
 

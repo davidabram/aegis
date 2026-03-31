@@ -190,6 +190,7 @@ CURRENT_STEP="checking local prerequisites"
 require_command cargo
 require_command cmake
 require_command python3
+require_command npm
 
 if [[ "$PLATFORM" == "Darwin" ]]; then
   require_command xcodebuild
@@ -209,6 +210,7 @@ LAUNCHER_DIR="$(select_launcher_dir)"
 LAUNCHER_PATH="$LAUNCHER_DIR/aegis"
 
 log_section "Build"
+run_step "building Linux web dashboard" bash scripts/build-web-ui.sh
 run_step "building release Rust binary" cargo build --release
 
 if [[ ! -x "$RELEASE_BIN" ]]; then

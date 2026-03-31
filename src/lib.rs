@@ -4,6 +4,7 @@ pub mod client;
 pub mod commands;
 pub mod config_store;
 pub mod dom;
+pub mod display;
 pub mod events;
 pub mod host;
 pub mod native;
@@ -34,8 +35,8 @@ pub use state::AegisStatePaths;
 pub use trace::recorder::TraceRecorder;
 pub use trace::replayer::{ReplayState, replay_trace};
 pub use transport::bridge::{
-    AegisError, BatchRequest, BatchResponse, BridgeEventEnvelope, CefBridge, HostApi, HostBuffer,
-    HostFunctionTable, HostHandle, HostStatus,
+    AegisError, BatchRequest, BatchResponse, BridgeEventEnvelope, BrowserChromeState, CefBridge,
+    HostApi, HostBuffer, HostFunctionTable, HostHandle, HostStatus,
 };
 pub use transport::protocol::{
     BatchWireResponse, EvalJsRequest, EvalJsResponse, EventsResponse, MessageEnvelope, MessageKind,
