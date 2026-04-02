@@ -384,6 +384,8 @@ curl http://127.0.0.1:7878/dom
 
 ```bash
 curl 'http://127.0.0.1:7878/events?since=0'
+
+curl -N 'http://127.0.0.1:7878/events/live?since=0&poll_ms=100'
 ```
 
 Notes:

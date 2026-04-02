@@ -21,7 +21,10 @@ pub use config_store::{
     AegisConfigStore, AegisSecretStore, CredentialInput, CredentialsSettings, StoredCredentialEntry,
 };
 pub use dom::node::{DomNode, DomSnapshot};
-pub use events::stream::{EventReadWindow, EventStream, EventType, RuntimeEvent, SequencedEvent};
+pub use events::stream::{
+    EventReadWindow, EventStream, EventType, NetworkResourcePhase, RuntimeEvent, SequencedEvent,
+    WebSocketFrameDirection,
+};
 pub use native::{
     NativeConfiguration, NativeDoctor, NativePlatform, NativeStatus, app_executable,
     artifact_for_target, build_native, configure_native,

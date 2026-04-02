@@ -201,6 +201,7 @@ Core routes:
 - `POST /execute`
 - `GET /dom`
 - `GET /events`
+- `GET /events/live`
 - `GET /session`
 - `POST /session`
 - `POST /trace/enable`
@@ -302,12 +303,14 @@ Event stream semantics:
 - `sequence` is monotonically increasing
 - `GET /events` drains pending native/browser events into the runtime stream before it responds
 - `since=<n>` returns events with `sequence > n`
+- `GET /events/live` streams Server-Sent Events for live observers without polling your own loop
 
 Runtime event types:
 
 - `dom_mutation`
 - `navigation`
-- `network`
+- `network` for request/response/finished/failed lifecycle updates
+- `websocket_open`, `websocket_handshake`, `websocket_frame`, `websocket_close`
 - `log`
 
 `GET /doctor` and `GET /runtime` also expose the live page truth the runtime is tracking:

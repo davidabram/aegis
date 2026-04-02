@@ -93,7 +93,11 @@ void AegisClient::OnAddressChange(CefRefPtr<CefBrowser> browser,
 
 void AegisClient::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
   CEF_REQUIRE_UI_THREAD();
-  AppendDebugLog("client: on_after_created");
+  AppendDebugLog(std::string("client: on_after_created browser_id=") +
+                 std::to_string(browser ? browser->GetIdentifier() : 0) + " url=" +
+                 (browser && browser->GetMainFrame()
+                      ? browser->GetMainFrame()->GetURL().ToString()
+                      : std::string()));
   if (delegate_) {
     delegate_->OnPrimaryBrowserCreated(browser);
   }

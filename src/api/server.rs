@@ -1,18 +1,25 @@
+use std::convert::Infallible;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
+use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use async_stream::stream;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use tokio::sync::oneshot;
-use tokio::time::timeout;
+use tokio::time::{sleep, timeout};
 
 use crate::browser::BrowserConfig;
 use crate::commands::command::{Command, CommandTarget};
@@ -26,8 +33,13 @@ use crate::session::cookies::SessionState;
 use crate::session::profile::{SessionProfileInfo, SessionProfileStore};
 use crate::transport::bridge::AegisError;
 
-const IDLE_PUMP_INTERVAL: Duration = Duration::from_millis(10);
+const HEADLESS_IDLE_PUMP_INTERVAL: Duration = Duration::from_millis(10);
+const HEADFUL_IDLE_PUMP_INTERVAL: Duration = Duration::from_millis(2);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(20);
+const DEFAULT_EVENT_STREAM_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const MIN_EVENT_STREAM_POLL_INTERVAL_MS: u64 = 25;
+const MAX_EVENT_STREAM_POLL_INTERVAL_MS: u64 = 1_000;
+static TELEMETRY_START: OnceLock<Instant> = OnceLock::new();
 
 #[derive(Clone)]
 pub struct ApiState {
@@ -77,6 +89,14 @@ pub struct TraceBody {
 pub struct EventQuery {
     #[serde(default)]
     pub since: u64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EventStreamQuery {
+    #[serde(default)]
+    pub since: u64,
+    #[serde(default)]
+    pub poll_ms: Option<u64>,
 }
 
 enum ApiCommand {
@@ -204,18 +224,33 @@ pub async fn serve(
     browser_config: BrowserConfig,
     profile_name: String,
 ) -> Result<(), AegisError> {
+    emit_telemetry(
+        "serve_start",
+        json!({
+            "addr": addr.to_string(),
+            "browser_mode": browser_config.mode,
+            "start_url": browser_config.start_url,
+            "profile": profile_name,
+        }),
+    );
     let serve_started = std::time::Instant::now();
     let client_connect_started = std::time::Instant::now();
     let mut client = LoadedAegisClient::connect(host_library.clone(), browser_config.clone())?;
+    emit_telemetry(
+        "serve_client_connected",
+        json!({
+            "latency_ms": client_connect_started.elapsed().as_millis() as u64,
+            "browser_mode": browser_config.mode,
+            "runtime": client.runtime_status(),
+        }),
+    );
     let profile_store = SessionProfileStore::new(profile_name).map_err(AegisError::Bridge)?;
     let credential_settings = AegisConfigStore::detect()
         .and_then(|store| store.load_credentials_settings())
         .map_err(AegisError::Bridge)?;
     let credential_store = AegisSecretStore::detect().map_err(AegisError::Bridge)?;
     let mut credential_capture = AutoCredentialCapture::default();
-    if let Some(session) = profile_store.load().map_err(AegisError::Bridge)? {
-        client.inject_session(session)?;
-    }
+    let pending_startup_session = profile_store.load().map_err(AegisError::Bridge)?;
     let client_connect_ms = client_connect_started.elapsed().as_millis() as u64;
     let api_bind_started = std::time::Instant::now();
     let (tx, rx) = mpsc::channel::<ApiCommand>();
@@ -237,6 +272,10 @@ pub async fn serve(
         diagnostics: diagnostics.clone(),
     };
     let startup_host_library = state.host_library.clone();
+    let idle_pump_interval = match browser_config.mode {
+        crate::browser::BrowserMode::Headful => HEADFUL_IDLE_PUMP_INTERVAL,
+        crate::browser::BrowserMode::Headless => HEADLESS_IDLE_PUMP_INTERVAL,
+    };
 
     thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -279,8 +318,17 @@ pub async fn serve(
         total_ready_ms: serve_started.elapsed().as_millis() as u64,
     };
     if let Ok(mut shared) = startup.lock() {
-        *shared = startup_metrics;
+        *shared = startup_metrics.clone();
     }
+    emit_telemetry(
+        "serve_ready",
+        json!({
+            "client_connect_ms": startup_metrics.client_connect_ms,
+            "api_bind_ms": startup_metrics.api_bind_ms,
+            "total_ready_ms": startup_metrics.total_ready_ms,
+            "browser_mode": browser_config.mode,
+        }),
+    );
 
     eprintln!(
         "Aegis serve ready on http://{} ({:?}, host: {})",
@@ -289,10 +337,63 @@ pub async fn serve(
         startup_host_library.display()
     );
 
+    let mut pending_startup_session = pending_startup_session;
     loop {
-        match rx.recv_timeout(IDLE_PUMP_INTERVAL) {
+        if let Some(session) = pending_startup_session.take() {
+            let started_at = Instant::now();
+            record_operation_started(
+                &diagnostics,
+                "startup_restore_session",
+                "restoring persisted startup session",
+            );
+            emit_telemetry(
+                "startup_session_restore_started",
+                json!({
+                    "browser_mode": browser_config.mode,
+                    "profile": profile_store.info().profile,
+                }),
+            );
+            let result = client.inject_session(session);
+            record_operation_finished(
+                &diagnostics,
+                "startup_restore_session",
+                &client,
+                &result,
+            );
+            emit_operation_telemetry(
+                "startup_restore_session",
+                started_at,
+                &result,
+                client.runtime_status(),
+            );
+            if let Err(error) = result {
+                emit_telemetry(
+                    "startup_session_restore_failed",
+                    json!({
+                        "browser_mode": browser_config.mode,
+                        "profile": profile_store.info().profile,
+                        "error": error.to_string(),
+                        "runtime": client.runtime_status(),
+                    }),
+                );
+                return Err(error);
+            }
+            emit_telemetry(
+                "startup_session_restore_completed",
+                json!({
+                    "browser_mode": browser_config.mode,
+                    "profile": profile_store.info().profile,
+                    "latency_ms": started_at.elapsed().as_millis() as u64,
+                    "runtime": client.runtime_status(),
+                }),
+            );
+            continue;
+        }
+
+        match rx.recv_timeout(idle_pump_interval) {
             Ok(command) => match command {
                 ApiCommand::InjectSession(session, reply) => {
+                    let started_at = Instant::now();
                     record_operation_started(&diagnostics, "inject_session", "injecting session");
                     let result = client.inject_session(session.clone()).and_then(|_| {
                         profile_store
@@ -301,9 +402,16 @@ pub async fn serve(
                             .map_err(AegisError::Bridge)
                     });
                     record_operation_finished(&diagnostics, "inject_session", &client, &result);
+                    emit_operation_telemetry(
+                        "inject_session",
+                        started_at,
+                        &result,
+                        client.runtime_status(),
+                    );
                     let _ = reply.send(result);
                 }
                 ApiCommand::SnapshotSession(reply) => {
+                    let started_at = Instant::now();
                     record_operation_started(
                         &diagnostics,
                         "snapshot_session",
@@ -311,9 +419,16 @@ pub async fn serve(
                     );
                     let result = client.snapshot_session();
                     record_operation_finished(&diagnostics, "snapshot_session", &client, &result);
+                    emit_operation_telemetry(
+                        "snapshot_session",
+                        started_at,
+                        &result,
+                        client.runtime_status(),
+                    );
                     let _ = reply.send(result);
                 }
                 ApiCommand::SaveSessionProfile(reply) => {
+                    let started_at = Instant::now();
                     record_operation_started(
                         &diagnostics,
                         "save_session_profile",
@@ -331,9 +446,16 @@ pub async fn serve(
                         &client,
                         &result,
                     );
+                    emit_operation_telemetry(
+                        "save_session_profile",
+                        started_at,
+                        &result,
+                        client.runtime_status(),
+                    );
                     let _ = reply.send(result);
                 }
                 ApiCommand::LoadSessionProfile(reply) => {
+                    let started_at = Instant::now();
                     record_operation_started(
                         &diagnostics,
                         "load_session_profile",
@@ -353,9 +475,16 @@ pub async fn serve(
                         &client,
                         &result,
                     );
+                    emit_operation_telemetry(
+                        "load_session_profile",
+                        started_at,
+                        &result,
+                        client.runtime_status(),
+                    );
                     let _ = reply.send(result);
                 }
                 ApiCommand::Navigate(url, reply) => {
+                    let started_at = Instant::now();
                     record_operation_started(
                         &diagnostics,
                         "navigate",
@@ -364,9 +493,16 @@ pub async fn serve(
                     credential_capture.reset_on_explicit_navigation(&url);
                     let result = client.navigate(url);
                     record_operation_finished(&diagnostics, "navigate", &client, &result);
+                    emit_operation_telemetry(
+                        "navigate",
+                        started_at,
+                        &result,
+                        client.runtime_status(),
+                    );
                     let _ = reply.send(result);
                 }
                 ApiCommand::Execute(commands, reply) => {
+                    let started_at = Instant::now();
                     record_operation_started(
                         &diagnostics,
                         "execute",
@@ -407,9 +543,16 @@ pub async fn serve(
                         Ok(report)
                     });
                     record_operation_finished(&diagnostics, "execute", &client, &result);
+                    emit_operation_telemetry(
+                        "execute",
+                        started_at,
+                        &result,
+                        client.runtime_status(),
+                    );
                     let _ = reply.send(result);
                 }
                 ApiCommand::SnapshotDom(reply) => {
+                    let started_at = Instant::now();
                     record_operation_started(
                         &diagnostics,
                         "snapshot_dom",
@@ -417,15 +560,29 @@ pub async fn serve(
                     );
                     let result = client.snapshot_dom();
                     record_operation_finished(&diagnostics, "snapshot_dom", &client, &result);
+                    emit_operation_telemetry(
+                        "snapshot_dom",
+                        started_at,
+                        &result,
+                        client.runtime_status(),
+                    );
                     let _ = reply.send(result);
                 }
                 ApiCommand::Events(since, reply) => {
+                    let started_at = Instant::now();
                     record_operation_started(&diagnostics, "events", "draining runtime events");
                     let result = client.events_since(since);
                     record_operation_finished(&diagnostics, "events", &client, &result);
+                    emit_operation_telemetry(
+                        "events",
+                        started_at,
+                        &result,
+                        client.runtime_status(),
+                    );
                     let _ = reply.send(result);
                 }
                 ApiCommand::EnableTrace(path, reply) => {
+                    let started_at = Instant::now();
                     record_operation_started(
                         &diagnostics,
                         "enable_trace",
@@ -433,12 +590,25 @@ pub async fn serve(
                     );
                     client.enable_trace_recording(path);
                     record_operation_finished(&diagnostics, "enable_trace", &client, &Ok(()));
+                    emit_operation_telemetry(
+                        "enable_trace",
+                        started_at,
+                        &Ok(()),
+                        client.runtime_status(),
+                    );
                     let _ = reply.send(Ok(()));
                 }
             },
             Err(mpsc::RecvTimeoutError::Timeout) => match client.pump() {
                 Ok(()) => record_heartbeat(&diagnostics, &client),
                 Err(error) => {
+                    emit_telemetry(
+                        "runtime_pump_failure",
+                        json!({
+                            "error": error.to_string(),
+                            "runtime": client.runtime_status(),
+                        }),
+                    );
                     record_operation_failure(
                         &diagnostics,
                         "pump",
@@ -684,6 +854,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/execute", post(execute))
         .route("/dom", get(snapshot_dom))
         .route("/events", get(events))
+        .route("/events/live", get(events_live))
         .route("/trace/enable", post(enable_trace))
         .with_state(state)
 }
@@ -846,6 +1017,62 @@ async fn events(
     Ok(Json(await_command("events", &state, reply_rx).await??))
 }
 
+async fn events_live(
+    State(state): State<ApiState>,
+    Query(query): Query<EventStreamQuery>,
+) -> Sse<impl futures_core::Stream<Item = Result<Event, Infallible>>> {
+    let poll_ms = query
+        .poll_ms
+        .unwrap_or(DEFAULT_EVENT_STREAM_POLL_INTERVAL.as_millis() as u64)
+        .clamp(
+            MIN_EVENT_STREAM_POLL_INTERVAL_MS,
+            MAX_EVENT_STREAM_POLL_INTERVAL_MS,
+        );
+    let poll_interval = Duration::from_millis(poll_ms);
+    let mut since = query.since;
+    let state = state.clone();
+
+    Sse::new(stream! {
+        yield Ok(Event::default().event("ready").json_data(json!({
+            "since": since,
+            "poll_ms": poll_ms,
+        })).unwrap_or_else(|_| Event::default().event("ready").data("ready")));
+
+        loop {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            if state.tx.send(ApiCommand::Events(since, reply_tx)).is_err() {
+                yield Ok(Event::default().event("error").data("runtime event channel closed"));
+                break;
+            }
+
+            let window = match timeout(COMMAND_TIMEOUT, reply_rx).await {
+                Ok(Ok(Ok(window))) => window,
+                Ok(Ok(Err(error))) => {
+                    yield Ok(Event::default().event("error").data(error.to_string()));
+                    break;
+                }
+                Ok(Err(_)) => {
+                    yield Ok(Event::default().event("error").data("runtime event stream cancelled"));
+                    break;
+                }
+                Err(_) => {
+                    yield Ok(Event::default().event("error").data("runtime event stream timed out"));
+                    break;
+                }
+            };
+
+            since = window.latest_sequence;
+            if !window.events.is_empty() || window.gap_detected {
+                yield Ok(Event::default().event("runtime_events").json_data(&window).unwrap_or_else(|_| {
+                    Event::default().event("runtime_events").data("serialization_error")
+                }));
+            }
+
+            sleep(poll_interval).await;
+        }
+    })
+    .keep_alive(KeepAlive::default().interval(Duration::from_secs(15)).text("keep-alive"))
+}
 async fn enable_trace(
     State(state): State<ApiState>,
     Json(body): Json<TraceBody>,
@@ -1000,6 +1227,41 @@ async fn await_command<T>(
 
 fn reply_error(error: oneshot::error::RecvError) -> ApiError {
     ApiError::from(AegisError::Bridge(error.to_string()))
+}
+
+fn emit_telemetry(event: &str, payload: serde_json::Value) {
+    let Some(path) = std::env::var_os("AEGIS_DEBUG_LOG") else {
+        return;
+    };
+    let start = TELEMETRY_START.get_or_init(Instant::now);
+    let elapsed_ms = start.elapsed().as_millis() as u64;
+    let line = json!({
+        "source": "serve",
+        "event": event,
+        "elapsed_ms": elapsed_ms,
+        "payload": payload,
+    });
+    if let Ok(mut output) = OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(output, "telemetry: {}", line);
+    }
+}
+
+fn emit_operation_telemetry<T>(
+    operation: &str,
+    started_at: Instant,
+    result: &Result<T, AegisError>,
+    runtime: RuntimeStatus,
+) {
+    emit_telemetry(
+        "operation_complete",
+        json!({
+            "operation": operation,
+            "latency_ms": started_at.elapsed().as_millis() as u64,
+            "ok": result.is_ok(),
+            "error": result.as_ref().err().map(ToString::to_string),
+            "runtime": runtime,
+        }),
+    );
 }
 
 fn record_operation_started(

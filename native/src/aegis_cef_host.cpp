@@ -18,6 +18,7 @@
 #include <mutex>
 #include <optional>
 #include <pthread.h>
+#include <sstream>
 #include <signal.h>
 #include <stdexcept>
 #include <string>
@@ -58,6 +59,16 @@ constexpr char kBootstrapUrl[] =
     "data:text/html,%3C!doctype%20html%3E%3Chtml%3E%3Chead%3E%3Cmeta%20charset%3D%22utf-8%22%3E%3C%2Fhead%3E%3Cbody%3E%3C%2Fbody%3E%3C%2Fhtml%3E";
 
 void AppendDebugLog(const std::string& message);
+
+std::string ThreadLabel() {
+  std::ostringstream output;
+  output << "thread=" << std::this_thread::get_id()
+         << " main=" << (pthread_main_np() != 0 ? "true" : "false");
+  if (CefCurrentlyOn(TID_UI)) {
+    output << " cef_ui=true";
+  }
+  return output.str();
+}
 
 std::string EscapeJsonString(const std::string& input) {
   std::string output;
@@ -133,6 +144,17 @@ void AppendDebugLog(const std::string& message) {
   output << "[" << elapsed_ms << "ms] " << message << '\n';
 }
 
+void AppendTelemetry(const std::string& event,
+                     const std::vector<std::pair<std::string, std::string>>& fields) {
+  std::ostringstream payload;
+  payload << "{\"source\":\"native_host\",\"event\":\"" << EscapeJsonString(event) << "\"";
+  for (const auto& [key, value] : fields) {
+    payload << ",\"" << EscapeJsonString(key) << "\":\"" << EscapeJsonString(value) << "\"";
+  }
+  payload << "}";
+  AppendDebugLog(std::string("telemetry: ") + payload.str());
+}
+
 std::vector<std::uint8_t> CopyInput(const std::uint8_t* input_ptr, std::size_t input_len) {
   if (input_ptr == nullptr || input_len == 0) {
     return {};
@@ -181,6 +203,167 @@ std::string WriteJson(CefRefPtr<CefDictionaryValue> value) {
   auto wrapped = CefValue::Create();
   wrapped->SetDictionary(value);
   return WriteJson(wrapped);
+}
+
+std::optional<std::string> StringKey(CefRefPtr<CefDictionaryValue> dict,
+                                     const char* key) {
+  if (!dict.get() || !dict->HasKey(key) || dict->GetType(key) != VTYPE_STRING) {
+    return std::nullopt;
+  }
+  return dict->GetString(key).ToString();
+}
+
+std::optional<int> IntKey(CefRefPtr<CefDictionaryValue> dict, const char* key) {
+  if (!dict.get() || !dict->HasKey(key)) {
+    return std::nullopt;
+  }
+  const auto type = dict->GetType(key);
+  if (type == VTYPE_INT) {
+    return dict->GetInt(key);
+  }
+  if (type == VTYPE_DOUBLE) {
+    return static_cast<int>(dict->GetDouble(key));
+  }
+  return std::nullopt;
+}
+
+std::optional<bool> BoolKey(CefRefPtr<CefDictionaryValue> dict, const char* key) {
+  if (!dict.get() || !dict->HasKey(key) || dict->GetType(key) != VTYPE_BOOL) {
+    return std::nullopt;
+  }
+  return dict->GetBool(key);
+}
+
+constexpr std::size_t kMaxWebSocketPayloadPreviewBytes = 4096;
+
+struct PayloadPreview {
+  std::string value;
+  bool truncated = false;
+};
+
+PayloadPreview MakePayloadPreview(const std::string& payload) {
+  if (payload.size() <= kMaxWebSocketPayloadPreviewBytes) {
+    return {.value = payload, .truncated = false};
+  }
+  return {.value = payload.substr(0, kMaxWebSocketPayloadPreviewBytes), .truncated = true};
+}
+
+CefRefPtr<CefValue> WrapEvent(CefRefPtr<CefDictionaryValue> body) {
+  auto event = CefDictionaryValue::Create();
+  event->SetDictionary("event", body);
+
+  auto wrapped = CefValue::Create();
+  wrapped->SetDictionary(event);
+  return wrapped;
+}
+
+CefRefPtr<CefValue> NavigationEventValue(const std::string& url) {
+  auto body = CefDictionaryValue::Create();
+  body->SetString("type", "navigation");
+  body->SetString("url", url);
+  return WrapEvent(body);
+}
+
+CefRefPtr<CefValue> NetworkEventValue(const std::string& request_id,
+                                      const std::string& url,
+                                      const std::optional<std::string>& method,
+                                      const std::optional<std::string>& resource_type,
+                                      const std::optional<std::string>& phase,
+                                      const std::optional<int>& status,
+                                      const std::optional<std::string>& status_text,
+                                      const std::optional<std::string>& mime_type,
+                                      const std::optional<bool>& from_cache,
+                                      const std::optional<std::string>& error_text) {
+  auto body = CefDictionaryValue::Create();
+  body->SetString("type", "network");
+  body->SetString("request_id", request_id);
+  body->SetString("url", url);
+  if (method.has_value()) {
+    body->SetString("method", *method);
+  }
+  if (resource_type.has_value()) {
+    body->SetString("resource_type", *resource_type);
+  }
+  if (phase.has_value()) {
+    body->SetString("phase", *phase);
+  }
+  if (status.has_value() && *status >= 0) {
+    body->SetInt("status", *status);
+  }
+  if (status_text.has_value()) {
+    body->SetString("status_text", *status_text);
+  }
+  if (mime_type.has_value()) {
+    body->SetString("mime_type", *mime_type);
+  }
+  if (from_cache.has_value()) {
+    body->SetBool("from_cache", *from_cache);
+  }
+  if (error_text.has_value()) {
+    body->SetString("error_text", *error_text);
+  }
+  return WrapEvent(body);
+}
+
+CefRefPtr<CefValue> WebSocketOpenEventValue(const std::string& request_id,
+                                            const std::string& url) {
+  auto body = CefDictionaryValue::Create();
+  body->SetString("type", "websocket_open");
+  body->SetString("request_id", request_id);
+  body->SetString("url", url);
+  return WrapEvent(body);
+}
+
+CefRefPtr<CefValue> WebSocketHandshakeEventValue(
+    const std::string& request_id,
+    const std::string& url,
+    const std::optional<int>& status,
+    const std::optional<std::string>& status_text) {
+  auto body = CefDictionaryValue::Create();
+  body->SetString("type", "websocket_handshake");
+  body->SetString("request_id", request_id);
+  body->SetString("url", url);
+  if (status.has_value() && *status >= 0) {
+    body->SetInt("status", *status);
+  }
+  if (status_text.has_value()) {
+    body->SetString("status_text", *status_text);
+  }
+  return WrapEvent(body);
+}
+
+CefRefPtr<CefValue> WebSocketFrameEventValue(
+    const std::string& request_id,
+    const std::string& url,
+    const char* direction,
+    const std::optional<int>& opcode,
+    const std::optional<bool>& mask,
+    const std::string& payload) {
+  auto body = CefDictionaryValue::Create();
+  body->SetString("type", "websocket_frame");
+  body->SetString("request_id", request_id);
+  body->SetString("url", url);
+  body->SetString("direction", direction);
+  if (opcode.has_value() && *opcode >= 0) {
+    body->SetInt("opcode", *opcode);
+  }
+  if (mask.has_value()) {
+    body->SetBool("mask", *mask);
+  }
+  const auto preview = MakePayloadPreview(payload);
+  body->SetString("payload_preview", preview.value);
+  body->SetInt("payload_length", static_cast<int>(payload.size()));
+  body->SetBool("truncated", preview.truncated);
+  return WrapEvent(body);
+}
+
+CefRefPtr<CefValue> WebSocketCloseEventValue(const std::string& request_id,
+                                             const std::string& url) {
+  auto body = CefDictionaryValue::Create();
+  body->SetString("type", "websocket_close");
+  body->SetString("request_id", request_id);
+  body->SetString("url", url);
+  return WrapEvent(body);
 }
 
 std::filesystem::path LibraryDirectory() {
@@ -530,6 +713,25 @@ struct RendererReply {
 
 class AegisCefHost;
 
+class AegisDevToolsObserver final : public CefDevToolsMessageObserver {
+ public:
+  explicit AegisDevToolsObserver(AegisCefHost* host) : host_(host) {}
+
+  void OnDevToolsEvent(CefRefPtr<CefBrowser> browser,
+                       const CefString& method,
+                       const void* params,
+                       size_t params_size) override;
+
+  void OnDevToolsAgentAttached(CefRefPtr<CefBrowser> browser) override;
+
+  void OnDevToolsAgentDetached(CefRefPtr<CefBrowser> browser) override;
+
+ private:
+  AegisCefHost* host_;
+
+  IMPLEMENT_REFCOUNTING(AegisDevToolsObserver);
+};
+
 class OperationScope {
  public:
   OperationScope(AegisCefHost* host, std::string name);
@@ -560,6 +762,7 @@ class AegisHostClient final : public AegisClient {
 class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
  public:
   friend class OperationScope;
+  friend class AegisDevToolsObserver;
 
   explicit AegisCefHost(BrowserOptions options, bool manage_cef_lifecycle = true)
       : options_(std::move(options)),
@@ -681,10 +884,14 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       ReplaceNetworkOverrides(payload);
       SetOperationStage("replacing cookies");
       ReplaceCookies(payload);
-      SetOperationStage("ensuring runtime is installed");
-      EnsureRuntimeInstalled();
-      SetOperationStage("injecting storage");
-      InvokeRendererReady(aegis::kOpInjectStorage, WriteJson(payload));
+      const auto payload_json = WriteJson(payload);
+      {
+        std::lock_guard lock(mutex_);
+        pending_storage_injection_payload_ = payload_json;
+      }
+      if (!TryApplyPendingStorageInjection()) {
+        AppendDebugLog("host: deferred_storage_injection awaiting renderer readiness");
+      }
       return {};
     } catch (const std::exception& error) {
       throw std::runtime_error(WrapOperationError(error.what()));
@@ -777,7 +984,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       response->SetString("url", CurrentUrl());
 
       auto events = CefListValue::Create();
-      events->SetValue(0, NavigationEvent(CurrentUrl()));
+      events->SetValue(0, NavigationEventValue(CurrentUrl()));
       response->SetList("events", events);
       MergeLocalEventsIntoResponse(response);
       AppendDebugLog("host: navigate encode_response");
@@ -847,6 +1054,21 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
         current_url_ = frame->GetURL().ToString();
       }
       cv_.notify_all();
+    }
+    AppendTelemetry("primary_browser_created",
+                    {{"browser_id",
+                      std::to_string(browser ? browser->GetIdentifier() : 0)},
+                     {"url",
+                      browser && browser->GetMainFrame() ? browser->GetMainFrame()->GetURL().ToString()
+                                                         : std::string()},
+                     {"thread", ThreadLabel()}});
+    try {
+      EnsureDevToolsObserver(browser);
+    } catch (const std::exception& error) {
+      std::lock_guard lock(mutex_);
+      startup_error_ = error.what();
+      cv_.notify_all();
+      return;
     }
     if (!options_.headless && browser && AegisUseExternalBrowserHostWindow()) {
       AegisSetBrowserHostAddress(browser->GetMainFrame()->GetURL().ToString());
@@ -942,6 +1164,10 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
         runtime_installed_ = false;
         browser_closed_ = true;
         load_in_progress_ = false;
+        devtools_registration_ = nullptr;
+        devtools_network_enabled_ = false;
+        request_urls_.clear();
+        websocket_urls_.clear();
         cv_.notify_all();
       }
     }
@@ -975,7 +1201,6 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
                               CefRefPtr<CefResponse> response,
                               cef_urlrequest_status_t) override {
     CaptureResponseCookies(request, response);
-    PushLocalEvent(NetworkEvent(request->GetIdentifier(), request->GetURL().ToString()));
   }
 
   bool HandleBrowserProcessMessage(CefRefPtr<CefBrowser>,
@@ -992,14 +1217,16 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       auto args = message->GetArgumentList();
       if (args->GetString(0).ToString() == aegis::kLifecycleContextReady) {
         AppendDebugLog("host: lifecycle context_ready");
-        std::lock_guard lock(mutex_);
-        renderer_ready_ = true;
-        runtime_installed_ = true;
-        const auto url = args->GetString(1).ToString();
-        if (!url.empty()) {
-          current_url_ = url;
+        {
+          std::lock_guard lock(mutex_);
+          renderer_ready_ = true;
+          runtime_installed_ = true;
+          const auto url = args->GetString(1).ToString();
+          if (!url.empty()) {
+            current_url_ = url;
+          }
+          cv_.notify_all();
         }
-        cv_.notify_all();
         return true;
       }
       return false;
@@ -1027,6 +1254,248 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
   }
 
   void SetOperationStage(const std::string& stage) { current_operation_stage_ = stage; }
+
+
+
+  bool IsPrimaryBrowser(CefRefPtr<CefBrowser> browser) const {
+    std::lock_guard lock(mutex_);
+    if (!browser_.get() || !browser.get()) {
+      return false;
+    }
+    return browser->IsSame(browser_);
+  }
+
+  void EnsureDevToolsObserver(CefRefPtr<CefBrowser> browser) {
+    if (!browser.get()) {
+      return;
+    }
+    if (devtools_registration_.get()) {
+      EnableDevToolsNetworkTracking(browser);
+      return;
+    }
+    auto observer = new AegisDevToolsObserver(this);
+    devtools_registration_ = browser->GetHost()->AddDevToolsMessageObserver(observer);
+    if (!devtools_registration_.get()) {
+      throw std::runtime_error("failed to register DevTools observer");
+    }
+    EnableDevToolsNetworkTracking(browser);
+  }
+
+  void EnableDevToolsNetworkTracking(CefRefPtr<CefBrowser> browser) {
+    if (!browser.get()) {
+      return;
+    }
+    auto params = CefDictionaryValue::Create();
+    params->SetInt("maxTotalBufferSize", 16 * 1024 * 1024);
+    params->SetInt("maxResourceBufferSize", 4 * 1024 * 1024);
+    if (browser->GetHost()->ExecuteDevToolsMethod(0, "Network.enable", params) == 0) {
+      throw std::runtime_error("failed to enable DevTools Network domain");
+    }
+    devtools_network_enabled_ = true;
+  }
+
+  void HandleDevToolsAgentAttached(CefRefPtr<CefBrowser> browser) {
+    if (!IsPrimaryBrowser(browser)) {
+      return;
+    }
+    AppendDebugLog("host: devtools agent attached");
+    try {
+      EnableDevToolsNetworkTracking(browser);
+    } catch (const std::exception& error) {
+      AppendDebugLog(std::string("host: failed_to_enable_devtools_network ") + error.what());
+    }
+  }
+
+  void HandleDevToolsAgentDetached(CefRefPtr<CefBrowser> browser) {
+    if (!IsPrimaryBrowser(browser)) {
+      return;
+    }
+    AppendDebugLog("host: devtools agent detached");
+    devtools_network_enabled_ = false;
+  }
+
+  std::optional<std::string> UrlForRequestId(const std::string& request_id) const {
+    std::lock_guard lock(mutex_);
+    auto found = request_urls_.find(request_id);
+    if (found == request_urls_.end()) {
+      return std::nullopt;
+    }
+    return found->second;
+  }
+
+  void RememberRequestUrl(const std::string& request_id, const std::string& url) {
+    std::lock_guard lock(mutex_);
+    request_urls_[request_id] = url;
+  }
+
+  void ForgetRequestUrl(const std::string& request_id) {
+    std::lock_guard lock(mutex_);
+    request_urls_.erase(request_id);
+  }
+
+  void RememberWebSocketUrl(const std::string& request_id, const std::string& url) {
+    std::lock_guard lock(mutex_);
+    websocket_urls_[request_id] = url;
+  }
+
+  std::optional<std::string> WebSocketUrl(const std::string& request_id) const {
+    std::lock_guard lock(mutex_);
+    auto found = websocket_urls_.find(request_id);
+    if (found == websocket_urls_.end()) {
+      return std::nullopt;
+    }
+    return found->second;
+  }
+
+  void ForgetWebSocketUrl(const std::string& request_id) {
+    std::lock_guard lock(mutex_);
+    websocket_urls_.erase(request_id);
+  }
+
+  void HandleDevToolsEvent(CefRefPtr<CefBrowser> browser,
+                           const CefString& method,
+                           const void* params,
+                           size_t params_size) {
+    if (!IsPrimaryBrowser(browser)) {
+      return;
+    }
+
+    try {
+      const auto method_name = method.ToString();
+      const auto params_json =
+          params != nullptr && params_size > 0
+              ? std::string(static_cast<const char*>(params), params_size)
+              : std::string("{}");
+      auto params_dict = RequireDictionary(
+          ParseJsonValue(params_json,
+                         "devtools event params are not valid json"),
+          "devtools event params must be a dictionary");
+
+      if (method_name == "Network.requestWillBeSent") {
+        const auto request_id = StringKey(params_dict, "requestId");
+        const auto resource_type = StringKey(params_dict, "type");
+        auto request = params_dict->HasKey("request") ? params_dict->GetDictionary("request")
+                                                       : CefDictionaryValue::Create();
+        const auto url = StringKey(request, "url");
+        const auto method = StringKey(request, "method");
+        if (request_id.has_value() && url.has_value()) {
+          RememberRequestUrl(*request_id, *url);
+          if (resource_type != std::optional<std::string>("WebSocket")) {
+            PushLocalEvent(NetworkEventValue(*request_id, *url, method, resource_type,
+                                             std::string("request"), std::nullopt,
+                                             std::nullopt, std::nullopt, std::nullopt,
+                                             std::nullopt));
+          }
+        }
+        return;
+      }
+
+      if (method_name == "Network.responseReceived") {
+        const auto request_id = StringKey(params_dict, "requestId");
+        const auto resource_type = StringKey(params_dict, "type");
+        auto response = params_dict->HasKey("response") ? params_dict->GetDictionary("response")
+                                                         : CefDictionaryValue::Create();
+        const auto url = StringKey(response, "url");
+        const auto status = IntKey(response, "status");
+        const auto status_text = StringKey(response, "statusText");
+        const auto mime_type = StringKey(response, "mimeType");
+        const auto from_disk_cache = BoolKey(response, "fromDiskCache");
+        const auto from_prefetch_cache = BoolKey(response, "fromPrefetchCache");
+        const auto from_service_worker = BoolKey(response, "fromServiceWorker");
+        std::optional<bool> from_cache;
+        if (from_disk_cache.value_or(false) || from_prefetch_cache.value_or(false) ||
+            from_service_worker.value_or(false)) {
+          from_cache = true;
+        }
+        if (request_id.has_value() && url.has_value() &&
+            resource_type != std::optional<std::string>("WebSocket")) {
+          PushLocalEvent(NetworkEventValue(*request_id, *url, std::nullopt, resource_type,
+                                           std::string("response"), status, status_text,
+                                           mime_type, from_cache, std::nullopt));
+        }
+        return;
+      }
+
+      if (method_name == "Network.loadingFinished") {
+        const auto request_id = StringKey(params_dict, "requestId");
+        if (request_id.has_value()) {
+          if (const auto url = UrlForRequestId(*request_id); url.has_value()) {
+            PushLocalEvent(NetworkEventValue(*request_id, *url, std::nullopt, std::nullopt,
+                                             std::string("finished"), std::nullopt,
+                                             std::nullopt, std::nullopt, std::nullopt,
+                                             std::nullopt));
+          }
+          ForgetRequestUrl(*request_id);
+        }
+        return;
+      }
+
+      if (method_name == "Network.loadingFailed") {
+        const auto request_id = StringKey(params_dict, "requestId");
+        const auto error_text = StringKey(params_dict, "errorText");
+        if (request_id.has_value()) {
+          if (const auto url = UrlForRequestId(*request_id); url.has_value()) {
+            PushLocalEvent(NetworkEventValue(*request_id, *url, std::nullopt, std::nullopt,
+                                             std::string("failed"), std::nullopt,
+                                             std::nullopt, std::nullopt, std::nullopt,
+                                             error_text));
+          }
+          ForgetRequestUrl(*request_id);
+        }
+        return;
+      }
+
+      if (method_name == "Network.webSocketCreated") {
+        const auto request_id = StringKey(params_dict, "requestId");
+        const auto url = StringKey(params_dict, "url");
+        if (request_id.has_value() && url.has_value()) {
+          RememberWebSocketUrl(*request_id, *url);
+          PushLocalEvent(WebSocketOpenEventValue(*request_id, *url));
+        }
+        return;
+      }
+
+      if (method_name == "Network.webSocketHandshakeResponseReceived") {
+        const auto request_id = StringKey(params_dict, "requestId");
+        auto response = params_dict->HasKey("response") ? params_dict->GetDictionary("response")
+                                                         : CefDictionaryValue::Create();
+        if (request_id.has_value()) {
+          const auto url = WebSocketUrl(*request_id).value_or(std::string());
+          PushLocalEvent(WebSocketHandshakeEventValue(*request_id, url,
+                                                      IntKey(response, "status"),
+                                                      StringKey(response, "statusText")));
+        }
+        return;
+      }
+
+      if (method_name == "Network.webSocketFrameSent" ||
+          method_name == "Network.webSocketFrameReceived") {
+        const auto request_id = StringKey(params_dict, "requestId");
+        auto response = params_dict->HasKey("response") ? params_dict->GetDictionary("response")
+                                                         : CefDictionaryValue::Create();
+        if (request_id.has_value()) {
+          const auto url = WebSocketUrl(*request_id).value_or(std::string());
+          PushLocalEvent(WebSocketFrameEventValue(
+              *request_id, url,
+              method_name == "Network.webSocketFrameSent" ? "sent" : "received",
+              IntKey(response, "opcode"), BoolKey(response, "mask"),
+              StringKey(response, "payloadData").value_or(std::string())));
+        }
+        return;
+      }
+
+      if (method_name == "Network.webSocketClosed") {
+        const auto request_id = StringKey(params_dict, "requestId");
+        if (request_id.has_value()) {
+          const auto url = WebSocketUrl(*request_id).value_or(std::string());
+          PushLocalEvent(WebSocketCloseEventValue(*request_id, url));
+          ForgetWebSocketUrl(*request_id);
+        }
+      }
+    } catch (const std::exception& error) {
+      AppendDebugLog(std::string("host: devtools event parse error ") + error.what());
+    }
+  }
 
   std::string WrapOperationError(const std::string& message) const {
     if (current_operation_name_.empty() || IsStructuredOperationError(message)) {
@@ -1061,6 +1530,8 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
   void PumpUntil(Predicate predicate,
                  std::chrono::steady_clock::time_point deadline,
                  const char* timeout_message) {
+    const auto started_at = std::chrono::steady_clock::now();
+    auto last_wait_log_at = started_at;
     for (;;) {
       RequireOwnerThread();
 
@@ -1081,6 +1552,40 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
         throw std::runtime_error(timeout_message);
       }
 
+      const auto now = std::chrono::steady_clock::now();
+      if (now - last_wait_log_at >= std::chrono::milliseconds(500)) {
+        std::lock_guard lock(mutex_);
+        AppendTelemetry(
+            "pump_until_waiting",
+            {{"message", timeout_message},
+             {"elapsed_ms",
+              std::to_string(
+                  std::chrono::duration_cast<std::chrono::milliseconds>(now - started_at).count())},
+             {"startup_complete", startup_complete_ ? "true" : "false"},
+             {"browser_available", browser_.get() != nullptr ? "true" : "false"},
+             {"page_ready", page_ready_ ? "true" : "false"},
+             {"renderer_ready", renderer_ready_ ? "true" : "false"},
+             {"runtime_installed", runtime_installed_ ? "true" : "false"},
+             {"load_in_progress", load_in_progress_ ? "true" : "false"},
+             {"browser_closed", browser_closed_ ? "true" : "false"},
+             {"current_url", current_url_},
+             {"thread", ThreadLabel()}});
+        AppendDebugLog(
+            std::string("host: pump_until_waiting message=") + timeout_message +
+            " elapsed_ms=" +
+            std::to_string(
+                std::chrono::duration_cast<std::chrono::milliseconds>(now - started_at).count()) +
+            " startup_complete=" + (startup_complete_ ? "true" : "false") +
+            " browser_available=" + (browser_.get() != nullptr ? "true" : "false") +
+            " page_ready=" + (page_ready_ ? "true" : "false") +
+            " renderer_ready=" + (renderer_ready_ ? "true" : "false") +
+            " runtime_installed=" + (runtime_installed_ ? "true" : "false") +
+            " load_in_progress=" + (load_in_progress_ ? "true" : "false") +
+            " browser_closed=" + (browser_closed_ ? "true" : "false") +
+            " current_url=" + current_url_ + " " + ThreadLabel());
+        last_wait_log_at = now;
+      }
+
       AegisPumpBrowserHostWindow();
       CefDoMessageLoopWork();
       std::this_thread::sleep_for(kPumpInterval);
@@ -1089,31 +1594,6 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
 
   std::vector<std::uint8_t> EncodeJsonEnvelope(MessageKind kind, const std::string& json) {
     return EncodeEnvelope(kind, ParseJsonValue(json, "renderer response is not valid json"));
-  }
-
-  CefRefPtr<CefValue> NavigationEvent(const std::string& url) {
-    auto event = CefDictionaryValue::Create();
-    auto body = CefDictionaryValue::Create();
-    body->SetString("type", "navigation");
-    body->SetString("url", url);
-    event->SetDictionary("event", body);
-
-    auto wrapped = CefValue::Create();
-    wrapped->SetDictionary(event);
-    return wrapped;
-  }
-
-  CefRefPtr<CefValue> NetworkEvent(std::uint64_t request_id, const std::string& url) {
-    auto event = CefDictionaryValue::Create();
-    auto body = CefDictionaryValue::Create();
-    body->SetString("type", "network");
-    body->SetString("request_id", std::to_string(request_id));
-    body->SetString("url", url);
-    event->SetDictionary("event", body);
-
-    auto wrapped = CefValue::Create();
-    wrapped->SetDictionary(event);
-    return wrapped;
   }
 
   void MergeEventsIntoResponse(CefRefPtr<CefDictionaryValue> response,
@@ -1262,9 +1742,33 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
   }
 
   void CreateBrowserOnUiThread() {
-    auto task = [this]() {
-      CEF_REQUIRE_UI_THREAD();
-      AppendDebugLog("host: create_browser_on_ui_thread");
+    CefWindowHandle external_host_view = kNullWindowHandle;
+    const bool create_headful_on_owner_thread =
+        !options_.headless && AegisUseExternalBrowserHostWindow();
+    if (!options_.headless && AegisUseExternalBrowserHostWindow()) {
+      RequireOwnerThread();
+      external_host_view = AegisCreateBrowserHostView("Aegis", 1280, 800);
+      AegisShowBrowserHostWindow();
+      AppendDebugLog(std::string("host: prepared_external_browser_host_view handle=") +
+                     std::to_string(reinterpret_cast<std::uintptr_t>(external_host_view)) + " " +
+                     ThreadLabel());
+      AppendTelemetry("prepared_external_browser_host_view",
+                      {{"handle",
+                        std::to_string(reinterpret_cast<std::uintptr_t>(external_host_view))},
+                       {"thread", ThreadLabel()}});
+    }
+
+    auto task = [this, external_host_view]() {
+      AppendDebugLog(std::string("host: create_browser_on_ui_thread headless=") +
+                     (options_.headless ? "true" : "false") +
+                     " external_host_view=" +
+                     std::to_string(reinterpret_cast<std::uintptr_t>(external_host_view)) + " " +
+                     ThreadLabel());
+      AppendTelemetry("create_browser_entry",
+                      {{"headless", options_.headless ? "true" : "false"},
+                       {"external_host_view",
+                        std::to_string(reinterpret_cast<std::uintptr_t>(external_host_view))},
+                       {"thread", ThreadLabel()}});
 
       CefRequestContextSettings request_context_settings;
       request_context_ = CefRequestContext::CreateContext(request_context_settings, nullptr);
@@ -1285,17 +1789,38 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
         CefWindowInfo window_info;
         window_info.SetAsWindowless(kNullWindowHandle);
         window_info.runtime_style = CEF_RUNTIME_STYLE_ALLOY;
-        if (!CefBrowserHost::CreateBrowser(window_info, client_, initial_url, settings, nullptr,
-                                           request_context_)) {
+        auto browser = CefBrowserHost::CreateBrowserSync(
+            window_info, client_, initial_url, settings, nullptr, request_context_);
+        const bool created = browser.get() != nullptr;
+        AppendDebugLog(std::string("host: create_headless_browser_sync result=") +
+                       (created ? "true" : "false") + " url=" + initial_url + " " +
+                       ThreadLabel());
+        AppendTelemetry("create_headless_browser",
+                        {{"ok", created ? "true" : "false"},
+                         {"url", initial_url},
+                         {"thread", ThreadLabel()}});
+        if (!created) {
           throw std::runtime_error("failed to create headless browser");
         }
-        AppendDebugLog("host: create headless browser requested");
+        {
+          std::lock_guard lock(mutex_);
+          if (!browser_.get()) {
+            browser_ = browser;
+            request_context_ = browser->GetHost()->GetRequestContext();
+            load_in_progress_ = browser->IsLoading();
+            if (auto frame = browser->GetMainFrame(); frame.get()) {
+              current_url_ = frame->GetURL().ToString();
+            }
+          }
+        }
         return;
       }
       CefWindowInfo window_info;
       if (AegisUseExternalBrowserHostWindow()) {
-        window_info.SetAsChild(AegisCreateBrowserHostView("Aegis", 1280, 800),
-                               CefRect(0, 0, 1280, 800));
+        if (external_host_view == kNullWindowHandle) {
+          throw std::runtime_error("browser host view is not available");
+        }
+        window_info.SetAsChild(external_host_view, CefRect(0, 0, 1280, 800));
       } else {
 #if defined(__APPLE__)
         window_info.hidden = false;
@@ -1305,13 +1830,37 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
 #endif
       }
       window_info.runtime_style = CEF_RUNTIME_STYLE_ALLOY;
-      if (!CefBrowserHost::CreateBrowser(window_info, client_, initial_url, settings, nullptr,
-                                         request_context_)) {
+      auto browser = CefBrowserHost::CreateBrowserSync(
+          window_info, client_, initial_url, settings, nullptr, request_context_);
+      const bool created = browser.get() != nullptr;
+      AppendDebugLog(std::string("host: create_headful_browser_sync result=") +
+                     (created ? "true" : "false") + " url=" + initial_url + " " +
+                     ThreadLabel());
+      AppendTelemetry("create_headful_browser",
+                      {{"ok", created ? "true" : "false"},
+                       {"url", initial_url},
+                       {"thread", ThreadLabel()}});
+      if (!created) {
         throw std::runtime_error("failed to create headful browser");
       }
-      AppendDebugLog("host: create headful browser requested");
+      {
+        std::lock_guard lock(mutex_);
+        if (!browser_.get()) {
+          browser_ = browser;
+          request_context_ = browser->GetHost()->GetRequestContext();
+          load_in_progress_ = browser->IsLoading();
+          if (auto frame = browser->GetMainFrame(); frame.get()) {
+            current_url_ = frame->GetURL().ToString();
+          }
+        }
+      }
     };
 
+    if (create_headful_on_owner_thread) {
+      RequireOwnerThread();
+      task();
+      return;
+    }
     if (CefCurrentlyOn(TID_UI)) {
       task();
       return;
@@ -1352,7 +1901,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
 
   void EnsureBrowserAvailable() {
     RequireOwnerThread();
-    AppendDebugLog("host: ensure_browser_available enter");
+    AppendDebugLog(std::string("host: ensure_browser_available enter ") + ThreadLabel());
     const auto deadline = std::chrono::steady_clock::now() + kStartupTimeout;
     PumpUntil([this]() { return startup_complete_ || !startup_error_.empty(); }, deadline,
               "timed out waiting for CEF startup");
@@ -1420,8 +1969,10 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       browser_->GetMainFrame()->LoadURL(url);
     });
     SetOperationStage("waiting for navigation start");
-    PumpUntil([this, &url]() { return current_url_ == url && load_in_progress_; }, deadline,
-              "timed out waiting for navigation start");
+    PumpUntil([this, &url]() {
+      return current_url_ == url || current_url_ == url + "/" ||
+             current_url_.rfind(url + "/", 0) == 0;
+    }, deadline, "timed out waiting for navigation start");
   }
 
   void EnsureRuntimeInstalled() {
@@ -1435,8 +1986,37 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
     EnsureBrowserAvailable();
   }
 
+  bool TryApplyPendingStorageInjection() {
+    std::optional<std::string> payload;
+    {
+      std::lock_guard lock(mutex_);
+      const auto scheme = UrlScheme(current_url_);
+      if (!pending_storage_injection_payload_.has_value() || !browser_.get() || !renderer_ready_ ||
+          !runtime_installed_ || !scheme.has_value() || *scheme == "data" ||
+          current_url_ == "about:blank") {
+        return false;
+      }
+      payload = pending_storage_injection_payload_;
+    }
+
+    AppendDebugLog("host: applying_pending_storage_injection");
+    SetOperationStage("injecting deferred storage");
+    InvokeRendererReady(aegis::kOpInjectStorage, *payload);
+    {
+      std::lock_guard lock(mutex_);
+      if (pending_storage_injection_payload_ == payload) {
+        pending_storage_injection_payload_.reset();
+      }
+    }
+    AppendDebugLog("host: applied_pending_storage_injection");
+    return true;
+  }
+
   std::string InvokeRendererReady(const std::string& operation, const std::string& body) {
     EnsureRendererReady();
+    if (operation != aegis::kOpInjectStorage) {
+      TryApplyPendingStorageInjection();
+    }
     AppendDebugLog("host: invoke_renderer " + operation);
     SetOperationStage(std::string("dispatching renderer operation: ") + operation);
 
@@ -1765,6 +2345,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
 
   CefRefPtr<AegisApp> app_;
   CefRefPtr<AegisClient> client_;
+  CefRefPtr<CefRegistration> devtools_registration_;
 
   mutable std::mutex mutex_;
   std::condition_variable cv_;
@@ -1775,12 +2356,16 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
   bool runtime_installed_ = false;
   bool browser_closed_ = false;
   bool load_in_progress_ = false;
+  bool devtools_network_enabled_ = false;
   std::string startup_error_;
   std::string current_url_ = "about:blank";
   int next_request_id_ = 1;
   std::vector<std::pair<std::string, std::string>> network_overrides_;
   std::vector<ManagedCookie> cookie_jar_;
   std::vector<std::string> local_events_;
+  std::optional<std::string> pending_storage_injection_payload_;
+  std::map<std::string, std::string> request_urls_;
+  std::map<std::string, std::string> websocket_urls_;
   std::map<int, RendererReply> renderer_replies_;
   std::string current_operation_name_;
   std::string current_operation_stage_;
@@ -1813,6 +2398,27 @@ bool AegisHostClient::OnProcessMessageReceived(
          host_->HandleBrowserProcessMessage(browser, frame, source_process, message);
 }
 
+
+void AegisDevToolsObserver::OnDevToolsEvent(CefRefPtr<CefBrowser> browser,
+                                            const CefString& method,
+                                            const void* params,
+                                            size_t params_size) {
+  if (host_ != nullptr) {
+    host_->HandleDevToolsEvent(browser, method, params, params_size);
+  }
+}
+
+void AegisDevToolsObserver::OnDevToolsAgentAttached(CefRefPtr<CefBrowser> browser) {
+  if (host_ != nullptr) {
+    host_->HandleDevToolsAgentAttached(browser);
+  }
+}
+
+void AegisDevToolsObserver::OnDevToolsAgentDetached(CefRefPtr<CefBrowser> browser) {
+  if (host_ != nullptr) {
+    host_->HandleDevToolsAgentDetached(browser);
+  }
+}
 template <typename Method>
 AegisHostStatus Dispatch(
     AegisHostHandle ctx,

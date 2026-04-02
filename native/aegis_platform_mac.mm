@@ -5,6 +5,8 @@
 #include "include/aegis_platform.h"
 #include "include/cef_application_mac.h"
 
+#include <chrono>
+#include <fstream>
 #include <stdexcept>
 #include <string>
 

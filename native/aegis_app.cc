@@ -689,7 +689,14 @@ bool AegisApp::OnAlreadyRunningAppRelaunch(
 #endif
 }
 
-void AegisApp::OnScheduleMessagePumpWork(int64_t) {}
+void AegisApp::OnScheduleMessagePumpWork(int64_t delay_ms) {
+  static int log_count = 0;
+  if (log_count < 20 || delay_ms > 100) {
+    AppendDebugLog(std::string("app: on_schedule_message_pump_work delay_ms=") +
+                   std::to_string(delay_ms));
+    ++log_count;
+  }
+}
 
 void AegisApp::CreateHeadfulBrowser(const std::string& url) {
 #if !defined(AEGIS_STANDALONE_APP)
@@ -723,9 +730,14 @@ void AegisApp::CreateHeadfulBrowser(const std::string& url) {
   }
   window_info.runtime_style = CEF_RUNTIME_STYLE_ALLOY;
 
-  if (!CefBrowserHost::CreateBrowser(window_info, client, url, settings, nullptr,
-                                     request_context_)) {
+  auto browser = CefBrowserHost::CreateBrowserSync(window_info, client, url, settings, nullptr,
+                                                   request_context_);
+  if (!browser) {
     AppendDebugLog("app: failed to create headful browser");
+  } else if (!primary_browser_) {
+    primary_browser_ = browser;
+    AppendDebugLog(std::string("app: create_headful_browser_sync browser_id=") +
+                   std::to_string(browser->GetIdentifier()));
   }
 #endif
 }
@@ -761,8 +773,15 @@ void AegisApp::OnContextInitialized() {
     ApplyAegisProductionPreferences(request_context_);
     CefWindowInfo window_info;
     window_info.SetAsWindowless(kNullWindowHandle);
-    CefBrowserHost::CreateBrowser(window_info, client, url, settings, nullptr,
-                                  request_context_);
+    auto browser = CefBrowserHost::CreateBrowserSync(window_info, client, url, settings, nullptr,
+                                                     request_context_);
+    if (!browser) {
+      AppendDebugLog("app: failed to create headless browser");
+    } else if (!primary_browser_) {
+      primary_browser_ = browser;
+      AppendDebugLog(std::string("app: create_headless_browser_sync browser_id=") +
+                     std::to_string(browser->GetIdentifier()));
+    }
     return;
   }
   CreateHeadfulBrowser(url);

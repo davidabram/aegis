@@ -310,6 +310,23 @@ static NSColor* AegisLockIcon(void) { return AegisColor(0.0, 0.0, 0.0, 0.36); }
 
 namespace {
 
+void AppendBrowserHostDebugLog(const std::string& message) {
+  const char* path = std::getenv("AEGIS_DEBUG_LOG");
+  if (path == nullptr || *path == '\0') {
+    return;
+  }
+  static const auto start = std::chrono::steady_clock::now();
+  std::ofstream output(path, std::ios::app);
+  if (!output.is_open()) {
+    return;
+  }
+  const auto elapsed_ms =
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now() - start)
+          .count();
+  output << "[" << elapsed_ms << "ms] browser_host: " << message << '\n';
+}
+
 struct BrowserHostState {
   NSWindow* window = nil;
   NSView* root_view = nil;
@@ -348,17 +365,24 @@ BrowserHostState& HostState() {
 
 void InitializeHostApplication() {
   if (NSApp == nil) {
+    AppendBrowserHostDebugLog("initialize_host_application create_shared_application");
     [AegisHostApplication sharedApplication];
   }
   [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
   [NSApp finishLaunching];
+  AppendBrowserHostDebugLog("initialize_host_application finish_launching");
 }
 
 void EnsureHostWindow(const std::string& title, int width, int height) {
   auto& s = HostState();
   if (s.window != nil && s.web_container_view != nil) {
+    AppendBrowserHostDebugLog("ensure_host_window reuse_existing_window");
     return;
   }
+
+  AppendBrowserHostDebugLog("ensure_host_window create_window title=" + title +
+                            " width=" + std::to_string(width) +
+                            " height=" + std::to_string(height));
 
   InitializeHostApplication();
 
@@ -573,6 +597,7 @@ void EnsureHostWindow(const std::string& title, int width, int height) {
   [s.controller updateNavigationButtonsWithCanGoBack:NO
                                         canGoForward:NO
                                            isLoading:NO];
+  AppendBrowserHostDebugLog("ensure_host_window complete");
 }
 
 }  // namespace
@@ -843,18 +868,22 @@ void AegisInitializeBrowserHostApplication() {
 CefWindowHandle AegisCreateBrowserHostView(const std::string& title,
                                            int width,
                                            int height) {
+  AppendBrowserHostDebugLog("create_browser_host_view enter");
   EnsureHostWindow(title, width, height);
+  AppendBrowserHostDebugLog("create_browser_host_view returning_web_container");
   return CAST_NSVIEW_TO_CEF_WINDOW_HANDLE(HostState().web_container_view);
 }
 
 void AegisShowBrowserHostWindow() {
   auto& state = HostState();
   if (state.window == nil) {
+    AppendBrowserHostDebugLog("show_browser_host_window skipped_no_window");
     return;
   }
   [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
   [NSApp activateIgnoringOtherApps:YES];
   [state.window makeKeyAndOrderFront:nil];
+  AppendBrowserHostDebugLog("show_browser_host_window visible");
 }
 
 void AegisSetBrowserHostTitle(const std::string& title) {
@@ -895,6 +924,7 @@ void AegisSetBrowserHostNavigationState(bool can_go_back,
 void AegisAttachBrowserToHostWindow(CefRefPtr<CefBrowser> browser) {
   auto& state = HostState();
   if (state.window == nil || state.web_container_view == nil || !browser) {
+    AppendBrowserHostDebugLog("attach_browser_to_host_window skipped_missing_window_or_browser");
     return;
   }
 
@@ -902,6 +932,7 @@ void AegisAttachBrowserToHostWindow(CefRefPtr<CefBrowser> browser) {
   NSView* browser_view =
       CAST_CEF_WINDOW_HANDLE_TO_NSVIEW(browser->GetHost()->GetWindowHandle());
   if (browser_view == nil) {
+    AppendBrowserHostDebugLog("attach_browser_to_host_window browser_view_nil");
     return;
   }
 
@@ -913,6 +944,7 @@ void AegisAttachBrowserToHostWindow(CefRefPtr<CefBrowser> browser) {
                               positioned:NSWindowBelow
                               relativeTo:state.page_transition_view];
   }
+  AppendBrowserHostDebugLog("attach_browser_to_host_window attached_browser_view");
 }
 
 void AegisCloseBrowserHostWindow() {
@@ -954,18 +986,69 @@ void AegisPumpBrowserHostWindow() {
     return;
   }
 
-  for (;;) {
-    NSEvent* event = [NSApp nextEventMatchingMask:NSEventMaskAny
-                                        untilDate:[NSDate distantPast]
-                                           inMode:NSDefaultRunLoopMode
-                                          dequeue:YES];
-    if (event == nil) {
-      break;
-    }
-    [NSApp sendEvent:event];
-  }
+  @autoreleasepool {
+    const auto pump_started = std::chrono::steady_clock::now();
+    std::size_t dispatched_events = 0;
+    std::size_t run_loop_spins = 0;
+    NSArray<NSString*>* modes = @[
+      NSDefaultRunLoopMode,
+      NSEventTrackingRunLoopMode,
+      NSModalPanelRunLoopMode
+    ];
+    NSDate* slice_deadline = [NSDate dateWithTimeIntervalSinceNow:0.001];
 
-  [NSApp updateWindows];
+    for (NSString* mode in modes) {
+      for (;;) {
+        NSEvent* event = [NSApp nextEventMatchingMask:NSEventMaskAny
+                                            untilDate:[NSDate distantPast]
+                                               inMode:mode
+                                              dequeue:YES];
+        if (event == nil) {
+          break;
+        }
+        [NSApp sendEvent:event];
+        dispatched_events += 1;
+      }
+
+      for (int spin = 0; spin < 4; ++spin) {
+        if ([slice_deadline timeIntervalSinceNow] <= 0) {
+          break;
+        }
+        if (![[NSRunLoop currentRunLoop] runMode:mode beforeDate:slice_deadline]) {
+          break;
+        }
+        run_loop_spins += 1;
+      }
+    }
+
+    auto& state = HostState();
+    if (state.root_view != nil) {
+      [state.root_view layoutSubtreeIfNeeded];
+      [state.root_view displayIfNeeded];
+    }
+    if (state.window != nil) {
+      [[state.window contentView] layoutSubtreeIfNeeded];
+      [[state.window contentView] displayIfNeeded];
+      [state.window displayIfNeeded];
+    }
+
+    [NSApp updateWindows];
+    [CATransaction flush];
+
+    static auto last_pump_log_at = std::chrono::steady_clock::now();
+    const auto now = std::chrono::steady_clock::now();
+    const auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 now - pump_started)
+                                 .count();
+    if (duration_ms >= 50 ||
+        now - last_pump_log_at >= std::chrono::milliseconds(500)) {
+      AppendBrowserHostDebugLog(
+          "pump_browser_host_window duration_ms=" + std::to_string(duration_ms) +
+          " dispatched_events=" + std::to_string(dispatched_events) +
+          " run_loop_spins=" + std::to_string(run_loop_spins));
+      last_pump_log_at = now;
+    }
+  }
 }
 
 bool AegisBrowserHostWindowCloseRequested() {

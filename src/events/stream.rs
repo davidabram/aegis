@@ -12,7 +12,24 @@ pub enum EventType {
     DomMutation,
     Navigation,
     Network,
+    WebSocket,
     Log,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkResourcePhase {
+    Request,
+    Response,
+    Finished,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebSocketFrameDirection {
+    Sent,
+    Received,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -25,6 +42,50 @@ pub enum RuntimeEvent {
         url: String,
     },
     Network {
+        request_id: String,
+        url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        method: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resource_type: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        phase: Option<NetworkResourcePhase>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<u16>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status_text: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mime_type: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_cache: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error_text: Option<String>,
+    },
+    WebSocketOpen {
+        request_id: String,
+        url: String,
+    },
+    WebSocketHandshake {
+        request_id: String,
+        url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<u16>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status_text: Option<String>,
+    },
+    WebSocketFrame {
+        request_id: String,
+        url: String,
+        direction: WebSocketFrameDirection,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        opcode: Option<u8>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mask: Option<bool>,
+        payload_preview: String,
+        payload_length: usize,
+        truncated: bool,
+    },
+    WebSocketClose {
         request_id: String,
         url: String,
     },
@@ -41,6 +102,10 @@ impl RuntimeEvent {
             RuntimeEvent::DomMutation { .. } => EventType::DomMutation,
             RuntimeEvent::Navigation { .. } => EventType::Navigation,
             RuntimeEvent::Network { .. } => EventType::Network,
+            RuntimeEvent::WebSocketOpen { .. }
+            | RuntimeEvent::WebSocketHandshake { .. }
+            | RuntimeEvent::WebSocketFrame { .. }
+            | RuntimeEvent::WebSocketClose { .. } => EventType::WebSocket,
             RuntimeEvent::Log { .. } => EventType::Log,
         }
     }

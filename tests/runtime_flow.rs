@@ -3,7 +3,9 @@ use aegis::{
     NetworkOverride, RuntimeEvent, SessionState, StorageArea, TraceRecorder,
     dom::diff::{DomMutation, diff_snapshots},
     dom::node::{DomNode, DomNodeSemantics, DomSnapshot},
-    events::stream::{EventStream, EventType, SequencedEvent},
+    events::stream::{
+        EventStream, EventType, NetworkResourcePhase, SequencedEvent, WebSocketFrameDirection,
+    },
     replay_trace,
     transport::protocol::{
         BatchWireResponse, EvalJsRequest, HostRuntimeState, MessageKind, NavigateResponse,
@@ -187,6 +189,58 @@ fn filters_event_stream_by_type() {
     assert!(!only_nav.gap_detected);
     assert_eq!(only_nav.events.len(), 1);
     assert_eq!(only_nav.events[0].sequence, 1);
+}
+
+#[test]
+fn websocket_events_are_filterable() {
+    let mut stream = EventStream::default();
+    stream.push(SequencedEvent {
+        sequence: 1,
+        timestamp_ms: 10,
+        event: RuntimeEvent::WebSocketFrame {
+            request_id: "ws-1".into(),
+            url: "wss://example.com/socket".into(),
+            direction: WebSocketFrameDirection::Received,
+            opcode: Some(1),
+            mask: Some(false),
+            payload_preview: "hello".into(),
+            payload_length: 5,
+            truncated: false,
+        },
+    });
+    stream.push(SequencedEvent {
+        sequence: 2,
+        timestamp_ms: 11,
+        event: RuntimeEvent::Log {
+            level: "info".into(),
+            message: "ready".into(),
+            data: None,
+        },
+    });
+
+    let only_ws = stream.read_from(0, Some(EventType::WebSocket));
+    assert_eq!(only_ws.events.len(), 1);
+    assert_eq!(only_ws.events[0].sequence, 1);
+}
+
+#[test]
+fn network_event_serializes_optional_fields() {
+    let event = RuntimeEvent::Network {
+        request_id: "req-7".into(),
+        url: "https://example.com/api".into(),
+        method: Some("GET".into()),
+        resource_type: Some("XHR".into()),
+        phase: Some(NetworkResourcePhase::Response),
+        status: Some(200),
+        status_text: Some("OK".into()),
+        mime_type: Some("application/json".into()),
+        from_cache: Some(false),
+        error_text: None,
+    };
+
+    let json = serde_json::to_string(&event).expect("event serializes");
+    assert!(json.contains("\"phase\":\"response\""));
+    assert!(json.contains("\"status\":200"));
 }
 
 #[test]
