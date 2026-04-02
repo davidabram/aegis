@@ -23,6 +23,7 @@ pub enum MessageKind {
     SnapshotSession = 6,
     DrainEvents = 7,
     Navigate = 8,
+    SnapshotHostState = 9,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -68,6 +69,21 @@ pub struct BatchWireResponse {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EventsResponse {
     pub events: Vec<BridgeEventEnvelope>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct HostRuntimeState {
+    pub startup_complete: bool,
+    pub browser_available: bool,
+    pub page_ready: bool,
+    pub renderer_ready: bool,
+    pub runtime_installed: bool,
+    pub load_in_progress: bool,
+    pub browser_closed: bool,
+    pub cancel_requested: bool,
+    pub current_url: Option<String>,
+    pub active_operation: Option<String>,
+    pub active_stage: Option<String>,
 }
 
 pub fn encode_message<T: Serialize>(kind: MessageKind, payload: &T) -> Result<Vec<u8>, AegisError> {

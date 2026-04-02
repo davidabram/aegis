@@ -22,6 +22,8 @@ std::filesystem::path DetectAppBundle(const std::filesystem::path& anchor) {
   return {};
 }
 
+}  // namespace
+
 @interface AegisApplication : NSApplication <CefAppProtocol> {
  @private
   BOOL handlingSendEvent_;
@@ -52,8 +54,6 @@ std::filesystem::path DetectAppBundle(const std::filesystem::path& anchor) {
   return NSModalResponseCancel;
 }
 @end
-
-}  // namespace
 
 int AegisPlatformRunMain(AegisPlatformMainEntry entry, int argc, char* argv[]) {
   @autoreleasepool {

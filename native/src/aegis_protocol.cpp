@@ -51,6 +51,8 @@ const char* MessageKindName(MessageKind kind) {
       return "DrainEvents";
     case MessageKind::Navigate:
       return "Navigate";
+    case MessageKind::SnapshotHostState:
+      return "SnapshotHostState";
   }
 
   throw ProtocolError("unsupported message kind");
@@ -90,6 +92,9 @@ MessageKind ParseMessageKind(CefRefPtr<CefDictionaryValue> envelope) {
     }
     if (kind == "Navigate") {
       return MessageKind::Navigate;
+    }
+    if (kind == "SnapshotHostState") {
+      return MessageKind::SnapshotHostState;
     }
   }
 

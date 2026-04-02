@@ -34,8 +34,48 @@ print(value)
 PY
 )"
 
+WORKSPACE_APP_EXECUTABLE="$(AEGIS_NATIVE_DOCTOR_JSON="${DOCTOR_JSON}" python3 - <<'PY'
+import json
+import os
+import sys
+
+data = json.loads(os.environ["AEGIS_NATIVE_DOCTOR_JSON"])
+value = data.get("workspace_app_executable")
+if not isinstance(value, str):
+    raise SystemExit("workspace_app_executable missing from native doctor output")
+print(value)
+PY
+)"
+WORKSPACE_APP_EXECUTABLE_PRESENT="$(AEGIS_NATIVE_DOCTOR_JSON="${DOCTOR_JSON}" python3 - <<'PY'
+import json
+import os
+import sys
+
+data = json.loads(os.environ["AEGIS_NATIVE_DOCTOR_JSON"])
+value = data.get("workspace_app_executable_present")
+if not isinstance(value, bool):
+    raise SystemExit("workspace_app_executable_present missing from native doctor output")
+print("true" if value else "false")
+PY
+)"
+
 if [[ -z "${HOST_LIB}" ]]; then
-  if [[ -n "${INSTALLED_HOST_LIB}" && -f "${INSTALLED_HOST_LIB}" ]]; then
+  if [[ -f "${WORKSPACE_HOST_LIB}" ]]; then
+    if [[ "${WORKSPACE_APP_EXECUTABLE_PRESENT}" != "true" ]]; then
+      cargo run --quiet -- native build --configuration release >/dev/null
+      DOCTOR_JSON="$(cargo run --quiet -- native doctor)"
+      WORKSPACE_HOST_LIB="$(AEGIS_NATIVE_DOCTOR_JSON="${DOCTOR_JSON}" python3 - <<'PY'
+import json
+import os
+import sys
+
+data = json.loads(os.environ["AEGIS_NATIVE_DOCTOR_JSON"])
+print(data["workspace_host_library"])
+PY
+)"
+    fi
+    HOST_LIB="${WORKSPACE_HOST_LIB}"
+  elif [[ -n "${INSTALLED_HOST_LIB}" && -f "${INSTALLED_HOST_LIB}" ]]; then
     HOST_LIB="${INSTALLED_HOST_LIB}"
   else
     HOST_LIB="${WORKSPACE_HOST_LIB}"
@@ -154,6 +194,9 @@ runtime = request("GET", "/runtime")
 assert runtime["diagnostics"]["command_ready"] is True, runtime
 assert runtime["diagnostics"]["browser_backend_healthy"] is True, runtime
 assert runtime["diagnostics"]["runtime"]["current_title"] == "Aegis Smoke", runtime
+assert runtime["diagnostics"]["runtime"]["host"]["browser_available"] is True, runtime
+assert runtime["diagnostics"]["runtime"]["host"]["renderer_ready"] is True, runtime
+assert runtime["diagnostics"]["runtime"]["host"]["runtime_installed"] is True, runtime
 
 dom = request("GET", "/dom")
 assert dom["nodes"], dom
@@ -248,4 +291,7 @@ assert doctor["bridge_healthy"] is True, doctor
 assert doctor["browser_backend_healthy"] is True, doctor
 assert doctor["runtime"]["current_title"] == "Result opened", doctor
 assert doctor["runtime"]["document_ready_state"] in {"interactive", "complete"}, doctor
+assert doctor["runtime"]["host"]["browser_available"] is True, doctor
+assert doctor["runtime"]["host"]["renderer_ready"] is True, doctor
+assert doctor["runtime"]["host"]["cancel_requested"] is False, doctor
 PY

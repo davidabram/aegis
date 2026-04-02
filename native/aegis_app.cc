@@ -714,7 +714,12 @@ void AegisApp::CreateHeadfulBrowser(const std::string& url) {
     window_info.SetAsChild(AegisCreateBrowserHostView("Aegis", 1280, 800),
                            CefRect(0, 0, 1280, 800));
   } else {
+#if defined(__APPLE__)
+    window_info.hidden = false;
+    CefString(&window_info.window_name) = "Aegis";
+#else
     window_info.SetAsPopup(kNullWindowHandle, "Aegis");
+#endif
   }
   window_info.runtime_style = CEF_RUNTIME_STYLE_ALLOY;
 

@@ -10,8 +10,8 @@ use crate::dom::node::DomSnapshot;
 use crate::events::stream::RuntimeEvent;
 use crate::session::cookies::SessionState;
 use crate::transport::protocol::{
-    BatchWireResponse, EvalJsRequest, EvalJsResponse, EventsResponse, MessageKind, NavigateRequest,
-    NavigateResponse, decode_message, encode_message,
+    BatchWireResponse, EvalJsRequest, EvalJsResponse, EventsResponse, HostRuntimeState,
+    MessageKind, NavigateRequest, NavigateResponse, decode_message, encode_message,
 };
 
 const MAX_HOST_BUFFER_LEN: usize = 64 * 1024 * 1024;
@@ -79,7 +79,9 @@ pub struct HostFunctionTable {
     pub snapshot_session: HostApi,
     pub drain_events: HostApi,
     pub navigate: HostApi,
+    pub snapshot_host_state: HostApi,
     pub pump: HostApi,
+    pub request_cancel: unsafe extern "C" fn(ctx: HostHandle),
     pub free_buffer: HostFree,
 }
 
@@ -193,6 +195,18 @@ impl CefBridge {
         })
     }
 
+    pub fn snapshot_host_state(&mut self) -> Result<HostRuntimeState, AegisError> {
+        let payload = encode_message(MessageKind::SnapshotHostState, &())?;
+        let response = self.invoke_message(MessageKind::SnapshotHostState, &payload)?;
+        decode_message(MessageKind::SnapshotHostState, &response)
+    }
+
+    pub fn request_cancel(&self) {
+        match &self.backend {
+            BridgeBackend::Dynamic { host, fns } => unsafe { (fns.request_cancel)(host.as_ptr()) },
+        }
+    }
+
     pub fn pump(&mut self) -> Result<(), AegisError> {
         match &mut self.backend {
             BridgeBackend::Dynamic { host, fns } => {
@@ -214,6 +228,7 @@ impl CefBridge {
                     MessageKind::SnapshotSession => fns.snapshot_session,
                     MessageKind::DrainEvents => fns.drain_events,
                     MessageKind::Navigate => fns.navigate,
+                    MessageKind::SnapshotHostState => fns.snapshot_host_state,
                 };
                 Self::invoke_raw(*host, *fns, function, input)
             }

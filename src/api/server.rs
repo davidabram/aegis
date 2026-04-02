@@ -20,7 +20,7 @@ use crate::commands::matcher::resolve_command_target as resolve_snapshot_target;
 use crate::config_store::{AegisConfigStore, AegisSecretStore, CredentialInput};
 use crate::dom::node::{DomNode, DomSnapshot};
 use crate::events::stream::{EventReadWindow, SequencedEvent};
-use crate::host::LoadedAegisClient;
+use crate::host::{LoadedAegisClient, RuntimeCancelHandle};
 use crate::runtime::executor::{ExecutionReport, RuntimeStatus};
 use crate::session::cookies::SessionState;
 use crate::session::profile::{SessionProfileInfo, SessionProfileStore};
@@ -32,6 +32,7 @@ const COMMAND_TIMEOUT: Duration = Duration::from_secs(20);
 #[derive(Clone)]
 pub struct ApiState {
     tx: mpsc::Sender<ApiCommand>,
+    cancel: RuntimeCancelHandle,
     host_library: PathBuf,
     browser: BrowserConfig,
     startup: Arc<Mutex<ServeStartupMetrics>>,
@@ -103,6 +104,7 @@ enum RuntimeOperationalState {
     Ready,
     Busy,
     Degraded,
+    Cancelling,
     Wedged,
 }
 
@@ -217,6 +219,7 @@ pub async fn serve(
     let client_connect_ms = client_connect_started.elapsed().as_millis() as u64;
     let api_bind_started = std::time::Instant::now();
     let (tx, rx) = mpsc::channel::<ApiCommand>();
+    let cancel = client.cancel_handle();
     let startup = Arc::new(Mutex::new(ServeStartupMetrics {
         client_connect_ms,
         api_bind_ms: 0,
@@ -226,6 +229,7 @@ pub async fn serve(
     let (startup_tx, startup_rx) = mpsc::channel::<Result<(), String>>();
     let state = ApiState {
         tx,
+        cancel,
         host_library,
         browser: browser_config.clone(),
         startup: startup.clone(),
@@ -672,6 +676,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/readyz", get(readiness))
         .route("/doctor", get(doctor))
         .route("/runtime", get(runtime_info))
+        .route("/runtime/cancel", post(cancel_runtime_operation))
         .route("/session", post(inject_session).get(snapshot_session))
         .route("/session/save", post(save_session_profile))
         .route("/session/load", post(load_session_profile))
@@ -738,6 +743,14 @@ async fn doctor(State(state): State<ApiState>) -> Json<RuntimeDiagnosticsRespons
     Json(read_diagnostics(&state.diagnostics))
 }
 
+async fn cancel_runtime_operation(
+    State(state): State<ApiState>,
+) -> Result<Json<RuntimeDiagnosticsResponse>, ApiError> {
+    state.cancel.request_cancel();
+    mark_operation_cancel_requested(&state.diagnostics);
+    Ok(Json(read_diagnostics(&state.diagnostics)))
+}
+
 async fn save_session_profile(
     State(state): State<ApiState>,
 ) -> Result<Json<SessionProfileInfo>, ApiError> {
@@ -746,7 +759,7 @@ async fn save_session_profile(
         .tx
         .send(ApiCommand::SaveSessionProfile(reply_tx))
         .map_err(channel_error)?;
-    let profile = await_command("save_session_profile", &state.diagnostics, reply_rx).await??;
+    let profile = await_command("save_session_profile", &state, reply_rx).await??;
     Ok(Json(profile))
 }
 
@@ -758,7 +771,7 @@ async fn load_session_profile(
         .tx
         .send(ApiCommand::LoadSessionProfile(reply_tx))
         .map_err(channel_error)?;
-    let profile = await_command("load_session_profile", &state.diagnostics, reply_rx).await??;
+    let profile = await_command("load_session_profile", &state, reply_rx).await??;
     Ok(Json(profile))
 }
 
@@ -771,7 +784,7 @@ async fn inject_session(
         .tx
         .send(ApiCommand::InjectSession(body, reply_tx))
         .map_err(channel_error)?;
-    await_command("inject_session", &state.diagnostics, reply_rx).await??;
+    await_command("inject_session", &state, reply_rx).await??;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -782,7 +795,7 @@ async fn snapshot_session(State(state): State<ApiState>) -> Result<Json<SessionS
         .send(ApiCommand::SnapshotSession(reply_tx))
         .map_err(channel_error)?;
     Ok(Json(
-        await_command("snapshot_session", &state.diagnostics, reply_rx).await??,
+        await_command("snapshot_session", &state, reply_rx).await??,
     ))
 }
 
@@ -795,9 +808,7 @@ async fn navigate(
         .tx
         .send(ApiCommand::Navigate(body.url, reply_tx))
         .map_err(channel_error)?;
-    Ok(Json(
-        await_command("navigate", &state.diagnostics, reply_rx).await??,
-    ))
+    Ok(Json(await_command("navigate", &state, reply_rx).await??))
 }
 
 async fn execute(
@@ -809,9 +820,7 @@ async fn execute(
         .tx
         .send(ApiCommand::Execute(body.commands, reply_tx))
         .map_err(channel_error)?;
-    Ok(Json(
-        await_command("execute", &state.diagnostics, reply_rx).await??,
-    ))
+    Ok(Json(await_command("execute", &state, reply_rx).await??))
 }
 
 async fn snapshot_dom(State(state): State<ApiState>) -> Result<Json<DomSnapshot>, ApiError> {
@@ -821,7 +830,7 @@ async fn snapshot_dom(State(state): State<ApiState>) -> Result<Json<DomSnapshot>
         .send(ApiCommand::SnapshotDom(reply_tx))
         .map_err(channel_error)?;
     Ok(Json(
-        await_command("snapshot_dom", &state.diagnostics, reply_rx).await??,
+        await_command("snapshot_dom", &state, reply_rx).await??,
     ))
 }
 
@@ -834,9 +843,7 @@ async fn events(
         .tx
         .send(ApiCommand::Events(query.since, reply_tx))
         .map_err(channel_error)?;
-    Ok(Json(
-        await_command("events", &state.diagnostics, reply_rx).await??,
-    ))
+    Ok(Json(await_command("events", &state, reply_rx).await??))
 }
 
 async fn enable_trace(
@@ -848,7 +855,7 @@ async fn enable_trace(
         .tx
         .send(ApiCommand::EnableTrace(body.path, reply_tx))
         .map_err(channel_error)?;
-    await_command("enable_trace", &state.diagnostics, reply_rx).await??;
+    await_command("enable_trace", &state, reply_rx).await??;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -867,14 +874,14 @@ impl ApiError {
             status: StatusCode::GATEWAY_TIMEOUT,
             body: ApiErrorBody {
                 error: format!(
-                    "operation `{operation}` exceeded the server timeout and the runtime is now marked wedged"
+                    "operation `{operation}` exceeded the server timeout and a runtime cancellation request was sent"
                 ),
-                code: "operation_timeout".into(),
+                code: "operation_cancel_requested".into(),
                 operation: Some(operation.to_string()),
                 stage: Some("awaiting_control_plane_reply".into()),
                 elapsed_ms: Some(COMMAND_TIMEOUT.as_millis() as u64),
                 timed_out: true,
-                restart_recommended: true,
+                restart_recommended: false,
             },
         }
     }
@@ -978,13 +985,14 @@ pub struct ApiErrorBody {
 
 async fn await_command<T>(
     operation: &str,
-    diagnostics: &Arc<Mutex<ServeDiagnostics>>,
+    state: &ApiState,
     reply_rx: oneshot::Receiver<Result<T, AegisError>>,
 ) -> Result<Result<T, AegisError>, ApiError> {
     match timeout(COMMAND_TIMEOUT, reply_rx).await {
         Ok(result) => result.map_err(reply_error),
         Err(_) => {
-            mark_operation_timeout(diagnostics, operation);
+            state.cancel.request_cancel();
+            mark_operation_timeout(&state.diagnostics, operation);
             Err(ApiError::timeout(operation))
         }
     }
@@ -1049,6 +1057,12 @@ fn mark_operation_timeout(diagnostics: &Arc<Mutex<ServeDiagnostics>>, operation:
     }
 }
 
+fn mark_operation_cancel_requested(diagnostics: &Arc<Mutex<ServeDiagnostics>>) {
+    if let Ok(mut diagnostics) = diagnostics.lock() {
+        diagnostics.mark_cancel_requested();
+    }
+}
+
 fn read_diagnostics(diagnostics: &Arc<Mutex<ServeDiagnostics>>) -> RuntimeDiagnosticsResponse {
     diagnostics
         .lock()
@@ -1070,6 +1084,7 @@ fn read_diagnostics(diagnostics: &Arc<Mutex<ServeDiagnostics>>) -> RuntimeDiagno
                 last_event_at_ms: None,
                 last_successful_command_at_ms: None,
                 last_successful_bridge_roundtrip_at_ms: None,
+                host: Default::default(),
             })
             .snapshot()
         })
@@ -1158,6 +1173,7 @@ impl ServeDiagnostics {
 
     fn mark_timeout(&mut self, operation: &str, elapsed_ms: u64) {
         self.timed_out_operations += 1;
+        self.runtime.host.cancel_requested = true;
         if let Some(active) = self.active_operation.as_mut() {
             active.timed_out = true;
             active.stage = "awaiting_control_plane_reply".into();
@@ -1166,10 +1182,10 @@ impl ServeDiagnostics {
         self.last_failure = Some(FailureSnapshot {
             operation: operation.to_string(),
             stage: "awaiting_control_plane_reply".into(),
-            message: "the API timed out waiting for the runtime owner thread to reply".into(),
+            message: "the API timed out waiting for the runtime owner thread to reply and requested cancellation".into(),
             elapsed_ms,
             timed_out: true,
-            restart_recommended: true,
+            restart_recommended: false,
             first_seen_at_ms: self
                 .last_failure
                 .as_ref()
@@ -1181,6 +1197,13 @@ impl ServeDiagnostics {
 
     fn record_runtime_snapshot(&mut self, runtime: RuntimeStatus) {
         self.runtime = runtime;
+    }
+
+    fn mark_cancel_requested(&mut self) {
+        self.runtime.host.cancel_requested = true;
+        if let Some(active) = self.active_operation.as_mut() {
+            active.stage = "cancelling_active_operation".into();
+        }
     }
 
     fn snapshot(&self) -> RuntimeDiagnosticsResponse {
@@ -1195,14 +1218,16 @@ impl ServeDiagnostics {
                 elapsed_ms: operation.started_at.elapsed().as_millis() as u64,
                 timed_out: operation.timed_out,
             });
-        let state = if active_operation.as_ref().is_some_and(|op| op.timed_out) {
+        let state = if self.runtime.host.cancel_requested {
+            RuntimeOperationalState::Cancelling
+        } else if active_operation.as_ref().is_some_and(|op| op.timed_out) {
             RuntimeOperationalState::Wedged
         } else if active_operation.is_some() {
             RuntimeOperationalState::Busy
         } else if self
             .last_failure
             .as_ref()
-            .is_some_and(|failure| failure.timed_out || failure.restart_recommended)
+            .is_some_and(|failure| failure.timed_out && failure.restart_recommended)
         {
             RuntimeOperationalState::Wedged
         } else if self.last_failure.is_some() {
@@ -1218,7 +1243,9 @@ impl ServeDiagnostics {
         };
         let command_ready = !matches!(
             state,
-            RuntimeOperationalState::Starting | RuntimeOperationalState::Wedged
+            RuntimeOperationalState::Starting
+                | RuntimeOperationalState::Cancelling
+                | RuntimeOperationalState::Wedged
         );
         RuntimeDiagnosticsResponse {
             state,

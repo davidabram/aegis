@@ -14,6 +14,7 @@ use crate::events::stream::{EventReadWindow, SequencedEvent};
 use crate::runtime::executor::{ExecutionReport, RuntimeStatus};
 use crate::session::cookies::SessionState;
 use crate::transport::bridge::{AegisError, CefBridge, HostFunctionTable, HostHandle};
+use crate::transport::protocol::HostRuntimeState;
 
 type CreateHost = unsafe extern "C" fn(input_ptr: *const u8, input_len: usize) -> HostHandle;
 type LastErrorMessage = unsafe extern "C" fn() -> *const std::ffi::c_char;
@@ -91,9 +92,25 @@ impl Drop for LoadedHost {
     }
 }
 
+#[derive(Clone, Copy)]
+pub struct RuntimeCancelHandle {
+    handle: HostHandle,
+    request_cancel: unsafe extern "C" fn(HostHandle),
+}
+
+impl RuntimeCancelHandle {
+    pub fn request_cancel(&self) {
+        unsafe { (self.request_cancel)(self.handle) }
+    }
+}
+
+unsafe impl Send for RuntimeCancelHandle {}
+unsafe impl Sync for RuntimeCancelHandle {}
+
 pub struct LoadedAegisClient {
     _host: LoadedHost,
     client: AegisClient,
+    cancel_handle: RuntimeCancelHandle,
 }
 
 impl LoadedAegisClient {
@@ -104,9 +121,14 @@ impl LoadedAegisClient {
         let bootstrap_duration_ms = Some(started.elapsed().as_millis() as u64);
         let mut client = AegisClient::connect(bridge, config, bootstrap_duration_ms)?;
         client.runtime_mut().establish_command_bridge()?;
+        let cancel_handle = RuntimeCancelHandle {
+            handle: host.handle,
+            request_cancel: host.table.request_cancel,
+        };
         Ok(Self {
             _host: host,
             client,
+            cancel_handle,
         })
     }
 
@@ -149,6 +171,18 @@ impl LoadedAegisClient {
 
     pub fn runtime_status(&self) -> RuntimeStatus {
         self.client.runtime().runtime_status()
+    }
+
+    pub fn snapshot_host_state(&mut self) -> Result<HostRuntimeState, AegisError> {
+        self.client.runtime_mut().snapshot_host_state()
+    }
+
+    pub fn request_cancel(&self) {
+        self.cancel_handle.request_cancel();
+    }
+
+    pub fn cancel_handle(&self) -> RuntimeCancelHandle {
+        self.cancel_handle
     }
 }
 

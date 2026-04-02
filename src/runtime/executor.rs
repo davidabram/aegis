@@ -17,6 +17,7 @@ use crate::trace::recorder::TraceRecorder;
 use crate::transport::bridge::{
     AegisError, BatchRequest, BatchResponse, BridgeEventEnvelope, CefBridge,
 };
+use crate::transport::protocol::HostRuntimeState;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeStatus {
@@ -35,6 +36,7 @@ pub struct RuntimeStatus {
     pub last_event_at_ms: Option<u64>,
     pub last_successful_command_at_ms: Option<u64>,
     pub last_successful_bridge_roundtrip_at_ms: Option<u64>,
+    pub host: HostRuntimeState,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,6 +64,7 @@ pub struct AegisRuntime {
     last_event_at_ms: Option<u64>,
     last_successful_command_at_ms: Option<u64>,
     last_successful_bridge_roundtrip_at_ms: Option<u64>,
+    host_state: HostRuntimeState,
 }
 
 const LIVE_STATE_REFRESH_INTERVAL_MS: u64 = 250;
@@ -95,6 +98,7 @@ impl AegisRuntime {
             last_event_at_ms: None,
             last_successful_command_at_ms: None,
             last_successful_bridge_roundtrip_at_ms: None,
+            host_state: HostRuntimeState::default(),
         })
     }
 
@@ -125,6 +129,7 @@ impl AegisRuntime {
             commands: Vec::new(),
         };
         let emitted_events = self.apply_response(response.clone())?;
+        let _ = self.refresh_host_state();
         let _ = self.refresh_live_state(true);
         self.mark_successful_command();
         self.record_trace(request, response, &emitted_events)?;
@@ -210,6 +215,7 @@ impl AegisRuntime {
         }
         self.bridge.inject_session(session)?;
         self.mark_successful_bridge_roundtrip();
+        let _ = self.refresh_host_state();
         let _ = self.refresh_live_state(true);
         Ok(())
     }
@@ -218,6 +224,7 @@ impl AegisRuntime {
         self.ensure_runtime_bootstrapped(false)?;
         let session = self.bridge.snapshot_session()?;
         self.mark_successful_bridge_roundtrip();
+        let _ = self.refresh_host_state();
         let _ = self.refresh_live_state(false);
         Ok(session)
     }
@@ -225,6 +232,7 @@ impl AegisRuntime {
     pub fn pump(&mut self) -> Result<(), AegisError> {
         self.bridge.pump()?;
         let _ = self.drain_pending_events()?;
+        let _ = self.refresh_host_state();
         let _ = self.refresh_live_state(false);
         Ok(())
     }
@@ -234,6 +242,7 @@ impl AegisRuntime {
         let raw_events = self.bridge.drain_events()?;
         self.mark_successful_bridge_roundtrip();
         let _ = self.apply_event_batch(raw_events);
+        let _ = self.refresh_host_state();
         let _ = self.refresh_live_state(true);
         Ok(())
     }
@@ -286,11 +295,21 @@ impl AegisRuntime {
             last_event_at_ms: self.last_event_at_ms,
             last_successful_command_at_ms: self.last_successful_command_at_ms,
             last_successful_bridge_roundtrip_at_ms: self.last_successful_bridge_roundtrip_at_ms,
+            host: self.host_state.clone(),
         }
     }
 
     pub fn current_url(&self) -> Option<&str> {
         self.current_url.as_deref()
+    }
+
+    pub fn snapshot_host_state(&mut self) -> Result<HostRuntimeState, AegisError> {
+        self.refresh_host_state()?;
+        Ok(self.host_state.clone())
+    }
+
+    pub fn request_cancel(&self) {
+        self.bridge.request_cancel();
     }
 
     fn record_trace(
@@ -307,6 +326,7 @@ impl AegisRuntime {
     }
 
     fn ensure_runtime_bootstrapped(&mut self, capture_snapshot: bool) -> Result<(), AegisError> {
+        self.refresh_host_state()?;
         if capture_snapshot && !self.dom_snapshot_valid {
             self.refresh_dom_snapshot()?;
         }
@@ -530,7 +550,12 @@ impl AegisRuntime {
         loop {
             let _ = self.bridge.pump();
             let _ = self.drain_pending_events();
+            let _ = self.refresh_host_state();
             let _ = self.refresh_live_state(true);
+
+            if self.host_state.cancel_requested {
+                return Ok(CommandResult::err("wait_for cancelled"));
+            }
 
             if self.wait_condition_satisfied(
                 target.as_ref(),
@@ -636,6 +661,16 @@ impl AegisRuntime {
             .and_then(Value::as_str)
             .map(ToOwned::to_owned);
         self.last_live_state_refresh_at_ms = Some(now_ms());
+        self.mark_successful_bridge_roundtrip();
+        Ok(())
+    }
+
+    fn refresh_host_state(&mut self) -> Result<(), AegisError> {
+        let host_state = self.bridge.snapshot_host_state()?;
+        if let Some(url) = host_state.current_url.clone() {
+            self.current_url = Some(url);
+        }
+        self.host_state = host_state;
         self.mark_successful_bridge_roundtrip();
         Ok(())
     }

@@ -37,7 +37,9 @@ typedef struct AegisHostFunctionTable {
   AegisHostApi snapshot_session;
   AegisHostApi drain_events;
   AegisHostApi navigate;
+  AegisHostApi snapshot_host_state;
   AegisHostApi pump;
+  void (*request_cancel)(AegisHostHandle ctx);
   AegisHostFree free_buffer;
 } AegisHostFunctionTable;
 

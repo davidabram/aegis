@@ -50,6 +50,10 @@ impl AegisClient {
         &mut self.runtime
     }
 
+    pub fn request_cancel(&self) {
+        self.runtime.request_cancel();
+    }
+
     pub fn browser_config(&self) -> &BrowserConfig {
         self.runtime.browser_config()
     }

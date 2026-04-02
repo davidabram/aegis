@@ -218,31 +218,28 @@ fn configure_native_for(
     let platform = current_platform();
     let native_dir = root.join(NATIVE_DIR);
     let build_dir = build_dir(root, platform);
+    let configure_artifact = configure_artifact(root, platform);
+
+    if build_dir.exists() && !native_build_tree_healthy(&build_dir, &configure_artifact, platform) {
+        fs::remove_dir_all(&build_dir)?;
+    }
     fs::create_dir_all(&build_dir)?;
 
-    let mut args = vec![
-        "-S".to_string(),
-        path_str(&native_dir)?.to_string(),
-        "-B".to_string(),
-        path_str(&build_dir)?.to_string(),
-        format!("-DAEGIS_TARGET_PLATFORM={}", platform.as_str()),
-        format!(
-            "-DCEF_ROOT={}",
-            path_str(&root.join(cef_sdk_dir(platform)))?
-        ),
-    ];
-    if let Some(generator) = configure_generator(platform) {
-        args.push("-G".to_string());
-        args.push(generator.to_string());
-    }
-    if platform == NativePlatform::Macos {
-        args.push(format!("-DPROJECT_ARCH={}", apple_arch()));
-    } else {
-        args.push(format!("-DCMAKE_BUILD_TYPE={}", configuration.as_str()));
-    }
+    let args = configure_args(root, &native_dir, &build_dir, platform, configuration)?;
     let borrowed = args.iter().map(String::as_str).collect::<Vec<_>>();
-    run_checked("cmake", &borrowed, root)?;
-    Ok(configure_artifact(root, platform))
+    if let Err(error) = run_checked("cmake", &borrowed, root) {
+        if native_build_tree_can_retry(&build_dir, &configure_artifact) {
+            fs::remove_dir_all(&build_dir)?;
+            fs::create_dir_all(&build_dir)?;
+            let retry_args =
+                configure_args(root, &native_dir, &build_dir, platform, configuration)?;
+            let retry_borrowed = retry_args.iter().map(String::as_str).collect::<Vec<_>>();
+            run_checked("cmake", &retry_borrowed, root)?;
+        } else {
+            return Err(error);
+        }
+    }
+    Ok(configure_artifact)
 }
 
 pub fn build_native(
@@ -419,6 +416,63 @@ fn configure_generator(platform: NativePlatform) -> Option<&'static str> {
         NativePlatform::Macos => Some("Xcode"),
         NativePlatform::Linux => None,
     }
+}
+
+fn configure_args(
+    root: &Path,
+    native_dir: &Path,
+    build_dir: &Path,
+    platform: NativePlatform,
+    configuration: NativeConfiguration,
+) -> Result<Vec<String>, AegisError> {
+    let mut args = vec![
+        "-S".to_string(),
+        path_str(native_dir)?.to_string(),
+        "-B".to_string(),
+        path_str(build_dir)?.to_string(),
+        format!("-DAEGIS_TARGET_PLATFORM={}", platform.as_str()),
+        format!(
+            "-DCEF_ROOT={}",
+            path_str(&root.join(cef_sdk_dir(platform)))?
+        ),
+    ];
+    if let Some(generator) = configure_generator(platform) {
+        args.push("-G".to_string());
+        args.push(generator.to_string());
+    }
+    if platform == NativePlatform::Macos {
+        args.push(format!("-DPROJECT_ARCH={}", apple_arch()));
+    } else {
+        args.push(format!("-DCMAKE_BUILD_TYPE={}", configuration.as_str()));
+    }
+    Ok(args)
+}
+
+fn native_build_tree_healthy(
+    build_dir: &Path,
+    configure_artifact: &Path,
+    platform: NativePlatform,
+) -> bool {
+    if configure_artifact.exists() {
+        return true;
+    }
+
+    let cache_path = build_dir.join("CMakeCache.txt");
+    if !cache_path.exists() {
+        return false;
+    }
+
+    let Ok(cache) = fs::read_to_string(cache_path) else {
+        return false;
+    };
+    match platform {
+        NativePlatform::Macos => cache.contains("CMAKE_GENERATOR:INTERNAL=Xcode"),
+        NativePlatform::Linux => cache.contains("CMAKE_GENERATOR:INTERNAL=Unix Makefiles"),
+    }
+}
+
+fn native_build_tree_can_retry(build_dir: &Path, configure_artifact: &Path) -> bool {
+    build_dir.exists() && !configure_artifact.exists()
 }
 
 fn build_dir(root: &Path, platform: NativePlatform) -> PathBuf {

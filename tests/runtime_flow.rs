@@ -6,8 +6,8 @@ use aegis::{
     events::stream::{EventStream, EventType, SequencedEvent},
     replay_trace,
     transport::protocol::{
-        BatchWireResponse, EvalJsRequest, MessageKind, NavigateResponse, TraceFile, decode_message,
-        encode_message,
+        BatchWireResponse, EvalJsRequest, HostRuntimeState, MessageKind, NavigateResponse,
+        TraceFile, decode_message, encode_message,
     },
 };
 use std::collections::HashMap;
@@ -243,6 +243,38 @@ fn batch_wire_response_decodes_null_snapshot() {
         decode_message(MessageKind::SendBatch, &frame).expect("frame decodes");
     assert_eq!(payload.batch_id, 5);
     assert!(payload.snapshot.is_none());
+}
+
+#[test]
+fn host_runtime_state_round_trips() {
+    let frame = encode_message(
+        MessageKind::SnapshotHostState,
+        &HostRuntimeState {
+            startup_complete: true,
+            browser_available: true,
+            page_ready: false,
+            renderer_ready: true,
+            runtime_installed: true,
+            load_in_progress: true,
+            browser_closed: false,
+            cancel_requested: true,
+            current_url: Some("https://example.com/login".into()),
+            active_operation: Some("navigate".into()),
+            active_stage: Some("waiting for ready renderer context".into()),
+        },
+    )
+    .expect("frame encodes");
+
+    let payload: HostRuntimeState =
+        decode_message(MessageKind::SnapshotHostState, &frame).expect("frame decodes");
+    assert!(payload.startup_complete);
+    assert!(payload.browser_available);
+    assert!(payload.renderer_ready);
+    assert!(payload.cancel_requested);
+    assert_eq!(
+        payload.current_url.as_deref(),
+        Some("https://example.com/login")
+    );
 }
 
 #[test]
