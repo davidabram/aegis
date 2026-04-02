@@ -714,7 +714,7 @@ void AegisApp::CreateHeadfulBrowser(const std::string& url) {
     window_info.SetAsChild(AegisCreateBrowserHostView("Aegis", 1280, 800),
                            CefRect(0, 0, 1280, 800));
   } else {
-    AegisPlatformConfigureTopLevelWindow(&window_info, "Aegis", 1280, 800);
+    window_info.SetAsPopup(kNullWindowHandle, "Aegis");
   }
   window_info.runtime_style = CEF_RUNTIME_STYLE_ALLOY;
 

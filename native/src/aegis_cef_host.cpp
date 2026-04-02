@@ -42,6 +42,7 @@
 #include "include/views/cef_window.h"
 #include "include/wrapper/cef_closure_task.h"
 #include "include/wrapper/cef_helpers.h"
+#include "include/wrapper/cef_library_loader.h"
 
 namespace aegis {
 namespace {
@@ -566,7 +567,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
             options_.headless ? "serve-headless" : "serve-headful")),
         owner_thread_id_(std::this_thread::get_id()),
         manage_cef_lifecycle_(manage_cef_lifecycle) {
-    if (!AegisPlatformIsMainThread()) {
+    if (pthread_main_np() == 0) {
       throw std::runtime_error("aegis CEF host must be created on the process main thread");
     }
     AppendDebugLog("host: constructed");
@@ -1093,14 +1094,11 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       AppendDebugLog("host: start");
       RequireOwnerThread();
 
-      AppendDebugLog("host: cef runtime load begin");
-      std::string load_error;
-      if (!AegisPlatformLoadCefRuntime(paths_.cef_library, &load_error)) {
-        throw std::runtime_error(load_error.empty()
-                                     ? "failed to load Chromium Embedded Framework runtime"
-                                     : load_error);
+      AppendDebugLog("host: cef_load_library begin");
+      if (!cef_load_library(paths_.cef_library.string().c_str())) {
+        throw std::runtime_error("failed to load Chromium Embedded Framework runtime");
       }
-      AppendDebugLog("host: cef runtime load complete");
+      AppendDebugLog("host: cef_load_library complete");
 
       CefMainArgs main_args;
       AegisCefBootstrapOptions bootstrap_options;
@@ -1146,7 +1144,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       AppendDebugLog(std::string("host: startup_error ") + error.what());
       if (cef_initialized_) {
         CefShutdown();
-        AegisPlatformUnloadCefRuntime();
+        cef_unload_library();
         cef_initialized_ = false;
       }
       AegisRemoveRuntimeSession(runtime_session_paths_);
@@ -1180,7 +1178,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
                   "timed out waiting for browser shutdown");
       }
       CefShutdown();
-      AegisPlatformUnloadCefRuntime();
+      cef_unload_library();
       cef_initialized_ = false;
     } catch (...) {
       cef_initialized_ = false;
@@ -1235,7 +1233,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
         window_info.SetAsChild(AegisCreateBrowserHostView("Aegis", 1280, 800),
                                CefRect(0, 0, 1280, 800));
       } else {
-        AegisPlatformConfigureTopLevelWindow(&window_info, "Aegis", 1280, 800);
+        window_info.SetAsPopup(kNullWindowHandle, "Aegis");
       }
       window_info.runtime_style = CEF_RUNTIME_STYLE_ALLOY;
       if (!CefBrowserHost::CreateBrowser(window_info, client_, initial_url, settings, nullptr,
