@@ -3,6 +3,3 @@ target/
 fozzy-host-memory-fuzz.txt
 native/build/
 third_party/
-web-ui/dist/
-web-ui/node_modules/
-web-ui/tsconfig.tsbuildinfo

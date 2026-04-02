@@ -4,7 +4,7 @@ Aegis is an agentic web browser.
 
 It gives agents one persistent browser runtime, one local control plane, and one correct production path:
 
-- run `aegis` for the local Linux dashboard
+- run `aegis` for the local headful browser app
 - start `aegis serve`
 - control the browser over the local HTTP API
 - run in `headless` or `headful` mode against the same session
@@ -25,7 +25,7 @@ Core capabilities:
 - deterministic traces
 - replayable browser runs
 
-The browser engine is a CEF-backed native runtime. On Linux headful mode, the only supported UI is the bundled web dashboard backed by a local noVNC viewport.
+The browser engine is a CEF-backed native runtime with platform-specific host edges for macOS and Linux.
 
 ## Production Model
 
@@ -68,8 +68,8 @@ The main binary is `aegis`.
 
 Human-use shortcut:
 
-- `aegis` with no arguments starts the headful Linux runtime and opens the local dashboard
-- `aegis open` explicitly does the same
+- `aegis` with no arguments opens the local headful Aegis app
+- `aegis open` explicitly opens the same installed app
 - `aegis ...` with arguments uses the installed bundled CLI
 - macOS bundled CLI path: `~/Applications/Aegis.app/Contents/MacOS/aegis_cli`
 - Linux bundled CLI path: `~/.local/share/aegis/Aegis/bin/aegis_cli`
@@ -119,7 +119,6 @@ One-shot local install:
 
 What it does:
 
-- builds the web dashboard
 - builds the release binary
 - installs the platform-native local app directory
 - installs the bundled CLI into that app directory
@@ -181,7 +180,7 @@ aegis --mode headful serve --addr 127.0.0.1:7878
 
 For live agent debugging:
 
-- use `--mode headful` and open the dashboard at `http://127.0.0.1:7878/`
+- use `--mode headful`
 
 For unattended execution:
 
@@ -198,9 +197,6 @@ Core routes:
 
 - `GET /healthz`
 - `GET /runtime`
-- `GET /ui/bootstrap`
-- `GET /ui/chrome/state`
-- `GET /ui/vnc`
 - `POST /navigate`
 - `POST /execute`
 - `GET /dom`

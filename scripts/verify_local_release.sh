@@ -28,7 +28,7 @@ PY
 )"
 
 echo "==> Installing local release"
-bash ./install.sh
+cargo run --quiet -- native install
 
 echo "==> Checking native paths"
 cargo run --quiet -- native status
@@ -45,20 +45,6 @@ if [[ "$PLATFORM" == "Darwin" ]]; then
   fi
 else
   echo "==> Linux install verified at ${INSTALLED_APP}"
-fi
-
-if [[ "$PLATFORM" == "Linux" ]]; then
-  echo "==> Checking dashboard bootstrap"
-  timeout 20s "${INSTALLED_APP}/bin/aegis_cli" --mode headful serve --addr 127.0.0.1:7878 &
-  SERVER_PID=$!
-  trap 'kill ${SERVER_PID} >/dev/null 2>&1 || true' EXIT
-  sleep 5
-  curl --fail --silent http://127.0.0.1:7878/healthz >/dev/null
-  curl --fail --silent http://127.0.0.1:7878/ui/bootstrap >/dev/null
-  curl --fail --silent http://127.0.0.1:7878/ >/dev/null
-  kill ${SERVER_PID} >/dev/null 2>&1 || true
-  wait ${SERVER_PID} >/dev/null 2>&1 || true
-  trap - EXIT
 fi
 
 echo "==> Running Fozzy full verification"
