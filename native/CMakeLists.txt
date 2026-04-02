@@ -213,36 +213,49 @@ if(AEGIS_TARGET_PLATFORM STREQUAL "macos")
 endif()
 
 if(AEGIS_TARGET_PLATFORM STREQUAL "macos")
-  set(_helper_output_name "aegis_native Helper")
-  set(_helper_info_plist "${CMAKE_CURRENT_BINARY_DIR}/helper-Info.plist")
-  file(READ "${CMAKE_CURRENT_SOURCE_DIR}/mac/helper-Info.plist.in" _plist_contents)
-  string(REPLACE "\${EXECUTABLE_NAME}" "${_helper_output_name}" _plist_contents ${_plist_contents})
-  string(REPLACE "\${PRODUCT_NAME}" "${_helper_output_name}" _plist_contents ${_plist_contents})
-  string(REPLACE "\${BUNDLE_ID_SUFFIX}" "" _plist_contents ${_plist_contents})
-  file(WRITE ${_helper_info_plist} ${_plist_contents})
+  set(AEGIS_HELPER_OUTPUT_NAME "aegis_native Helper")
+  foreach(_suffix_list ${CEF_HELPER_APP_SUFFIXES})
+    string(REPLACE ":" ";" _suffix_list ${_suffix_list})
+    list(GET _suffix_list 0 _name_suffix)
+    list(GET _suffix_list 1 _target_suffix)
+    list(GET _suffix_list 2 _plist_suffix)
 
-  add_executable(${AEGIS_HELPER_TARGET} MACOSX_BUNDLE ${AEGIS_HELPER_SOURCES})
-  SET_EXECUTABLE_TARGET_PROPERTIES(${AEGIS_HELPER_TARGET})
+    set(_helper_target "${AEGIS_HELPER_TARGET}${_target_suffix}")
+    set(_helper_output_name "${AEGIS_HELPER_OUTPUT_NAME}${_name_suffix}")
+    set(_helper_info_plist "${CMAKE_CURRENT_BINARY_DIR}/helper-Info${_target_suffix}.plist")
+    file(READ "${CMAKE_CURRENT_SOURCE_DIR}/mac/helper-Info.plist.in" _plist_contents)
+    string(REPLACE "\${EXECUTABLE_NAME}" "${_helper_output_name}" _plist_contents ${_plist_contents})
+    string(REPLACE "\${PRODUCT_NAME}" "${_helper_output_name}" _plist_contents ${_plist_contents})
+    string(REPLACE "\${BUNDLE_ID_SUFFIX}" "${_plist_suffix}" _plist_contents ${_plist_contents})
+    file(WRITE ${_helper_info_plist} ${_plist_contents})
+
+    add_executable(${_helper_target} MACOSX_BUNDLE ${AEGIS_HELPER_SOURCES})
+    SET_EXECUTABLE_TARGET_PROPERTIES(${_helper_target})
+    add_dependencies(${_helper_target} aegis_runtime_header)
+    aegis_target_includes(${_helper_target})
+    target_link_libraries(${_helper_target} PRIVATE libcef_dll_wrapper ${CEF_STANDARD_LIBS})
+    aegis_target_output_dirs(${_helper_target})
+    set_target_properties(${_helper_target} PROPERTIES
+      MACOSX_BUNDLE_INFO_PLIST ${_helper_info_plist}
+      OUTPUT_NAME "${_helper_output_name}"
+      CLANG_ENABLE_OBJC_ARC YES
+      XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "com.ariacomputecompany.aegis.helper${_plist_suffix}"
+    )
+
+    add_dependencies(${AEGIS_NATIVE_TARGET} ${_helper_target})
+  endforeach()
 else()
   add_executable(${AEGIS_HELPER_TARGET} ${AEGIS_HELPER_SOURCES})
-endif()
-add_dependencies(${AEGIS_HELPER_TARGET} aegis_runtime_header)
-aegis_target_includes(${AEGIS_HELPER_TARGET})
-target_link_libraries(${AEGIS_HELPER_TARGET} PRIVATE libcef_dll_wrapper ${CEF_STANDARD_LIBS})
-aegis_target_output_dirs(${AEGIS_HELPER_TARGET})
-aegis_set_linux_rpath(${AEGIS_HELPER_TARGET} "$ORIGIN;$ORIGIN/../lib")
-if(AEGIS_TARGET_PLATFORM STREQUAL "macos")
-  set_target_properties(${AEGIS_HELPER_TARGET} PROPERTIES
-    MACOSX_BUNDLE_INFO_PLIST ${_helper_info_plist}
-    OUTPUT_NAME "${_helper_output_name}"
-    CLANG_ENABLE_OBJC_ARC YES
-    XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "com.ariacomputecompany.aegis.helper"
-  )
+  add_dependencies(${AEGIS_HELPER_TARGET} aegis_runtime_header)
+  aegis_target_includes(${AEGIS_HELPER_TARGET})
+  target_link_libraries(${AEGIS_HELPER_TARGET} PRIVATE libcef_dll_wrapper ${CEF_STANDARD_LIBS})
+  aegis_target_output_dirs(${AEGIS_HELPER_TARGET})
+  aegis_set_linux_rpath(${AEGIS_HELPER_TARGET} "$ORIGIN;$ORIGIN/../lib")
 endif()
 
 if(AEGIS_TARGET_PLATFORM STREQUAL "macos")
   set(CEF_APP "${CMAKE_BINARY_DIR}/Release/${AEGIS_NATIVE_TARGET}.app")
-  add_dependencies(${AEGIS_NATIVE_TARGET} ${AEGIS_HOST_LIBRARY_TARGET} ${AEGIS_HELPER_TARGET})
+  add_dependencies(${AEGIS_NATIVE_TARGET} ${AEGIS_HOST_LIBRARY_TARGET})
   add_custom_command(
     TARGET ${AEGIS_NATIVE_TARGET}
     POST_BUILD
@@ -253,14 +266,20 @@ if(AEGIS_TARGET_PLATFORM STREQUAL "macos")
   )
   COPY_MAC_FRAMEWORK("${AEGIS_NATIVE_TARGET}" "${CEF_BINARY_DIR}" "${CEF_APP}")
 
-  add_custom_command(
-    TARGET ${AEGIS_NATIVE_TARGET}
-    POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-            "${CMAKE_BINARY_DIR}/Release/${_helper_output_name}.app"
-            "${CEF_APP}/Contents/Frameworks/${_helper_output_name}.app"
-    VERBATIM
-  )
+  foreach(_suffix_list ${CEF_HELPER_APP_SUFFIXES})
+    string(REPLACE ":" ";" _suffix_list ${_suffix_list})
+    list(GET _suffix_list 0 _name_suffix)
+    set(_helper_output_name "${AEGIS_HELPER_OUTPUT_NAME}${_name_suffix}")
+
+    add_custom_command(
+      TARGET ${AEGIS_NATIVE_TARGET}
+      POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_directory
+              "${CMAKE_BINARY_DIR}/Release/${_helper_output_name}.app"
+              "${CEF_APP}/Contents/Frameworks/${_helper_output_name}.app"
+      VERBATIM
+    )
+  endforeach()
 
   set(PREFIXES "mac/")
   COPY_MAC_RESOURCES("${AEGIS_NATIVE_RESOURCES}" "${PREFIXES}" "${AEGIS_NATIVE_TARGET}" "${CMAKE_CURRENT_SOURCE_DIR}" "${CEF_APP}")

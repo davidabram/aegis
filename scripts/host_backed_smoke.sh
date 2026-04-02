@@ -190,12 +190,26 @@ data_url = "data:text/html," + urllib.parse.quote(html, safe="")
 navigate_events = request("POST", "/navigate", {"url": data_url})
 assert any(event["event"]["type"] == "navigation" for event in navigate_events), navigate_events
 
-runtime = request("GET", "/runtime")
-assert runtime["diagnostics"]["command_ready"] is True, runtime
-assert runtime["diagnostics"]["browser_backend_healthy"] is True, runtime
-assert runtime["diagnostics"]["runtime"]["current_title"] == "Aegis Smoke", runtime
-assert runtime["diagnostics"]["runtime"]["host"]["browser_available"] is True, runtime
-assert runtime["diagnostics"]["runtime"]["host"]["renderer_ready"] is True, runtime
+import time
+
+def wait_for_runtime(timeout_s=10):
+    deadline = time.time() + timeout_s
+    last = None
+    while time.time() < deadline:
+        last = request("GET", "/runtime")
+        host = last["diagnostics"]["runtime"]["host"]
+        if (
+            last["diagnostics"]["command_ready"] is True
+            and last["diagnostics"]["browser_backend_healthy"] is True
+            and host["browser_available"] is True
+            and host["renderer_ready"] is True
+            and last["diagnostics"]["runtime"]["current_title"] == "Aegis Smoke"
+        ):
+            return last
+        time.sleep(0.1)
+    raise AssertionError(last)
+
+runtime = wait_for_runtime()
 assert runtime["diagnostics"]["runtime"]["host"]["runtime_installed"] is True, runtime
 
 dom = request("GET", "/dom")

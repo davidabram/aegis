@@ -231,9 +231,11 @@ impl AegisRuntime {
 
     pub fn pump(&mut self) -> Result<(), AegisError> {
         self.bridge.pump()?;
-        let _ = self.drain_pending_events()?;
         let _ = self.refresh_host_state();
-        let _ = self.refresh_live_state(false);
+        if self.host_state.renderer_ready {
+            let _ = self.drain_pending_events();
+            let _ = self.refresh_live_state(false);
+        }
         Ok(())
     }
 
@@ -636,6 +638,10 @@ impl AegisRuntime {
                 .last_live_state_refresh_at_ms
                 .is_some_and(|last| now_ms().saturating_sub(last) < LIVE_STATE_REFRESH_INTERVAL_MS)
         {
+            return Ok(());
+        }
+
+        if !self.host_state.renderer_ready {
             return Ok(());
         }
 

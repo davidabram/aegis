@@ -220,7 +220,10 @@ fn configure_native_for(
     let build_dir = build_dir(root, platform);
     let configure_artifact = configure_artifact(root, platform);
 
-    if build_dir.exists() && !native_build_tree_healthy(&build_dir, &configure_artifact, platform) {
+    if build_dir.exists()
+        && (!native_build_tree_healthy(&build_dir, &configure_artifact, platform)
+            || native_build_tree_stale(&native_dir, &configure_artifact)?)
+    {
         fs::remove_dir_all(&build_dir)?;
     }
     fs::create_dir_all(&build_dir)?;
@@ -292,12 +295,14 @@ pub fn app_executable(app_dir: impl AsRef<Path>, platform: NativePlatform) -> Pa
     match platform {
         NativePlatform::Macos => {
             let app_dir = app_dir.as_ref();
-            let binary_name = macos_bundle_executable_name(app_dir).unwrap_or_else(|| {
-                app_dir
-                    .file_stem()
-                    .map(|stem| stem.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| DEFAULT_TARGET.to_string())
-            });
+            let binary_name = macos_bundle_executable_name(app_dir)
+                .or_else(|| detect_macos_bundle_executable(app_dir))
+                .unwrap_or_else(|| {
+                    app_dir
+                        .file_stem()
+                        .map(|stem| stem.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| DEFAULT_TARGET.to_string())
+                });
             app_dir.join("Contents").join("MacOS").join(binary_name)
         }
         NativePlatform::Linux => {
@@ -475,6 +480,28 @@ fn native_build_tree_can_retry(build_dir: &Path, configure_artifact: &Path) -> b
     build_dir.exists() && !configure_artifact.exists()
 }
 
+fn native_build_tree_stale(
+    native_dir: &Path,
+    configure_artifact: &Path,
+) -> Result<bool, AegisError> {
+    if !configure_artifact.exists() {
+        return Ok(false);
+    }
+
+    let configure_mtime = configure_artifact.metadata()?.modified()?;
+    for input in [
+        native_dir.join("CMakeLists.txt"),
+        native_dir.join("mac").join("Info.plist.in"),
+        native_dir.join("mac").join("helper-Info.plist.in"),
+    ] {
+        if input.exists() && input.metadata()?.modified()? > configure_mtime {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
 fn build_dir(root: &Path, platform: NativePlatform) -> PathBuf {
     root.join("native").join("build").join(platform.as_str())
 }
@@ -598,8 +625,37 @@ fn macos_bundle_executable_name(bundle: &Path) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
+#[cfg(target_os = "macos")]
+fn detect_macos_bundle_executable(bundle: &Path) -> Option<String> {
+    let macos_dir = bundle.join("Contents").join("MacOS");
+    let preferred = macos_dir.join(DEFAULT_TARGET);
+    if preferred.exists() {
+        return Some(DEFAULT_TARGET.to_string());
+    }
+
+    let entries = fs::read_dir(&macos_dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = path.file_name()?.to_string_lossy();
+        if name == "aegis_cli" {
+            continue;
+        }
+        return Some(name.into_owned());
+    }
+
+    None
+}
+
 #[cfg(not(target_os = "macos"))]
 fn macos_bundle_executable_name(_bundle: &Path) -> Option<String> {
+    None
+}
+
+#[cfg(not(target_os = "macos"))]
+fn detect_macos_bundle_executable(_bundle: &Path) -> Option<String> {
     None
 }
 

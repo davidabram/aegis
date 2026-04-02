@@ -857,15 +857,23 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
     }
   }
 
-  void OnBeforeBrowse(CefRefPtr<CefBrowser>,
-                      CefRefPtr<CefFrame>,
-                      CefRefPtr<CefRequest>) override {
+  void OnBeforeBrowse(CefRefPtr<CefBrowser> browser,
+                      CefRefPtr<CefFrame> frame,
+                      CefRefPtr<CefRequest> request) override {
     AppendDebugLog("host: on_before_browse");
     std::lock_guard lock(mutex_);
+    if (browser_.get() && browser.get() && !browser->IsSame(browser_)) {
+      return;
+    }
     page_ready_ = false;
     renderer_ready_ = false;
     runtime_installed_ = false;
     load_in_progress_ = true;
+    if (request.get()) {
+      current_url_ = request->GetURL().ToString();
+    } else if (frame.get()) {
+      current_url_ = frame->GetURL().ToString();
+    }
   }
 
   void OnLoadingStateChange(CefRefPtr<CefBrowser> browser, bool is_loading) override {
@@ -1384,18 +1392,24 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
   }
 
   void NavigateTo(const std::string& url) {
+    SetOperationStage("waiting for navigable browser state");
+    EnsureBrowserAvailable();
+    const auto deadline = std::chrono::steady_clock::now() + kStartupTimeout;
+    PumpUntil([this]() { return !load_in_progress_; }, deadline,
+              "timed out waiting for browser navigation readiness");
+
     SetOperationStage("preparing browser navigation");
     {
       std::lock_guard lock(mutex_);
-      if (browser_.get() != nullptr && renderer_ready_ && current_url_ == url) {
+      if (browser_.get() != nullptr && current_url_ == url && (renderer_ready_ || page_ready_)) {
         AppendDebugLog("host: navigate_to skipped_same_url");
         return;
       }
-    }
-    {
-      std::lock_guard lock(mutex_);
+      current_url_ = url;
       page_ready_ = false;
       renderer_ready_ = false;
+      runtime_installed_ = false;
+      load_in_progress_ = true;
     }
     SetOperationStage("dispatching LoadURL on UI thread");
     RunOnUiThreadSync([this, url]() {
@@ -1405,6 +1419,9 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       }
       browser_->GetMainFrame()->LoadURL(url);
     });
+    SetOperationStage("waiting for navigation start");
+    PumpUntil([this, &url]() { return current_url_ == url && load_in_progress_; }, deadline,
+              "timed out waiting for navigation start");
   }
 
   void EnsureRuntimeInstalled() {
