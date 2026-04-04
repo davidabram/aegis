@@ -65,6 +65,7 @@ pub struct AegisRuntime {
     last_successful_command_at_ms: Option<u64>,
     last_successful_bridge_roundtrip_at_ms: Option<u64>,
     host_state: HostRuntimeState,
+    network_event_capture_enabled: bool,
 }
 
 const LIVE_STATE_REFRESH_INTERVAL_MS: u64 = 250;
@@ -99,6 +100,7 @@ impl AegisRuntime {
             last_successful_command_at_ms: None,
             last_successful_bridge_roundtrip_at_ms: None,
             host_state: HostRuntimeState::default(),
+            network_event_capture_enabled: false,
         })
     }
 
@@ -123,7 +125,9 @@ impl AegisRuntime {
 
     pub fn navigate(&mut self, url: String) -> Result<Vec<SequencedEvent>, AegisError> {
         self.ensure_runtime_bootstrapped(false)?;
-        let response = self.bridge.navigate(&url)?;
+        let response = self
+            .bridge
+            .navigate(&url, self.network_event_capture_enabled)?;
         let request = BatchRequest {
             batch_id: self.scheduler.next_batch_id(),
             commands: Vec::new(),
@@ -241,7 +245,9 @@ impl AegisRuntime {
 
     pub fn establish_command_bridge(&mut self) -> Result<(), AegisError> {
         self.bridge.ensure_runtime()?;
-        let raw_events = self.bridge.drain_events()?;
+        let raw_events = self
+            .bridge
+            .drain_events(self.network_event_capture_enabled)?;
         self.mark_successful_bridge_roundtrip();
         let _ = self.apply_event_batch(raw_events);
         let _ = self.refresh_host_state();
@@ -259,7 +265,9 @@ impl AegisRuntime {
     }
 
     pub fn drain_pending_events(&mut self) -> Result<Vec<SequencedEvent>, AegisError> {
-        let raw_events = self.bridge.drain_events()?;
+        let raw_events = self
+            .bridge
+            .drain_events(self.network_event_capture_enabled)?;
         self.mark_successful_bridge_roundtrip();
         Ok(self.apply_event_batch(raw_events))
     }
@@ -273,7 +281,12 @@ impl AegisRuntime {
     }
 
     pub fn enable_trace_recording(&mut self, path: impl Into<std::path::PathBuf>) {
+        self.network_event_capture_enabled = true;
         self.trace_recorder = Some(TraceRecorder::new(path, self.browser_config.clone()));
+    }
+
+    pub fn enable_network_event_capture(&mut self) {
+        self.network_event_capture_enabled = true;
     }
 
     pub fn browser_config(&self) -> &BrowserConfig {
@@ -448,7 +461,9 @@ impl AegisRuntime {
                 batch_id,
                 commands: vec![resolved],
             };
-            let response = self.bridge.send_batch(&request)?;
+            let response = self
+                .bridge
+                .send_batch(&request, self.network_event_capture_enabled)?;
             results.extend(response.results.clone());
             final_snapshot = response.snapshot.clone().or(final_snapshot);
             let emitted_events = self.apply_response(response)?;

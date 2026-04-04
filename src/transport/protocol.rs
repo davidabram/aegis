@@ -12,6 +12,10 @@ const MAGIC: [u8; 4] = *b"AEGS";
 const VERSION: u16 = 1;
 const HEADER_LEN: usize = 16;
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u16)]
 pub enum MessageKind {
@@ -45,6 +49,14 @@ pub struct EvalJsResponse {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NavigateRequest {
     pub url: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub capture_network_events: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct DrainEventsRequest {
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub enable_network_capture: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

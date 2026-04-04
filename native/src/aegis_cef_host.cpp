@@ -844,6 +844,10 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       auto payload =
           RequireDictionary(DecodeEnvelope(MessageKind::SendBatch, request),
                             "batch request must be a dictionary");
+      if (BoolKey(payload, "capture_network_events").value_or(false)) {
+        SetOperationStage("enabling network event capture");
+        EnsureNetworkEventCapture();
+      }
       SetOperationStage("dispatching batch to renderer");
       const auto body = WriteJson(payload);
       auto response = RequireDictionary(
@@ -920,9 +924,15 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
   }
 
   std::vector<std::uint8_t> DrainEvents(const std::vector<std::uint8_t>& request) override {
-    static_cast<void>(request);
     OperationScope scope(this, "drain_events");
     try {
+      auto payload = RequireDictionary(
+          DecodeEnvelope(MessageKind::DrainEvents, request),
+          "drain events request must be a dictionary");
+      if (BoolKey(payload, "enable_network_capture").value_or(false)) {
+        SetOperationStage("enabling network event capture");
+        EnsureNetworkEventCapture();
+      }
       bool renderer_ready = false;
       bool runtime_ready = false;
       {
@@ -972,6 +982,10 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       SetOperationStage("decoding navigate request");
       auto payload = RequireDictionary(
           DecodeEnvelope(MessageKind::Navigate, request), "navigate request must be a dictionary");
+      if (BoolKey(payload, "capture_network_events").value_or(false)) {
+        SetOperationStage("enabling network event capture");
+        EnsureNetworkEventCapture();
+      }
       const auto target_url = payload->GetString("url").ToString();
       SetOperationStage("starting browser navigation");
       NavigateTo(target_url);
@@ -1060,14 +1074,6 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
                       browser && browser->GetMainFrame() ? browser->GetMainFrame()->GetURL().ToString()
                                                          : std::string()},
                      {"thread", ThreadLabel()}});
-    try {
-      EnsureDevToolsObserver(browser);
-    } catch (const std::exception& error) {
-      std::lock_guard lock(mutex_);
-      startup_error_ = error.what();
-      cv_.notify_all();
-      return;
-    }
     if (!options_.headless && browser && AegisUseExternalBrowserHostWindow()) {
       AegisSetBrowserHostAddress(browser->GetMainFrame()->GetURL().ToString());
       AegisSetBrowserHostNavigationState(browser->CanGoBack(), browser->CanGoForward(),
@@ -1286,6 +1292,18 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       throw std::runtime_error("failed to register DevTools observer");
     }
     EnableDevToolsNetworkTracking(browser);
+  }
+
+  void EnsureNetworkEventCapture() {
+    RequireOwnerThread();
+    EnsureBrowserAvailable();
+    RunOnUiThreadSync([this]() {
+      CEF_REQUIRE_UI_THREAD();
+      if (!browser_.get()) {
+        throw std::runtime_error("browser is not available");
+      }
+      EnsureDevToolsObserver(browser_);
+    });
   }
 
   void EnableDevToolsNetworkTracking(CefRefPtr<CefBrowser> browser) {

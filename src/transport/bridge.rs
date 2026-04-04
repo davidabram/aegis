@@ -10,8 +10,9 @@ use crate::dom::node::DomSnapshot;
 use crate::events::stream::RuntimeEvent;
 use crate::session::cookies::SessionState;
 use crate::transport::protocol::{
-    BatchWireResponse, EvalJsRequest, EvalJsResponse, EventsResponse, HostRuntimeState,
-    MessageKind, NavigateRequest, NavigateResponse, decode_message, encode_message,
+    BatchWireResponse, DrainEventsRequest, EvalJsRequest, EvalJsResponse, EventsResponse,
+    HostRuntimeState, MessageKind, NavigateRequest, NavigateResponse, decode_message,
+    encode_message,
 };
 
 const MAX_HOST_BUFFER_LEN: usize = 64 * 1024 * 1024;
@@ -143,9 +144,25 @@ impl CefBridge {
         String::from_utf8(response.value).map_err(|error| AegisError::Bridge(error.to_string()))
     }
 
-    pub fn send_batch(&mut self, request: &BatchRequest) -> Result<BatchResponse, AegisError> {
+    pub fn send_batch(
+        &mut self,
+        request: &BatchRequest,
+        capture_network_events: bool,
+    ) -> Result<BatchResponse, AegisError> {
         let payload = encode_message(MessageKind::SendBatch, request)?;
-        let response = self.invoke_message(MessageKind::SendBatch, &payload)?;
+        let response = if capture_network_events {
+            let mut value = serde_json::to_value(request).map_err(AegisError::Serialize)?;
+            if let serde_json::Value::Object(object) = &mut value {
+                object.insert(
+                    "capture_network_events".into(),
+                    serde_json::Value::Bool(true),
+                );
+            }
+            let payload = encode_message(MessageKind::SendBatch, &value)?;
+            self.invoke_message(MessageKind::SendBatch, &payload)?
+        } else {
+            self.invoke_message(MessageKind::SendBatch, &payload)?
+        };
         let response: BatchWireResponse = decode_message(MessageKind::SendBatch, &response)?;
         Ok(BatchResponse {
             batch_id: response.batch_id,
@@ -173,8 +190,16 @@ impl CefBridge {
         decode_message(MessageKind::SnapshotSession, &response)
     }
 
-    pub fn drain_events(&mut self) -> Result<Vec<BridgeEventEnvelope>, AegisError> {
-        let payload = encode_message(MessageKind::DrainEvents, &())?;
+    pub fn drain_events(
+        &mut self,
+        enable_network_capture: bool,
+    ) -> Result<Vec<BridgeEventEnvelope>, AegisError> {
+        let payload = encode_message(
+            MessageKind::DrainEvents,
+            &DrainEventsRequest {
+                enable_network_capture,
+            },
+        )?;
         let response = self.invoke_message(MessageKind::DrainEvents, &payload)?;
         if response.is_empty() {
             return Ok(Vec::new());
@@ -183,8 +208,18 @@ impl CefBridge {
         Ok(response.events)
     }
 
-    pub fn navigate(&mut self, url: &str) -> Result<BatchResponse, AegisError> {
-        let payload = encode_message(MessageKind::Navigate, &NavigateRequest { url: url.into() })?;
+    pub fn navigate(
+        &mut self,
+        url: &str,
+        capture_network_events: bool,
+    ) -> Result<BatchResponse, AegisError> {
+        let payload = encode_message(
+            MessageKind::Navigate,
+            &NavigateRequest {
+                url: url.into(),
+                capture_network_events,
+            },
+        )?;
         let response = self.invoke_message(MessageKind::Navigate, &payload)?;
         let response: NavigateResponse = decode_message(MessageKind::Navigate, &response)?;
         Ok(BatchResponse {

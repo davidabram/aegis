@@ -162,6 +162,7 @@ impl LoadedAegisClient {
     }
 
     pub fn events_since(&mut self, sequence: u64) -> Result<EventReadWindow, AegisError> {
+        self.client.runtime_mut().enable_network_event_capture();
         let _ = self.client.runtime_mut().drain_pending_events()?;
         Ok(self.client.runtime().read_events_from(sequence))
     }
