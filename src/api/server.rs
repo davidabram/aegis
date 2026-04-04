@@ -3,9 +3,9 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
-use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -44,7 +44,7 @@ static TELEMETRY_START: OnceLock<Instant> = OnceLock::new();
 #[derive(Clone)]
 pub struct ApiState {
     tx: mpsc::Sender<ApiCommand>,
-    cancel: RuntimeCancelHandle,
+    cancel: Arc<Mutex<Option<RuntimeCancelHandle>>>,
     host_library: PathBuf,
     browser: BrowserConfig,
     startup: Arc<Mutex<ServeStartupMetrics>>,
@@ -234,16 +234,6 @@ pub async fn serve(
         }),
     );
     let serve_started = std::time::Instant::now();
-    let client_connect_started = std::time::Instant::now();
-    let mut client = LoadedAegisClient::connect(host_library.clone(), browser_config.clone())?;
-    emit_telemetry(
-        "serve_client_connected",
-        json!({
-            "latency_ms": client_connect_started.elapsed().as_millis() as u64,
-            "browser_mode": browser_config.mode,
-            "runtime": client.runtime_status(),
-        }),
-    );
     let profile_store = SessionProfileStore::new(profile_name).map_err(AegisError::Bridge)?;
     let credential_settings = AegisConfigStore::detect()
         .and_then(|store| store.load_credentials_settings())
@@ -251,20 +241,18 @@ pub async fn serve(
     let credential_store = AegisSecretStore::detect().map_err(AegisError::Bridge)?;
     let mut credential_capture = AutoCredentialCapture::default();
     let pending_startup_session = profile_store.load().map_err(AegisError::Bridge)?;
-    let client_connect_ms = client_connect_started.elapsed().as_millis() as u64;
-    let api_bind_started = std::time::Instant::now();
     let (tx, rx) = mpsc::channel::<ApiCommand>();
-    let cancel = client.cancel_handle();
     let startup = Arc::new(Mutex::new(ServeStartupMetrics {
-        client_connect_ms,
+        client_connect_ms: 0,
         api_bind_ms: 0,
         total_ready_ms: 0,
     }));
-    let diagnostics = Arc::new(Mutex::new(ServeDiagnostics::new(client.runtime_status())));
+    let diagnostics = Arc::new(Mutex::new(ServeDiagnostics::new(default_runtime_status())));
+    let cancel = Arc::new(Mutex::new(None));
     let (startup_tx, startup_rx) = mpsc::channel::<Result<(), String>>();
     let state = ApiState {
         tx,
-        cancel,
+        cancel: cancel.clone(),
         host_library,
         browser: browser_config.clone(),
         startup: startup.clone(),
@@ -272,6 +260,7 @@ pub async fn serve(
         diagnostics: diagnostics.clone(),
     };
     let startup_host_library = state.host_library.clone();
+    let api_bind_started = std::time::Instant::now();
     let idle_pump_interval = match browser_config.mode {
         crate::browser::BrowserMode::Headful => HEADFUL_IDLE_PUMP_INTERVAL,
         crate::browser::BrowserMode::Headless => HEADLESS_IDLE_PUMP_INTERVAL,
@@ -312,8 +301,26 @@ pub async fn serve(
         Err(error) => return Err(AegisError::Bridge(error.to_string())),
     }
 
+    if let Ok(mut shared) = startup.lock() {
+        shared.api_bind_ms = api_bind_started.elapsed().as_millis() as u64;
+    }
+
+    let client_connect_started = std::time::Instant::now();
+    let mut client = LoadedAegisClient::connect(startup_host_library.clone(), browser_config.clone())?;
+    emit_telemetry(
+        "serve_client_connected",
+        json!({
+            "latency_ms": client_connect_started.elapsed().as_millis() as u64,
+            "browser_mode": browser_config.mode,
+            "runtime": client.runtime_status(),
+        }),
+    );
+    if let Ok(mut shared_cancel) = cancel.lock() {
+        *shared_cancel = Some(client.cancel_handle());
+    }
+
     let startup_metrics = ServeStartupMetrics {
-        client_connect_ms,
+        client_connect_ms: client_connect_started.elapsed().as_millis() as u64,
         api_bind_ms: api_bind_started.elapsed().as_millis() as u64,
         total_ready_ms: serve_started.elapsed().as_millis() as u64,
     };
@@ -354,12 +361,7 @@ pub async fn serve(
                 }),
             );
             let result = client.inject_session(session);
-            record_operation_finished(
-                &diagnostics,
-                "startup_restore_session",
-                &client,
-                &result,
-            );
+            record_operation_finished(&diagnostics, "startup_restore_session", &client, &result);
             emit_operation_telemetry(
                 "startup_restore_session",
                 started_at,
@@ -917,7 +919,7 @@ async fn doctor(State(state): State<ApiState>) -> Json<RuntimeDiagnosticsRespons
 async fn cancel_runtime_operation(
     State(state): State<ApiState>,
 ) -> Result<Json<RuntimeDiagnosticsResponse>, ApiError> {
-    state.cancel.request_cancel();
+    request_runtime_cancel(&state);
     mark_operation_cancel_requested(&state.diagnostics);
     Ok(Json(read_diagnostics(&state.diagnostics)))
 }
@@ -1218,7 +1220,7 @@ async fn await_command<T>(
     match timeout(COMMAND_TIMEOUT, reply_rx).await {
         Ok(result) => result.map_err(reply_error),
         Err(_) => {
-            state.cancel.request_cancel();
+            request_runtime_cancel(state);
             mark_operation_timeout(&state.diagnostics, operation);
             Err(ApiError::timeout(operation))
         }
@@ -1325,31 +1327,40 @@ fn mark_operation_cancel_requested(diagnostics: &Arc<Mutex<ServeDiagnostics>>) {
     }
 }
 
+fn request_runtime_cancel(state: &ApiState) {
+    if let Ok(cancel) = state.cancel.lock()
+        && let Some(cancel) = cancel.as_ref()
+    {
+        cancel.request_cancel();
+    }
+}
+
 fn read_diagnostics(diagnostics: &Arc<Mutex<ServeDiagnostics>>) -> RuntimeDiagnosticsResponse {
     diagnostics
         .lock()
         .map(|diagnostics| diagnostics.snapshot())
-        .unwrap_or_else(|_| {
-            ServeDiagnostics::new(RuntimeStatus {
-                bootstrapped: false,
-                bootstrap_duration_ms: None,
-                dom_nodes: 0,
-                dom_snapshot_available: false,
-                retained_event_count: 0,
-                latest_event_sequence: 0,
-                oldest_retained_event_sequence: None,
-                current_url: None,
-                current_title: None,
-                document_ready_state: None,
-                last_dom_refresh_at_ms: None,
-                last_live_state_refresh_at_ms: None,
-                last_event_at_ms: None,
-                last_successful_command_at_ms: None,
-                last_successful_bridge_roundtrip_at_ms: None,
-                host: Default::default(),
-            })
-            .snapshot()
-        })
+        .unwrap_or_else(|_| ServeDiagnostics::new(default_runtime_status()).snapshot())
+}
+
+fn default_runtime_status() -> RuntimeStatus {
+    RuntimeStatus {
+        bootstrapped: false,
+        bootstrap_duration_ms: None,
+        dom_nodes: 0,
+        dom_snapshot_available: false,
+        retained_event_count: 0,
+        latest_event_sequence: 0,
+        oldest_retained_event_sequence: None,
+        current_url: None,
+        current_title: None,
+        document_ready_state: None,
+        last_dom_refresh_at_ms: None,
+        last_live_state_refresh_at_ms: None,
+        last_event_at_ms: None,
+        last_successful_command_at_ms: None,
+        last_successful_bridge_roundtrip_at_ms: None,
+        host: Default::default(),
+    }
 }
 
 fn failure_from_error(operation: &str, stage: &str, error: &AegisError) -> FailureSnapshot {
@@ -1481,8 +1492,10 @@ impl ServeDiagnostics {
                 timed_out: operation.timed_out,
             });
         let host = &self.runtime.host;
-        let runtime_operational =
-            self.runtime.bootstrapped && host.browser_available && host.renderer_ready && host.runtime_ready;
+        let runtime_operational = self.runtime.bootstrapped
+            && host.browser_available
+            && host.renderer_ready
+            && host.runtime_ready;
         let state = if host.cancel_requested {
             RuntimeOperationalState::Cancelling
         } else if active_operation.as_ref().is_some_and(|op| op.timed_out) {
@@ -1497,11 +1510,20 @@ impl ServeDiagnostics {
             RuntimeOperationalState::Wedged
         } else if active_operation.is_some() || host.load_in_progress {
             RuntimeOperationalState::Busy
-        } else if host.browser_closed || !host.browser_available || !host.renderer_ready || !host.runtime_ready {
+        } else if host.browser_closed
+            || !host.browser_available
+            || !host.renderer_ready
+            || !host.runtime_ready
+        {
             RuntimeOperationalState::Degraded
         } else if self.last_failure.is_some() {
             RuntimeOperationalState::Degraded
-        } else if runtime_operational && self.runtime.last_successful_bridge_roundtrip_at_ms.is_some() {
+        } else if runtime_operational
+            && self
+                .runtime
+                .last_successful_bridge_roundtrip_at_ms
+                .is_some()
+        {
             RuntimeOperationalState::Ready
         } else {
             RuntimeOperationalState::Degraded

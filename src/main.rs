@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use aegis::api::server;
 use aegis::{
-    AegisConfigStore, AegisSecretStore, AegisStatePaths, BrowserConfig, BrowserMode,
+    AegisConfigStore, AegisSecretStore, BrowserConfig, BrowserMode,
     CredentialInput, NativeConfiguration, app_executable, build_native, configure_native, native,
     replay_trace,
 };
@@ -256,9 +256,6 @@ Inspect native paths:
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
-    let _state_paths = AegisStatePaths::detect()?;
-    let current_exe = std::env::current_exe()?;
-    let workspace_root = resolve_workspace_root(&current_exe)?;
     let command = resolved_command(&cli);
     let browser_config = BrowserConfig {
         mode: match effective_mode(&cli) {
@@ -286,10 +283,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Ok(());
         }
         Commands::Native { command } => {
+            let current_exe = std::env::current_exe()?;
+            let workspace_root = resolve_workspace_root(&current_exe)?;
             handle_native_command(command.clone(), &workspace_root)?;
             return Ok(());
         }
         Commands::Open => {
+            let current_exe = std::env::current_exe()?;
+            let workspace_root = resolve_workspace_root(&current_exe)?;
             #[cfg(target_os = "macos")]
             {
                 let bundle = native::open_local_app(&workspace_root)?;
@@ -330,18 +331,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match command {
         Commands::Serve { addr } => {
-            let host_lib = cli
-                .host_lib
-                .clone()
-                .unwrap_or_else(|| native::status(&workspace_root).default_host_library);
+            let host_lib = if let Some(path) = cli.host_lib.clone() {
+                path
+            } else {
+                #[cfg(target_os = "macos")]
+                {
+                    native::status(".").default_host_library
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    let current_exe = std::env::current_exe()?;
+                    let workspace_root = resolve_workspace_root(&current_exe)?;
+                    native::status(&workspace_root).default_host_library
+                }
+            };
             if !host_lib.exists() {
                 #[cfg(target_os = "macos")]
-                let help =
-                    "host library not found at {path}. Run `./install.sh` or `aegis native install` to refresh the canonical macOS app bundle, or pass --host-lib explicitly.";
+                let help = "host library not found at {path}. Run `./install.sh` or `aegis native install` to refresh the canonical macOS app bundle, or pass --host-lib explicitly.";
                 #[cfg(not(target_os = "macos"))]
-                let help =
-                    "host library not found at {path}. Run `aegis native build --configuration release --target aegis_host` first or pass --host-lib.";
-                return Err(help.replace("{path}", &host_lib.display().to_string()).into());
+                let help = "host library not found at {path}. Run `aegis native build --configuration release --target aegis_host` first or pass --host-lib.";
+                return Err(help
+                    .replace("{path}", &host_lib.display().to_string())
+                    .into());
             }
             server::serve(addr, host_lib, browser_config, cli.profile.clone()).await?;
         }
