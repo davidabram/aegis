@@ -976,8 +976,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       const auto target_url = payload->GetString("url").ToString();
       SetOperationStage("starting browser navigation");
       NavigateTo(target_url);
-      SetOperationStage("waiting for runtime readiness after navigation");
-      EnsureRuntimeReady();
+      SetOperationStage("capturing navigation state");
 
       auto response = CefDictionaryValue::Create();
       response->SetString("url", CurrentUrl());
@@ -1226,7 +1225,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
         {
           std::lock_guard lock(mutex_);
           renderer_ready_ = true;
-          runtime_ready_ = false;
+          runtime_ready_ = true;
           const auto url = args->GetString(1).ToString();
           if (!url.empty()) {
             current_url_ = url;
