@@ -1672,7 +1672,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       CefMainArgs main_args;
       AegisCefBootstrapOptions bootstrap_options;
       bootstrap_options.headless = options_.headless;
-      bootstrap_options.external_message_pump = true;
+      bootstrap_options.external_message_pump = false;
       bootstrap_options.initialize_browser_host_application = !options_.headless;
       bootstrap_options.browser_subprocess_path = paths_.helper_executable.string();
       bootstrap_options.framework_dir_path = paths_.framework_dir.string();
