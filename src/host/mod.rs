@@ -120,7 +120,8 @@ impl LoadedAegisClient {
         let bridge = host.bridge()?;
         let bootstrap_duration_ms = Some(started.elapsed().as_millis() as u64);
         let mut client = AegisClient::connect(bridge, config, bootstrap_duration_ms)?;
-        client.runtime_mut().establish_command_bridge()?;
+        let _ = client.runtime_mut().snapshot_host_state()?;
+        let _ = client.runtime_mut().pump();
         let cancel_handle = RuntimeCancelHandle {
             handle: host.handle,
             request_cancel: host.table.request_cancel,
