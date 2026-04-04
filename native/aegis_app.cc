@@ -22,8 +22,7 @@
 
 namespace {
 
-constexpr char kBootstrapUrl[] =
-    "data:text/html,%3C!doctype%20html%3E%3Chtml%3E%3Chead%3E%3Cmeta%20charset%3D%22utf-8%22%3E%3C%2Fhead%3E%3Cbody%3E%3C%2Fbody%3E%3C%2Fhtml%3E";
+constexpr char kBootstrapUrl[] = "data:text/html,";
 
 void AppendDebugLog(const std::string& message) {
   std::string path;

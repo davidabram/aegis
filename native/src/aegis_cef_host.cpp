@@ -55,8 +55,7 @@ constexpr auto kStartupTimeout = std::chrono::seconds(30);
 constexpr auto kRendererTimeout = std::chrono::seconds(30);
 constexpr auto kShutdownTimeout = std::chrono::seconds(2);
 constexpr auto kPumpInterval = std::chrono::milliseconds(10);
-constexpr char kBootstrapUrl[] =
-    "data:text/html,%3C!doctype%20html%3E%3Chtml%3E%3Chead%3E%3Cmeta%20charset%3D%22utf-8%22%3E%3C%2Fhead%3E%3Cbody%3E%3C%2Fbody%3E%3C%2Fhtml%3E";
+constexpr char kBootstrapUrl[] = "data:text/html,";
 
 void AppendDebugLog(const std::string& message);
 
@@ -1786,13 +1785,6 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
                         std::to_string(reinterpret_cast<std::uintptr_t>(external_host_view))},
                        {"thread", ThreadLabel()}});
 
-      CefRequestContextSettings request_context_settings;
-      request_context_ = CefRequestContext::CreateContext(request_context_settings, nullptr);
-      if (!request_context_.get()) {
-        throw std::runtime_error("failed to create request context");
-      }
-      ApplyAegisProductionPreferences(request_context_);
-
       CefBrowserSettings settings;
       settings.windowless_frame_rate = 30;
 
@@ -1802,6 +1794,12 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
                                                           : options_.start_url;
 
       if (options_.headless) {
+        CefRequestContextSettings request_context_settings;
+        request_context_ = CefRequestContext::CreateContext(request_context_settings, nullptr);
+        if (!request_context_.get()) {
+          throw std::runtime_error("failed to create request context");
+        }
+        ApplyAegisProductionPreferences(request_context_);
         CefWindowInfo window_info;
         window_info.SetAsWindowless(kNullWindowHandle);
         window_info.runtime_style = CEF_RUNTIME_STYLE_ALLOY;
@@ -1832,6 +1830,12 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
         }
         return;
       }
+      CefRequestContextSettings request_context_settings;
+      request_context_ = CefRequestContext::CreateContext(request_context_settings, nullptr);
+      if (!request_context_.get()) {
+        throw std::runtime_error("failed to create request context");
+      }
+      ApplyAegisProductionPreferences(request_context_);
       CefWindowInfo window_info;
       if (AegisUseExternalBrowserHostWindow()) {
         if (external_host_view == kNullWindowHandle) {
