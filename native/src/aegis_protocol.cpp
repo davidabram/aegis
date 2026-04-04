@@ -35,8 +35,8 @@ void WriteU64(std::uint8_t* ptr, std::uint64_t value) {
 
 const char* MessageKindName(MessageKind kind) {
   switch (kind) {
-    case MessageKind::InstallRuntime:
-      return "InstallRuntime";
+    case MessageKind::EnsureRuntime:
+      return "EnsureRuntime";
     case MessageKind::EvalJs:
       return "EvalJs";
     case MessageKind::SendBatch:
@@ -69,8 +69,8 @@ MessageKind ParseMessageKind(CefRefPtr<CefDictionaryValue> envelope) {
   }
   if (type == VTYPE_STRING) {
     const auto kind = envelope->GetString("kind").ToString();
-    if (kind == "InstallRuntime") {
-      return MessageKind::InstallRuntime;
+    if (kind == "EnsureRuntime") {
+      return MessageKind::EnsureRuntime;
     }
     if (kind == "EvalJs") {
       return MessageKind::EvalJs;

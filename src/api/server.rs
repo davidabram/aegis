@@ -1480,35 +1480,33 @@ impl ServeDiagnostics {
                 elapsed_ms: operation.started_at.elapsed().as_millis() as u64,
                 timed_out: operation.timed_out,
             });
-        let state = if self.runtime.host.cancel_requested {
+        let host = &self.runtime.host;
+        let runtime_operational =
+            self.runtime.bootstrapped && host.browser_available && host.renderer_ready && host.runtime_ready;
+        let state = if host.cancel_requested {
             RuntimeOperationalState::Cancelling
         } else if active_operation.as_ref().is_some_and(|op| op.timed_out) {
             RuntimeOperationalState::Wedged
-        } else if active_operation.is_some() {
-            RuntimeOperationalState::Busy
+        } else if !self.runtime.bootstrapped {
+            RuntimeOperationalState::Starting
         } else if self
             .last_failure
             .as_ref()
             .is_some_and(|failure| failure.timed_out && failure.restart_recommended)
         {
             RuntimeOperationalState::Wedged
+        } else if active_operation.is_some() || host.load_in_progress {
+            RuntimeOperationalState::Busy
+        } else if host.browser_closed || !host.browser_available || !host.renderer_ready || !host.runtime_ready {
+            RuntimeOperationalState::Degraded
         } else if self.last_failure.is_some() {
             RuntimeOperationalState::Degraded
-        } else if self
-            .runtime
-            .last_successful_bridge_roundtrip_at_ms
-            .is_some()
-        {
+        } else if runtime_operational && self.runtime.last_successful_bridge_roundtrip_at_ms.is_some() {
             RuntimeOperationalState::Ready
         } else {
-            RuntimeOperationalState::Starting
+            RuntimeOperationalState::Degraded
         };
-        let command_ready = !matches!(
-            state,
-            RuntimeOperationalState::Starting
-                | RuntimeOperationalState::Cancelling
-                | RuntimeOperationalState::Wedged
-        );
+        let command_ready = matches!(state, RuntimeOperationalState::Ready);
         RuntimeDiagnosticsResponse {
             state,
             control_plane_up: true,
@@ -1517,11 +1515,11 @@ impl ServeDiagnostics {
                 .runtime
                 .last_successful_bridge_roundtrip_at_ms
                 .is_some()
-                && self
-                    .last_failure
-                    .as_ref()
-                    .is_none_or(|failure| !failure.timed_out),
+                && runtime_operational
+                && self.last_failure.is_none(),
             browser_backend_healthy: self.runtime.bootstrapped
+                && host.browser_available
+                && !host.browser_closed
                 && self
                     .last_failure
                     .as_ref()

@@ -9,7 +9,7 @@ inline constexpr char kAegisLifecycleMessage[] = "Aegis.Lifecycle";
 
 inline constexpr char kLifecycleContextReady[] = "context_ready";
 
-inline constexpr char kOpInstallRuntime[] = "install_runtime";
+inline constexpr char kOpEnsureRuntime[] = "ensure_runtime";
 inline constexpr char kOpEvalJs[] = "eval_js";
 inline constexpr char kOpSendBatch[] = "send_batch";
 inline constexpr char kOpSnapshotDom[] = "snapshot_dom";

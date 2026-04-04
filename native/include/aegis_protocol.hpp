@@ -10,7 +10,7 @@
 namespace aegis {
 
 enum class MessageKind : std::uint16_t {
-  InstallRuntime = 1,
+  EnsureRuntime = 1,
   EvalJs = 2,
   SendBatch = 3,
   SnapshotDom = 4,

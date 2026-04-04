@@ -15,7 +15,7 @@ const HEADER_LEN: usize = 16;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u16)]
 pub enum MessageKind {
-    InstallRuntime = 1,
+    EnsureRuntime = 1,
     EvalJs = 2,
     SendBatch = 3,
     SnapshotDom = 4,
@@ -77,7 +77,7 @@ pub struct HostRuntimeState {
     pub browser_available: bool,
     pub page_ready: bool,
     pub renderer_ready: bool,
-    pub runtime_installed: bool,
+    pub runtime_ready: bool,
     pub load_in_progress: bool,
     pub browser_closed: bool,
     pub cancel_requested: bool,

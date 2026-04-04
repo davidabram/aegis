@@ -29,7 +29,7 @@ typedef AegisHostStatus (*AegisHostApi)(
 typedef void (*AegisHostFree)(AegisHostHandle ctx, AegisHostBuffer buffer);
 
 typedef struct AegisHostFunctionTable {
-  AegisHostApi install_runtime;
+  AegisHostApi ensure_runtime;
   AegisHostApi eval_js;
   AegisHostApi send_batch;
   AegisHostApi snapshot_dom;

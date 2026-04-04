@@ -232,7 +232,7 @@ impl AegisRuntime {
     pub fn pump(&mut self) -> Result<(), AegisError> {
         self.bridge.pump()?;
         let _ = self.refresh_host_state();
-        if self.host_state.renderer_ready {
+        if self.host_state.runtime_ready {
             let _ = self.drain_pending_events();
             let _ = self.refresh_live_state(false);
         }
@@ -240,7 +240,7 @@ impl AegisRuntime {
     }
 
     pub fn establish_command_bridge(&mut self) -> Result<(), AegisError> {
-        self.bridge.install_runtime()?;
+        self.bridge.ensure_runtime()?;
         let raw_events = self.bridge.drain_events()?;
         self.mark_successful_bridge_roundtrip();
         let _ = self.apply_event_batch(raw_events);
@@ -641,7 +641,7 @@ impl AegisRuntime {
             return Ok(());
         }
 
-        if !self.host_state.renderer_ready {
+        if !self.host_state.runtime_ready {
             return Ok(());
         }
 

@@ -577,11 +577,18 @@ fn workspace_host_library(root: &Path, platform: NativePlatform) -> PathBuf {
 }
 
 fn preferred_host_library(root: &Path, platform: NativePlatform, app_dir: &Path) -> PathBuf {
-    let bundled = bundled_host_library(app_dir, platform);
-    if bundled.exists() {
-        return bundled;
+    match platform {
+        NativePlatform::Macos => canonical_install_dir(platform)
+            .map(|install_dir| bundled_host_library(&install_dir, platform))
+            .unwrap_or_else(|| bundled_host_library(app_dir, platform)),
+        NativePlatform::Linux => {
+            let bundled = bundled_host_library(app_dir, platform);
+            if bundled.exists() {
+                return bundled;
+            }
+            workspace_host_library(root, platform)
+        }
     }
-    workspace_host_library(root, platform)
 }
 
 fn bundled_host_library(app_dir: &Path, platform: NativePlatform) -> PathBuf {
@@ -610,7 +617,7 @@ fn canonical_app_executable_path(app_dir: &Path, platform: NativePlatform) -> Pa
 
 #[cfg(target_os = "macos")]
 fn macos_bundle_executable_name(bundle: &Path) -> Option<String> {
-    let plist = bundle.join("Contents").join("Info");
+    let plist = bundle.join("Contents").join("Info.plist");
     let output = Command::new("defaults")
         .arg("read")
         .arg(plist)
@@ -917,9 +924,16 @@ fn path_encoding_error() -> AegisError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn home_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn linux_status_falls_back_to_workspace_host_library_without_installed_bundle() {
+        let _guard = home_env_lock().lock().expect("home env lock should not poison");
         let temp = tempfile::tempdir().expect("temporary dir should be created");
         let repo_root = temp.path().join("repo");
         let workspace_host = workspace_host_library(&repo_root, NativePlatform::Linux);
@@ -945,6 +959,7 @@ mod tests {
 
     #[test]
     fn linux_doctor_reports_expected_canonical_install_paths() {
+        let _guard = home_env_lock().lock().expect("home env lock should not poison");
         let temp = tempfile::tempdir().expect("temporary dir should be created");
         let repo_root = temp.path().join("repo");
         let home_dir = temp.path().join("home");
@@ -1000,6 +1015,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_status_prefers_bundled_host_library_for_installed_app() {
+        let _guard = home_env_lock().lock().expect("home env lock should not poison");
         let temp = tempfile::tempdir().expect("temporary dir should be created");
         let repo_root = temp.path().join("repo");
         let home_dir = temp.path().join("home");
@@ -1022,6 +1038,43 @@ mod tests {
         let status = status(&repo_root);
         assert_eq!(status.default_host_library, installed_host);
         assert!(status.default_host_library_present);
+
+        unsafe {
+            std::env::remove_var("HOME");
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_status_does_not_fall_back_to_workspace_host_library() {
+        let _guard = home_env_lock().lock().expect("home env lock should not poison");
+        let temp = tempfile::tempdir().expect("temporary dir should be created");
+        let repo_root = temp.path().join("repo");
+        let home_dir = temp.path().join("home");
+        let expected_host = home_dir
+            .join("Applications")
+            .join("Aegis.app")
+            .join("Contents")
+            .join("Frameworks")
+            .join("libaegis_host.dylib");
+        let workspace_host = workspace_host_library(&repo_root, NativePlatform::Macos);
+
+        fs::create_dir_all(
+            workspace_host
+                .parent()
+                .expect("workspace host library should have a parent"),
+        )
+        .expect("workspace host dir should be created");
+        fs::write(&workspace_host, b"host").expect("workspace host should be created");
+        fs::create_dir_all(&repo_root).expect("repo root should be created");
+
+        unsafe {
+            std::env::set_var("HOME", &home_dir);
+        }
+
+        let status = status(&repo_root);
+        assert_eq!(status.default_host_library, expected_host);
+        assert!(!status.default_host_library_present);
 
         unsafe {
             std::env::remove_var("HOME");

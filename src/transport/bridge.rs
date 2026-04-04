@@ -71,7 +71,7 @@ pub type HostFree = unsafe extern "C" fn(ctx: HostHandle, buffer: HostBuffer);
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct HostFunctionTable {
-    pub install_runtime: HostApi,
+    pub ensure_runtime: HostApi,
     pub eval_js: HostApi,
     pub send_batch: HostApi,
     pub snapshot_dom: HostApi,
@@ -125,9 +125,9 @@ impl CefBridge {
         })
     }
 
-    pub fn install_runtime(&mut self) -> Result<(), AegisError> {
-        let payload = encode_message(MessageKind::InstallRuntime, &())?;
-        let _response = self.invoke_message(MessageKind::InstallRuntime, &payload)?;
+    pub fn ensure_runtime(&mut self) -> Result<(), AegisError> {
+        let payload = encode_message(MessageKind::EnsureRuntime, &())?;
+        let _response = self.invoke_message(MessageKind::EnsureRuntime, &payload)?;
         Ok(())
     }
 
@@ -220,7 +220,7 @@ impl CefBridge {
         match &mut self.backend {
             BridgeBackend::Dynamic { host, fns } => {
                 let function = match kind {
-                    MessageKind::InstallRuntime => fns.install_runtime,
+                    MessageKind::EnsureRuntime => fns.ensure_runtime,
                     MessageKind::EvalJs => fns.eval_js,
                     MessageKind::SendBatch => fns.send_batch,
                     MessageKind::SnapshotDom => fns.snapshot_dom,

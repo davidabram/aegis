@@ -41,7 +41,7 @@ Global flags:
 
 - `--mode headless|headful`
 - `--start-url <url>`
-- `--host-lib <path>`
+- `--host-lib <path>` overrides the resolved native host library; macOS defaults to the canonical installed app bundle
 - `--profile <name>`
 
 Production state model:
@@ -235,8 +235,9 @@ Base address defaults to `http://127.0.0.1:7878`.
 curl http://127.0.0.1:7878/healthz
 ```
 
-After `aegis serve` reports ready, health is expected to be immediately command-ready.
-Production startup should not sit in a long-lived `starting` state with a bound control plane.
+After `aegis serve` reports ready, health should reflect a verified operational runtime rather
+than a merely bound control plane. Production startup should not claim readiness until the
+browser, renderer context, and runtime API are all live.
 
 ### Runtime Info
 
@@ -416,7 +417,7 @@ For robust control, use this sequence:
 
 ## Constraints
 
-- `serve` defaults to the release host library if it exists
+- on macOS, `serve` defaults to the canonical installed app bundle host library; use `--host-lib` for an explicit override
 - the canonical local command path uses the installed bundled CLI, not an on-demand rebuild
 - native builds require the platform CEF SDK under `third_party/cef/...`
 - the published GitHub repo intentionally excludes the vendored CEF binary payload

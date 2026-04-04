@@ -210,7 +210,7 @@ def wait_for_runtime(timeout_s=10):
     raise AssertionError(last)
 
 runtime = wait_for_runtime()
-assert runtime["diagnostics"]["runtime"]["host"]["runtime_installed"] is True, runtime
+assert runtime["diagnostics"]["runtime"]["host"]["runtime_ready"] is True, runtime
 
 dom = request("GET", "/dom")
 assert dom["nodes"], dom

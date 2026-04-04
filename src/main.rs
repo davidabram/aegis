@@ -21,7 +21,7 @@ struct Cli {
     #[arg(
         long,
         global = true,
-        help = "Path to the native host library. Defaults to the canonical local Release build."
+        help = "Path to the native host library. On macOS the default is the canonical installed app bundle; use --host-lib to override explicitly."
     )]
     #[arg(long, global = true)]
     host_lib: Option<PathBuf>,
@@ -335,11 +335,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .clone()
                 .unwrap_or_else(|| native::status(&workspace_root).default_host_library);
             if !host_lib.exists() {
-                return Err(format!(
-                    "host library not found at {}. Run `aegis native build --configuration release --target aegis_host` first or pass --host-lib.",
-                    host_lib.display()
-                )
-                .into());
+                #[cfg(target_os = "macos")]
+                let help =
+                    "host library not found at {path}. Run `./install.sh` or `aegis native install` to refresh the canonical macOS app bundle, or pass --host-lib explicitly.";
+                #[cfg(not(target_os = "macos"))]
+                let help =
+                    "host library not found at {path}. Run `aegis native build --configuration release --target aegis_host` first or pass --host-lib.";
+                return Err(help.replace("{path}", &host_lib.display().to_string()).into());
             }
             server::serve(addr, host_lib, browser_config, cli.profile.clone()).await?;
         }

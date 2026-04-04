@@ -386,7 +386,7 @@ bool DispatchRendererOperation(const std::string& op,
                                CefRefPtr<CefFrame> frame,
                                std::string* response,
                                std::string* error) {
-  if (op == aegis::kOpInstallRuntime) {
+  if (op == aegis::kOpEnsureRuntime) {
     if (!EvalToString(frame, body, response, error)) {
       return false;
     }

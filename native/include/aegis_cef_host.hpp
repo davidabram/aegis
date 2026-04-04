@@ -15,7 +15,7 @@ class CefHost {
  public:
   virtual ~CefHost() = default;
 
-  virtual std::vector<std::uint8_t> InstallRuntime(const std::vector<std::uint8_t>& request) = 0;
+  virtual std::vector<std::uint8_t> EnsureRuntime(const std::vector<std::uint8_t>& request) = 0;
   virtual std::vector<std::uint8_t> EvalJs(const std::vector<std::uint8_t>& request) = 0;
   virtual std::vector<std::uint8_t> SendBatch(const std::vector<std::uint8_t>& request) = 0;
   virtual std::vector<std::uint8_t> SnapshotDom(const std::vector<std::uint8_t>& request) = 0;
@@ -31,7 +31,7 @@ class CefHost {
 AegisHostFunctionTable ExportFunctionTable();
 
 enum class EmbeddedHostOperation : std::uint16_t {
-  InstallRuntime = 1,
+  EnsureRuntime = 1,
   EvalJs = 2,
   SendBatch = 3,
   SnapshotDom = 4,

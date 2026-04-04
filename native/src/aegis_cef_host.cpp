@@ -801,12 +801,12 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
     AppendDebugLog("host: wait_for_ready complete");
   }
 
-  std::vector<std::uint8_t> InstallRuntime(const std::vector<std::uint8_t>& request) override {
+  std::vector<std::uint8_t> EnsureRuntime(const std::vector<std::uint8_t>& request) override {
     static_cast<void>(request);
-    OperationScope scope(this, "install_runtime");
+    OperationScope scope(this, "ensure_runtime");
     try {
-      SetOperationStage("ensuring runtime is installed");
-      EnsureRuntimeInstalled();
+      SetOperationStage("ensuring runtime is ready");
+      EnsureRuntimeReady();
       return {};
     } catch (const std::exception& error) {
       throw std::runtime_error(WrapOperationError(error.what()));
@@ -839,8 +839,8 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
   std::vector<std::uint8_t> SendBatch(const std::vector<std::uint8_t>& request) override {
     OperationScope scope(this, "send_batch");
     try {
-      SetOperationStage("ensuring runtime is installed");
-      EnsureRuntimeInstalled();
+      SetOperationStage("ensuring runtime is ready");
+      EnsureRuntimeReady();
       SetOperationStage("decoding batch request");
       auto payload =
           RequireDictionary(DecodeEnvelope(MessageKind::SendBatch, request),
@@ -862,8 +862,8 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
     static_cast<void>(request);
     OperationScope scope(this, "snapshot_dom");
     try {
-      SetOperationStage("ensuring runtime is installed");
-      EnsureRuntimeInstalled();
+      SetOperationStage("ensuring runtime is ready");
+      EnsureRuntimeReady();
       SetOperationStage("capturing DOM snapshot");
       return EncodeJsonEnvelope(MessageKind::SnapshotDom,
                                 InvokeRendererReady(aegis::kOpSnapshotDom, "{}"));
@@ -902,8 +902,8 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
     static_cast<void>(request);
     OperationScope scope(this, "snapshot_session");
     try {
-      SetOperationStage("ensuring runtime is installed");
-      EnsureRuntimeInstalled();
+      SetOperationStage("ensuring runtime is ready");
+      EnsureRuntimeReady();
       SetOperationStage("capturing document cookies");
       CaptureDocumentCookiesFromActivePage();
 
@@ -924,15 +924,14 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
     static_cast<void>(request);
     OperationScope scope(this, "drain_events");
     try {
-      SetOperationStage("ensuring runtime is installed");
-      EnsureRuntimeInstalled();
-
       bool renderer_ready = false;
+      bool runtime_ready = false;
       {
         std::lock_guard lock(mutex_);
         renderer_ready = renderer_ready_;
+        runtime_ready = runtime_ready_;
       }
-      if (!renderer_ready) {
+      if (!renderer_ready || !runtime_ready) {
         auto response = CefDictionaryValue::Create();
         response->SetList("events", CefListValue::Create());
         MergeLocalEventsIntoResponse(response);
@@ -977,8 +976,8 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       const auto target_url = payload->GetString("url").ToString();
       SetOperationStage("starting browser navigation");
       NavigateTo(target_url);
-      SetOperationStage("waiting for runtime installation after navigation");
-      EnsureRuntimeInstalled();
+      SetOperationStage("waiting for runtime readiness after navigation");
+      EnsureRuntimeReady();
 
       auto response = CefDictionaryValue::Create();
       response->SetString("url", CurrentUrl());
@@ -1006,7 +1005,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       state->SetBool("browser_available", browser_.get() != nullptr);
       state->SetBool("page_ready", page_ready_);
       state->SetBool("renderer_ready", renderer_ready_);
-      state->SetBool("runtime_installed", runtime_installed_);
+      state->SetBool("runtime_ready", runtime_ready_);
       state->SetBool("load_in_progress", load_in_progress_);
       state->SetBool("browser_closed", browser_closed_);
       state->SetBool("cancel_requested", cancel_requested_.load());
@@ -1048,7 +1047,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       request_context_ = browser->GetHost()->GetRequestContext();
       page_ready_ = false;
       renderer_ready_ = false;
-      runtime_installed_ = false;
+      runtime_ready_ = false;
       load_in_progress_ = browser ? browser->IsLoading() : false;
       if (auto frame = browser->GetMainFrame(); frame.get()) {
         current_url_ = frame->GetURL().ToString();
@@ -1089,7 +1088,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
     }
     page_ready_ = false;
     renderer_ready_ = false;
-    runtime_installed_ = false;
+    runtime_ready_ = false;
     load_in_progress_ = true;
     if (request.get()) {
       current_url_ = request->GetURL().ToString();
@@ -1161,7 +1160,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
         client_ = nullptr;
         page_ready_ = false;
         renderer_ready_ = false;
-        runtime_installed_ = false;
+        runtime_ready_ = false;
         browser_closed_ = true;
         load_in_progress_ = false;
         devtools_registration_ = nullptr;
@@ -1220,7 +1219,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
         {
           std::lock_guard lock(mutex_);
           renderer_ready_ = true;
-          runtime_installed_ = true;
+          runtime_ready_ = false;
           const auto url = args->GetString(1).ToString();
           if (!url.empty()) {
             current_url_ = url;
@@ -1565,7 +1564,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
              {"browser_available", browser_.get() != nullptr ? "true" : "false"},
              {"page_ready", page_ready_ ? "true" : "false"},
              {"renderer_ready", renderer_ready_ ? "true" : "false"},
-             {"runtime_installed", runtime_installed_ ? "true" : "false"},
+             {"runtime_ready", runtime_ready_ ? "true" : "false"},
              {"load_in_progress", load_in_progress_ ? "true" : "false"},
              {"browser_closed", browser_closed_ ? "true" : "false"},
              {"current_url", current_url_},
@@ -1579,7 +1578,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
             " browser_available=" + (browser_.get() != nullptr ? "true" : "false") +
             " page_ready=" + (page_ready_ ? "true" : "false") +
             " renderer_ready=" + (renderer_ready_ ? "true" : "false") +
-            " runtime_installed=" + (runtime_installed_ ? "true" : "false") +
+            " runtime_ready=" + (runtime_ready_ ? "true" : "false") +
             " load_in_progress=" + (load_in_progress_ ? "true" : "false") +
             " browser_closed=" + (browser_closed_ ? "true" : "false") +
             " current_url=" + current_url_ + " " + ThreadLabel());
@@ -1807,6 +1806,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
           if (!browser_.get()) {
             browser_ = browser;
             request_context_ = browser->GetHost()->GetRequestContext();
+            browser_closed_ = false;
             load_in_progress_ = browser->IsLoading();
             if (auto frame = browser->GetMainFrame(); frame.get()) {
               current_url_ = frame->GetURL().ToString();
@@ -1848,6 +1848,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
         if (!browser_.get()) {
           browser_ = browser;
           request_context_ = browser->GetHost()->GetRequestContext();
+          browser_closed_ = false;
           load_in_progress_ = browser->IsLoading();
           if (auto frame = browser->GetMainFrame(); frame.get()) {
             current_url_ = frame->GetURL().ToString();
@@ -1957,7 +1958,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       current_url_ = url;
       page_ready_ = false;
       renderer_ready_ = false;
-      runtime_installed_ = false;
+      runtime_ready_ = false;
       load_in_progress_ = true;
     }
     SetOperationStage("dispatching LoadURL on UI thread");
@@ -1975,15 +1976,43 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
     }, deadline, "timed out waiting for navigation start");
   }
 
-  void EnsureRuntimeInstalled() {
+  void EnsureRuntimeReady() {
     {
       std::lock_guard lock(mutex_);
-      if (browser_.get() != nullptr && runtime_installed_) {
+      if (browser_.get() != nullptr && runtime_ready_) {
         return;
       }
     }
     SetOperationStage("waiting for browser availability");
     EnsureBrowserAvailable();
+    SetOperationStage("waiting for renderer context");
+    EnsureRendererReady();
+    VerifyRuntimeReady();
+  }
+
+  void VerifyRuntimeReady() {
+    {
+      std::lock_guard lock(mutex_);
+      if (runtime_ready_) {
+        return;
+      }
+    }
+
+    SetOperationStage("verifying renderer runtime api");
+    const auto probe = InvokeRendererAssumingReady(
+        aegis::kOpEvalJs,
+        "(() => !!(window.__aegis && typeof window.__aegis.snapshot === 'function' && "
+        "typeof window.__aegis.drainEvents === 'function' && "
+        "typeof window.__aegis.currentPageState === 'function'))()");
+    if (TrimAscii(probe) != "true") {
+      InvalidateRuntime("renderer runtime api probe failed");
+      throw std::runtime_error("renderer runtime api is unavailable");
+    }
+    {
+      std::lock_guard lock(mutex_);
+      runtime_ready_ = true;
+      cv_.notify_all();
+    }
   }
 
   bool TryApplyPendingStorageInjection() {
@@ -1992,7 +2021,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       std::lock_guard lock(mutex_);
       const auto scheme = UrlScheme(current_url_);
       if (!pending_storage_injection_payload_.has_value() || !browser_.get() || !renderer_ready_ ||
-          !runtime_installed_ || !scheme.has_value() || *scheme == "data" ||
+          !runtime_ready_ || !scheme.has_value() || *scheme == "data" ||
           current_url_ == "about:blank") {
         return false;
       }
@@ -2013,57 +2042,84 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
   }
 
   std::string InvokeRendererReady(const std::string& operation, const std::string& body) {
-    EnsureRendererReady();
+    EnsureRuntimeReady();
     if (operation != aegis::kOpInjectStorage) {
       TryApplyPendingStorageInjection();
     }
-    AppendDebugLog("host: invoke_renderer " + operation);
-    SetOperationStage(std::string("dispatching renderer operation: ") + operation);
+    return InvokeRendererAssumingReady(operation, body);
+  }
 
-    const int request_id = [this] {
-      std::lock_guard lock(mutex_);
-      return next_request_id_++;
-    }();
+  std::string InvokeRendererAssumingReady(const std::string& operation,
+                                          const std::string& body) {
+    try {
+      AppendDebugLog("host: invoke_renderer " + operation);
+      SetOperationStage(std::string("dispatching renderer operation: ") + operation);
 
-    RunOnUiThreadSync([this, request_id, operation, body]() {
-      CEF_REQUIRE_UI_THREAD();
-      if (!browser_.get()) {
-        throw std::runtime_error("browser is not available");
+      const int request_id = [this] {
+        std::lock_guard lock(mutex_);
+        return next_request_id_++;
+      }();
+
+      RunOnUiThreadSync([this, request_id, operation, body]() {
+        CEF_REQUIRE_UI_THREAD();
+        if (!browser_.get()) {
+          throw std::runtime_error("browser is not available");
+        }
+        auto frame = browser_->GetMainFrame();
+        if (!frame.get()) {
+          throw std::runtime_error("main frame is not available");
+        }
+
+        auto message = CefProcessMessage::Create(aegis::kAegisRequestMessage);
+        auto args = message->GetArgumentList();
+        args->SetInt(0, request_id);
+        args->SetString(1, operation);
+        args->SetString(2, body);
+        frame->SendProcessMessage(PID_RENDERER, message);
+      });
+
+      const auto deadline = std::chrono::steady_clock::now() + kRendererTimeout;
+      SetOperationStage(std::string("waiting for renderer reply: ") + operation);
+      PumpUntil([this, request_id]() {
+        return renderer_replies_.contains(request_id) || !startup_error_.empty();
+      }, deadline, "timed out waiting for renderer response");
+
+      RendererReply reply;
+      {
+        std::lock_guard lock(mutex_);
+        reply = std::move(renderer_replies_.at(request_id));
+        renderer_replies_.erase(request_id);
       }
-      auto frame = browser_->GetMainFrame();
-      if (!frame.get()) {
-        throw std::runtime_error("main frame is not available");
+      if (!reply.ok) {
+        InvalidateRuntime(reply.body);
+        throw std::runtime_error(reply.body);
       }
-
-      auto message = CefProcessMessage::Create(aegis::kAegisRequestMessage);
-      auto args = message->GetArgumentList();
-      args->SetInt(0, request_id);
-      args->SetString(1, operation);
-      args->SetString(2, body);
-      frame->SendProcessMessage(PID_RENDERER, message);
-    });
-
-    const auto deadline = std::chrono::steady_clock::now() + kRendererTimeout;
-    SetOperationStage(std::string("waiting for renderer reply: ") + operation);
-    PumpUntil([this, request_id]() {
-      return renderer_replies_.contains(request_id) || !startup_error_.empty();
-    }, deadline, "timed out waiting for renderer response");
-
-    RendererReply reply;
-    {
-      std::lock_guard lock(mutex_);
-      reply = std::move(renderer_replies_.at(request_id));
-      renderer_replies_.erase(request_id);
+      {
+        std::lock_guard lock(mutex_);
+        runtime_ready_ = true;
+        cv_.notify_all();
+      }
+      AppendDebugLog("host: invoke_renderer complete " + operation);
+      return reply.body;
+    } catch (const std::exception& error) {
+      InvalidateRuntime(error.what());
+      throw;
     }
-    if (!reply.ok) {
-      throw std::runtime_error(reply.body);
-    }
-    AppendDebugLog("host: invoke_renderer complete " + operation);
-    return reply.body;
   }
 
   std::string InvokeRenderer(const std::string& operation, const std::string& body) {
     return InvokeRendererReady(operation, body);
+  }
+
+  void InvalidateRuntime(const std::string& reason) {
+    std::lock_guard lock(mutex_);
+    runtime_ready_ = false;
+    if (reason.find("timed out waiting for renderer response") != std::string::npos ||
+        reason.find("browser is not available") != std::string::npos ||
+        reason.find("main frame is not available") != std::string::npos) {
+      renderer_ready_ = false;
+    }
+    cv_.notify_all();
   }
 
   void CompleteRendererRequest(int request_id, bool ok, std::string body) {
@@ -2353,7 +2409,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
   bool startup_complete_ = false;
   bool page_ready_ = false;
   bool renderer_ready_ = false;
-  bool runtime_installed_ = false;
+  bool runtime_ready_ = false;
   bool browser_closed_ = false;
   bool load_in_progress_ = false;
   bool devtools_network_enabled_ = false;
@@ -2441,12 +2497,12 @@ AegisHostStatus Dispatch(
   }
 }
 
-AegisHostStatus InstallRuntime(
+AegisHostStatus EnsureRuntime(
     AegisHostHandle ctx,
     const std::uint8_t* input_ptr,
     std::size_t input_len,
     AegisHostBuffer* output) {
-  return Dispatch(ctx, input_ptr, input_len, output, &CefHost::InstallRuntime);
+  return Dispatch(ctx, input_ptr, input_len, output, &CefHost::EnsureRuntime);
 }
 
 AegisHostStatus EvalJs(
@@ -2537,7 +2593,7 @@ void FreeBuffer(AegisHostHandle, AegisHostBuffer buffer) {
 
 AegisHostFunctionTable ExportFunctionTable() {
   return AegisHostFunctionTable{
-      .install_runtime = InstallRuntime,
+      .ensure_runtime = EnsureRuntime,
       .eval_js = EvalJs,
       .send_batch = SendBatch,
       .snapshot_dom = SnapshotDom,
@@ -2570,7 +2626,7 @@ bool RunEmbeddedHostOperation(const std::vector<std::uint8_t>& config,
     AegisCefHost host(ParseBrowserOptions(config), false);
     host.WaitForReady();
 
-    if (operation != EmbeddedHostOperation::InstallRuntime) {
+    if (operation != EmbeddedHostOperation::EnsureRuntime) {
       const auto runtime_path = std::filesystem::current_path() / "assets" / "js" / "aegis_runtime.js";
       if (std::filesystem::exists(runtime_path)) {
         std::ifstream runtime_input(runtime_path, std::ios::binary);
@@ -2579,14 +2635,14 @@ bool RunEmbeddedHostOperation(const std::vector<std::uint8_t>& config,
                                    std::istreambuf_iterator<char>());
           auto runtime_value = CefValue::Create();
           runtime_value->SetString(script);
-          host.InstallRuntime(EncodeEnvelope(MessageKind::InstallRuntime, runtime_value));
+          host.EnsureRuntime(EncodeEnvelope(MessageKind::EnsureRuntime, runtime_value));
         }
       }
     }
 
     switch (operation) {
-      case EmbeddedHostOperation::InstallRuntime:
-        *response = host.InstallRuntime(request);
+      case EmbeddedHostOperation::EnsureRuntime:
+        *response = host.EnsureRuntime(request);
         break;
       case EmbeddedHostOperation::EvalJs:
         *response = host.EvalJs(request);

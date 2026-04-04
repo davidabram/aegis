@@ -100,7 +100,7 @@ Global runtime flags:
 
 - `--mode headless|headful`
 - `--start-url <url>`
-- `--host-lib <path>`
+- `--host-lib <path>` overrides the resolved native host library; macOS defaults to the canonical installed app bundle
 - `--profile <name>`
 
 Built-in CLI guidance:
@@ -206,10 +206,10 @@ Core routes:
 - `POST /session`
 - `POST /trace/enable`
 
-`aegis serve` now fails fast if the browser command bridge cannot finish startup. A running
-server implies the runtime has already completed an initial bridge roundtrip, so `/healthz`
-should report `command_ready: true` and `bridge_healthy: true` as soon as the process reports
-ready.
+`aegis serve` now fails fast if the browser cannot reach an operational runtime. A running
+server does not merely mean the control plane is bound; it means the active page reached a
+verified automation-ready state. `/healthz` and `/readyz` stay false until the browser,
+renderer context, and live runtime API are all usable.
 
 ### `GET /runtime`
 
@@ -319,7 +319,8 @@ Runtime event types:
 - `runtime.current_title`
 - `runtime.document_ready_state`
 
-`command_ready` now indicates whether the runtime can accept commands, even while it is currently busy executing one.
+`command_ready` now indicates that the runtime is fully operational right now: browser
+available, renderer context ready, runtime API verified, and no active degraded/wedged state.
 
 ### `GET/POST /session`
 
