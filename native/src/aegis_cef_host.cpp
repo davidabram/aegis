@@ -1005,7 +1005,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       state->SetBool("browser_available", browser_.get() != nullptr);
       state->SetBool("page_ready", page_ready_);
       state->SetBool("renderer_ready", renderer_ready_);
-      state->SetBool("runtime_installed", runtime_ready_);
+      state->SetBool("runtime_installed", renderer_ready_);
       state->SetBool("runtime_ready", runtime_ready_);
       state->SetBool("load_in_progress", load_in_progress_);
       state->SetBool("browser_closed", browser_closed_);
@@ -1085,6 +1085,9 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
     AppendDebugLog("host: on_before_browse");
     std::lock_guard lock(mutex_);
     if (browser_.get() && browser.get() && !browser->IsSame(browser_)) {
+      return;
+    }
+    if (!frame.get() || !frame->IsMain()) {
       return;
     }
     page_ready_ = false;
@@ -1204,7 +1207,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
   }
 
   bool HandleBrowserProcessMessage(CefRefPtr<CefBrowser>,
-                                   CefRefPtr<CefFrame>,
+                                   CefRefPtr<CefFrame> frame,
                                    CefProcessId source_process,
                                    CefRefPtr<CefProcessMessage> message) {
     if (source_process != PID_RENDERER || !message.get() ||
@@ -1214,6 +1217,9 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
     }
 
     if (message->GetName() == aegis::kAegisLifecycleMessage) {
+      if (!frame.get() || !frame->IsMain()) {
+        return false;
+      }
       auto args = message->GetArgumentList();
       if (args->GetString(0).ToString() == aegis::kLifecycleContextReady) {
         AppendDebugLog("host: lifecycle context_ready");
@@ -1233,6 +1239,9 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
     }
 
     auto args = message->GetArgumentList();
+    if (!frame.get() || !frame->IsMain()) {
+      return false;
+    }
     AppendDebugLog("host: renderer response received");
     CompleteRendererRequest(args->GetInt(0), args->GetBool(1),
                             args->GetString(2).ToString());

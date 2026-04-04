@@ -672,10 +672,7 @@ impl AegisRuntime {
     }
 
     fn refresh_host_state(&mut self) -> Result<(), AegisError> {
-        let mut host_state = self.bridge.snapshot_host_state()?;
-        if !host_state.runtime_ready && host_state.runtime_installed {
-            host_state.runtime_ready = true;
-        }
+        let host_state = self.bridge.snapshot_host_state()?;
         if let Some(url) = host_state.current_url.clone() {
             self.current_url = Some(url);
         }
