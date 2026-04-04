@@ -295,14 +295,14 @@ pub async fn serve(
         });
     });
 
-    match startup_rx.recv() {
-        Ok(Ok(())) => {}
+    let api_bind_ms = match startup_rx.recv() {
+        Ok(Ok(())) => api_bind_started.elapsed().as_millis() as u64,
         Ok(Err(error)) => return Err(AegisError::Bridge(error)),
         Err(error) => return Err(AegisError::Bridge(error.to_string())),
-    }
+    };
 
     if let Ok(mut shared) = startup.lock() {
-        shared.api_bind_ms = api_bind_started.elapsed().as_millis() as u64;
+        shared.api_bind_ms = api_bind_ms;
     }
 
     let client_connect_started = std::time::Instant::now();
@@ -321,7 +321,7 @@ pub async fn serve(
 
     let startup_metrics = ServeStartupMetrics {
         client_connect_ms: client_connect_started.elapsed().as_millis() as u64,
-        api_bind_ms: api_bind_started.elapsed().as_millis() as u64,
+        api_bind_ms,
         total_ready_ms: serve_started.elapsed().as_millis() as u64,
     };
     if let Ok(mut shared) = startup.lock() {
