@@ -1005,6 +1005,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       state->SetBool("browser_available", browser_.get() != nullptr);
       state->SetBool("page_ready", page_ready_);
       state->SetBool("renderer_ready", renderer_ready_);
+      state->SetBool("runtime_installed", runtime_ready_);
       state->SetBool("runtime_ready", runtime_ready_);
       state->SetBool("load_in_progress", load_in_progress_);
       state->SetBool("browser_closed", browser_closed_);

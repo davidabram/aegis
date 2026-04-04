@@ -77,6 +77,8 @@ pub struct HostRuntimeState {
     pub browser_available: bool,
     pub page_ready: bool,
     pub renderer_ready: bool,
+    #[serde(default)]
+    pub runtime_installed: bool,
     pub runtime_ready: bool,
     pub load_in_progress: bool,
     pub browser_closed: bool,

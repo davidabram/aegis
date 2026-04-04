@@ -12,6 +12,7 @@ LAUNCHER_DIR=""
 LAUNCHER_PATH=""
 INSTALLED_APP_DIR=""
 INSTALLED_CLI=""
+INSTALLED_HOST_LIB=""
 NATIVE_DOCTOR_JSON=""
 
 if [[ -t 1 ]]; then
@@ -110,12 +111,26 @@ path_contains_dir() {
 
 select_launcher_dir() {
   local candidate
-  for candidate in "$HOME/.local/bin" "$HOME/bin"; do
-    if path_contains_dir "$candidate"; then
+  local -a preferred_dirs=("$HOME/.cargo/bin" "$HOME/.local/bin" "$HOME/bin")
+  local entry
+
+  IFS=':' read -r -a entries <<< "${PATH:-}"
+  for entry in "${entries[@]}"; do
+    for candidate in "${preferred_dirs[@]}"; do
+      if [[ "$entry" == "$candidate" ]]; then
+        printf '%s\n' "$candidate"
+        return 0
+      fi
+    done
+  done
+
+  for candidate in "${preferred_dirs[@]}"; do
+    if [[ -d "$candidate" || -w "$(dirname "$candidate")" ]]; then
       printf '%s\n' "$candidate"
       return 0
     fi
   done
+
   printf '%s\n' "$HOME/.local/bin"
 }
 
@@ -148,11 +163,52 @@ install_launcher() {
 set -euo pipefail
 
 INSTALLED_CLI="$INSTALLED_CLI"
+INSTALLED_HOST_LIB="$INSTALLED_HOST_LIB"
+
+resolve_path() {
+  python3 - "\$1" <<'PY'
+import os
+import sys
+
+path = sys.argv[1]
+print(os.path.realpath(path) if os.path.exists(path) else os.path.abspath(path))
+PY
+}
+
+requested_host_lib=""
+args=("\$@")
+for ((i=0; i<\${#args[@]}; i++)); do
+  case "\${args[\$i]}" in
+    --host-lib=*)
+      requested_host_lib="\${args[\$i]#--host-lib=}"
+      ;;
+    --host-lib)
+      ((i+=1))
+      if (( i >= \${#args[@]} )); then
+        printf 'Missing value for --host-lib\n' >&2
+        exit 64
+      fi
+      requested_host_lib="\${args[\$i]}"
+      ;;
+  esac
+done
 
 if [[ ! -x "\$INSTALLED_CLI" ]]; then
   printf 'Aegis is not installed at %s\n' "\$INSTALLED_CLI" >&2
   printf 'Run ./install.sh from the Aegis repo to refresh the canonical local release.\n' >&2
   exit 1
+fi
+
+if [[ -n "\$requested_host_lib" ]]; then
+  requested_host_lib="\$(resolve_path "\$requested_host_lib")"
+  installed_host_lib="\$(resolve_path "\$INSTALLED_HOST_LIB")"
+  if [[ "\$requested_host_lib" != "\$installed_host_lib" ]]; then
+    printf 'The canonical aegis launcher only supports the installed production host library.\n' >&2
+    printf 'Requested: %s\n' "\$requested_host_lib" >&2
+    printf 'Installed: %s\n' "\$installed_host_lib" >&2
+    printf 'Use cargo run -- ... or the workspace binary directly for non-production host overrides.\n' >&2
+    exit 2
+  fi
 fi
 
 exec "\$INSTALLED_CLI" "\$@"
@@ -205,6 +261,7 @@ CURRENT_STEP="checking native preflight readiness"
 NATIVE_DOCTOR_JSON="$(cargo run --quiet -- native doctor)"
 INSTALLED_APP_DIR="$(doctor_json_field canonical_install_dir)" || fail "Unable to resolve canonical install dir from `aegis native doctor`."
 INSTALLED_CLI="$(doctor_json_field canonical_install_cli)" || fail "Unable to resolve canonical install CLI from `aegis native doctor`."
+INSTALLED_HOST_LIB="$(doctor_json_field canonical_install_host_library)" || fail "Unable to resolve canonical install host library from `aegis native doctor`."
 LAUNCHER_DIR="$(select_launcher_dir)"
 LAUNCHER_PATH="$LAUNCHER_DIR/aegis"
 

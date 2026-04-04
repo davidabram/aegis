@@ -308,6 +308,7 @@ fn host_runtime_state_round_trips() {
             browser_available: true,
             page_ready: false,
             renderer_ready: true,
+            runtime_installed: true,
             runtime_ready: true,
             load_in_progress: true,
             browser_closed: false,
