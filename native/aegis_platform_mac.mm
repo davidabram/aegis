@@ -139,18 +139,47 @@ bool AegisExecuteProcessAndInitialize(const CefMainArgs& main_args,
   CefSettings settings;
   AegisConfigureCefSettings(options, &settings);
 
+  if (const char* debug_log = std::getenv("AEGIS_DEBUG_LOG");
+      debug_log != nullptr && *debug_log != '\0') {
+    std::ofstream output(debug_log, std::ios::app);
+    if (output.is_open()) {
+      output << "platform: cef_execute_process begin\n";
+    }
+  }
   const int execute_process_result = CefExecuteProcess(main_args, app.get(), nullptr);
   if (subprocess_exit_code != nullptr) {
     *subprocess_exit_code = execute_process_result;
   }
+  if (const char* debug_log = std::getenv("AEGIS_DEBUG_LOG");
+      debug_log != nullptr && *debug_log != '\0') {
+    std::ofstream output(debug_log, std::ios::app);
+    if (output.is_open()) {
+      output << "platform: cef_execute_process complete exit_code="
+             << execute_process_result << '\n';
+    }
+  }
   if (execute_process_result >= 0) {
     return false;
+  }
+  if (const char* debug_log = std::getenv("AEGIS_DEBUG_LOG");
+      debug_log != nullptr && *debug_log != '\0') {
+    std::ofstream output(debug_log, std::ios::app);
+    if (output.is_open()) {
+      output << "platform: cef_initialize begin\n";
+    }
   }
   if (!CefInitialize(main_args, settings, app.get(), nullptr)) {
     if (error != nullptr) {
       *error = "CefInitialize failed";
     }
     return false;
+  }
+  if (const char* debug_log = std::getenv("AEGIS_DEBUG_LOG");
+      debug_log != nullptr && *debug_log != '\0') {
+    std::ofstream output(debug_log, std::ios::app);
+    if (output.is_open()) {
+      output << "platform: cef_initialize complete\n";
+    }
   }
   return true;
 }

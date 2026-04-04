@@ -1662,15 +1662,23 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       bootstrap_options.main_bundle_path = paths_.main_bundle_path.string();
       bootstrap_options.resources_dir_path = paths_.resources_dir.string();
       bootstrap_options.locales_dir_path = paths_.locales_dir.string();
-      bootstrap_options.root_cache_path = runtime_session_paths_.instance_dir.string();
-      bootstrap_options.cache_path =
-          (runtime_session_paths_.instance_dir / "cache").string();
+      // Embedded headless sessions snapshot and restore browser state explicitly, so
+      // per-run Chromium disk caches only add cold-start variance without providing
+      // meaningful persistence value.
+      if (!options_.headless) {
+        bootstrap_options.root_cache_path = runtime_session_paths_.instance_dir.string();
+        bootstrap_options.cache_path =
+            (runtime_session_paths_.instance_dir / "cache").string();
+      }
       app_ = new AegisApp(false);
       int subprocess_exit_code = -1;
       std::string initialize_error;
       AppendDebugLog("host: canonical cef bootstrap begin");
+      AppendDebugLog("host: cef_execute_process begin");
       const bool initialized = AegisExecuteProcessAndInitialize(
           main_args, bootstrap_options, app_, &subprocess_exit_code, &initialize_error);
+      AppendDebugLog("host: cef_execute_process complete exit_code=" +
+                     std::to_string(subprocess_exit_code));
       AppendDebugLog("host: canonical cef bootstrap subprocess_exit_code=" +
                      std::to_string(subprocess_exit_code));
       if (subprocess_exit_code >= 0) {
