@@ -196,6 +196,7 @@ Base address defaults to `http://127.0.0.1:7878`.
 Core routes:
 
 - `GET /healthz`
+- `GET /readyz`
 - `GET /runtime`
 - `POST /navigate`
 - `POST /execute`
@@ -232,8 +233,20 @@ The `runtime` object includes:
 
 The response also includes:
 
+- `browser.renderer_ready`
+- `browser.runtime_ready`
+- `browser.browser_available`
+- `browser.browser_closed`
+- `browser.load_in_progress`
 - `profile.profile`
 - `profile.path`
+
+Readiness contract:
+
+- `/healthz` and `/readyz` are only healthy when the control plane is up and the runtime is operational
+- an operational runtime requires `bootstrapped = true`, `browser.browser_available = true`, `browser.renderer_ready = true`, and `browser.runtime_ready = true`
+- `renderer_ready` means the main-frame renderer context exists
+- `runtime_ready` means Aegis verified the live `window.__aegis` automation API and can actually dispatch work
 
 ### `POST /navigate`
 

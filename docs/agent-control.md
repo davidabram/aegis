@@ -233,11 +233,23 @@ Base address defaults to `http://127.0.0.1:7878`.
 
 ```bash
 curl http://127.0.0.1:7878/healthz
+curl http://127.0.0.1:7878/readyz
 ```
 
 After `aegis serve` reports ready, health should reflect a verified operational runtime rather
 than a merely bound control plane. Production startup should not claim readiness until the
 browser, renderer context, and runtime API are all live.
+
+Concretely, readiness requires:
+
+- `runtime.bootstrapped = true`
+- `runtime.host.browser_available = true`
+- `runtime.host.renderer_ready = true`
+- `runtime.host.runtime_ready = true`
+
+`renderer_ready` means the main-frame renderer context exists. `runtime_ready` is stricter: it
+means Aegis has verified the live `window.__aegis` automation API and can dispatch real DOM and
+command work through it.
 
 ### Runtime Info
 
@@ -252,6 +264,14 @@ Returns:
 - `runtime`
 - `startup`
 - `profile`
+
+The embedded host state is the concrete readiness contract:
+
+- `browser.renderer_ready`
+- `browser.runtime_ready`
+- `browser.browser_available`
+- `browser.browser_closed`
+- `browser.load_in_progress`
 
 ### Inject Session
 
