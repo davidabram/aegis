@@ -556,6 +556,54 @@ bool DispatchRendererOperation(const std::string& op,
           if (!EvalToString(frame, wrapped, &command_result, error)) {
             return false;
           }
+        } else if (type == "drag") {
+          std::string target_argument;
+          if (!CommandTargetArgument(command, &target_argument, error)) {
+            return false;
+          }
+          const auto delta_x = command->HasKey("delta_x")
+                                   ? std::to_string(command->GetDouble("delta_x"))
+                                   : "null";
+          const auto delta_y = command->HasKey("delta_y")
+                                   ? std::to_string(command->GetDouble("delta_y"))
+                                   : "null";
+          const auto to_x = command->HasKey("to_x")
+                                ? std::to_string(command->GetDouble("to_x"))
+                                : "null";
+          const auto to_y = command->HasKey("to_y")
+                                ? std::to_string(command->GetDouble("to_y"))
+                                : "null";
+          const auto steps = command->HasKey("steps")
+                                 ? std::to_string(command->GetInt("steps"))
+                                 : "null";
+          const auto handle = command->HasKey("handle")
+                                  ? QuoteForJavaScript(command->GetString("handle").ToString())
+                                  : "null";
+          const auto wrapped =
+              "(() => { try { return JSON.stringify({ok:true,value:(window.__aegis ? window.__aegis.drag(" +
+              target_argument +
+              ",{deltaX:" + delta_x +
+              ",deltaY:" + delta_y +
+              ",toX:" + to_x +
+              ",toY:" + to_y +
+              ",steps:" + steps +
+              ",handle:" + handle +
+              "}) : null)}); } catch (error) { return JSON.stringify({ok:false,error:String(error && error.message ? error.message : error)}); } })()";
+          if (!EvalToString(frame, wrapped, &command_result, error)) {
+            return false;
+          }
+        } else if (type == "geometry") {
+          std::string target_argument;
+          if (!CommandTargetArgument(command, &target_argument, error)) {
+            return false;
+          }
+          const auto wrapped =
+              "(() => { try { return JSON.stringify({ok:true,value:(window.__aegis ? window.__aegis.geometry(" +
+              target_argument +
+              ") : null)}); } catch (error) { return JSON.stringify({ok:false,error:String(error && error.message ? error.message : error)}); } })()";
+          if (!EvalToString(frame, wrapped, &command_result, error)) {
+            return false;
+          }
         } else {
           command_result = "{\"ok\":false,\"error\":\"unsupported command " + type + "\"}";
         }

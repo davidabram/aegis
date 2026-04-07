@@ -306,7 +306,8 @@ pub async fn serve(
     }
 
     let client_connect_started = std::time::Instant::now();
-    let mut client = LoadedAegisClient::connect(startup_host_library.clone(), browser_config.clone())?;
+    let mut client =
+        LoadedAegisClient::connect(startup_host_library.clone(), browser_config.clone())?;
     emit_telemetry(
         "serve_client_connected",
         json!({
@@ -844,6 +845,8 @@ fn origin_key(url: &str) -> String {
 
 pub fn router(state: ApiState) -> Router {
     Router::new()
+        .route("/", get(api_manifest))
+        .route("/manifest", get(api_manifest))
         .route("/healthz", get(health))
         .route("/readyz", get(readiness))
         .route("/doctor", get(doctor))
@@ -881,6 +884,128 @@ struct RuntimeInfo {
     diagnostics: RuntimeDiagnosticsResponse,
     startup: ServeStartupMetrics,
     profile: SessionProfileInfo,
+}
+
+#[derive(Debug, Serialize)]
+struct ApiRouteDoc {
+    method: &'static str,
+    path: &'static str,
+    summary: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct ApiManifest {
+    service: &'static str,
+    version: &'static str,
+    discovery: &'static str,
+    routes: Vec<ApiRouteDoc>,
+    command_types: Vec<&'static str>,
+}
+
+async fn api_manifest() -> Json<ApiManifest> {
+    Json(ApiManifest {
+        service: "aegis",
+        version: env!("CARGO_PKG_VERSION"),
+        discovery: "/manifest",
+        routes: vec![
+            ApiRouteDoc {
+                method: "GET",
+                path: "/",
+                summary: "JSON API discovery document",
+            },
+            ApiRouteDoc {
+                method: "GET",
+                path: "/manifest",
+                summary: "JSON API discovery document",
+            },
+            ApiRouteDoc {
+                method: "GET",
+                path: "/healthz",
+                summary: "Control-plane and runtime health",
+            },
+            ApiRouteDoc {
+                method: "GET",
+                path: "/readyz",
+                summary: "Command readiness gate",
+            },
+            ApiRouteDoc {
+                method: "GET",
+                path: "/doctor",
+                summary: "Detailed runtime diagnostics",
+            },
+            ApiRouteDoc {
+                method: "GET",
+                path: "/runtime",
+                summary: "Runtime config and live state",
+            },
+            ApiRouteDoc {
+                method: "POST",
+                path: "/runtime/cancel",
+                summary: "Cancel the active runtime operation",
+            },
+            ApiRouteDoc {
+                method: "POST",
+                path: "/navigate",
+                summary: "Navigate the active browser page",
+            },
+            ApiRouteDoc {
+                method: "POST",
+                path: "/execute",
+                summary: "Execute a command batch",
+            },
+            ApiRouteDoc {
+                method: "GET",
+                path: "/dom",
+                summary: "Fetch a fresh DOM snapshot",
+            },
+            ApiRouteDoc {
+                method: "GET",
+                path: "/events",
+                summary: "Read buffered runtime events",
+            },
+            ApiRouteDoc {
+                method: "GET",
+                path: "/events/live",
+                summary: "Stream runtime events over SSE",
+            },
+            ApiRouteDoc {
+                method: "GET",
+                path: "/session",
+                summary: "Snapshot the active session",
+            },
+            ApiRouteDoc {
+                method: "POST",
+                path: "/session",
+                summary: "Inject session state",
+            },
+            ApiRouteDoc {
+                method: "POST",
+                path: "/session/save",
+                summary: "Persist the active profile session",
+            },
+            ApiRouteDoc {
+                method: "POST",
+                path: "/session/load",
+                summary: "Load the active profile session",
+            },
+            ApiRouteDoc {
+                method: "POST",
+                path: "/trace/enable",
+                summary: "Enable trace recording",
+            },
+        ],
+        command_types: vec![
+            "click",
+            "hover",
+            "set_value",
+            "press_key",
+            "wait_for",
+            "scroll",
+            "drag",
+            "geometry",
+            "eval",
+        ],
+    })
 }
 
 async fn runtime_info(State(state): State<ApiState>) -> Result<Json<RuntimeInfo>, ApiError> {
@@ -1354,6 +1479,7 @@ fn default_runtime_status() -> RuntimeStatus {
         current_url: None,
         current_title: None,
         document_ready_state: None,
+        media: Vec::new(),
         last_dom_refresh_at_ms: None,
         last_live_state_refresh_at_ms: None,
         last_event_at_ms: None,
@@ -1470,6 +1596,16 @@ impl ServeDiagnostics {
 
     fn record_runtime_snapshot(&mut self, runtime: RuntimeStatus) {
         self.runtime = runtime;
+        let host = &self.runtime.host;
+        if self.runtime.bootstrapped
+            && host.browser_available
+            && host.page_ready
+            && host.renderer_ready
+            && host.runtime_ready
+            && !host.load_in_progress
+        {
+            self.last_failure = None;
+        }
     }
 
     fn mark_cancel_requested(&mut self) {

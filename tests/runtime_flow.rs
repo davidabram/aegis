@@ -83,14 +83,48 @@ fn encodes_batch_request_with_stable_shape() {
                         exact: None,
                     },
                 }),
+                selector: Some("[data-ready='true']".into()),
                 url_contains: Some("search".into()),
                 title_contains: Some("Results".into()),
                 text: Some("browser automation".into()),
                 ready_state: Some("complete".into()),
+                scroll_x: Some(0),
+                scroll_y: Some(480),
+                scroll_changed: Some(true),
+                media_current_src_contains: Some("episode".into()),
+                media_ready_state_at_least: Some(1),
+                media_duration_known: Some(true),
+                animation_idle_ms: Some(100),
                 timeout_ms: Some(1_500),
                 poll_interval_ms: Some(25),
             },
             Command::Scroll { x: 0, y: 480 },
+            Command::Drag {
+                target: CommandTarget::Match {
+                    matcher: CommandMatcher {
+                        role: Some("slider".into()),
+                        name: Some("Timeline".into()),
+                        label: None,
+                        control_type: None,
+                        tag: None,
+                        text: None,
+                        placeholder: None,
+                        href_contains: None,
+                        actionable: Some(true),
+                        disabled: Some(false),
+                        exact: None,
+                    },
+                },
+                delta_x: Some(240.0),
+                delta_y: Some(0.0),
+                to_x: None,
+                to_y: None,
+                steps: Some(8),
+                handle: Some("end".into()),
+            },
+            Command::Geometry {
+                target: CommandTarget::Id { id: 12 },
+            },
         ],
     };
 
@@ -102,9 +136,12 @@ fn encodes_batch_request_with_stable_shape() {
     assert!(encoded.contains("\"type\":\"press_key\""));
     assert!(encoded.contains("\"type\":\"wait_for\""));
     assert!(encoded.contains("\"type\":\"scroll\""));
+    assert!(encoded.contains("\"type\":\"drag\""));
+    assert!(encoded.contains("\"type\":\"geometry\""));
     assert!(encoded.contains("\"match\""));
     assert!(encoded.contains("\"control_type\":\"searchbox\""));
     assert!(encoded.contains("\"exact\":true"));
+    assert!(encoded.contains("\"handle\":\"end\""));
 }
 
 #[test]

@@ -69,8 +69,70 @@
     return {
       url: window.location ? window.location.href : null,
       title: document.title || null,
-      ready_state: document.readyState || null
+      ready_state: document.readyState || null,
+      scroll_x: Number.isFinite(window.scrollX) ? window.scrollX : 0,
+      scroll_y: Number.isFinite(window.scrollY) ? window.scrollY : 0,
+      viewport: {
+        width: Number.isFinite(window.innerWidth) ? window.innerWidth : null,
+        height: Number.isFinite(window.innerHeight) ? window.innerHeight : null
+      },
+      media: mediaDiagnostics()
     };
+  }
+
+  function finiteNumberOrNull(value) {
+    return Number.isFinite(value) ? value : null;
+  }
+
+  function rectSnapshot(rect) {
+    if (!rect) {
+      return null;
+    }
+    return {
+      x: finiteNumberOrNull(rect.x),
+      y: finiteNumberOrNull(rect.y),
+      left: finiteNumberOrNull(rect.left),
+      top: finiteNumberOrNull(rect.top),
+      right: finiteNumberOrNull(rect.right),
+      bottom: finiteNumberOrNull(rect.bottom),
+      width: finiteNumberOrNull(rect.width),
+      height: finiteNumberOrNull(rect.height)
+    };
+  }
+
+  function elementGeometry(node) {
+    if (!node || node.nodeType !== Node.ELEMENT_NODE || typeof node.getBoundingClientRect !== "function") {
+      return null;
+    }
+    return {
+      rect: rectSnapshot(node.getBoundingClientRect()),
+      client_width: finiteNumberOrNull(node.clientWidth),
+      client_height: finiteNumberOrNull(node.clientHeight),
+      scroll_width: finiteNumberOrNull(node.scrollWidth),
+      scroll_height: finiteNumberOrNull(node.scrollHeight),
+      scroll_left: finiteNumberOrNull(node.scrollLeft),
+      scroll_top: finiteNumberOrNull(node.scrollTop)
+    };
+  }
+
+  function mediaDiagnostics() {
+    return Array.from(document.querySelectorAll("video, audio")).map((node, index) => {
+      const error = node.error ? `${node.error.code || "media_error"}${node.error.message ? `: ${node.error.message}` : ""}` : null;
+      return {
+        index,
+        tag: node.tagName.toLowerCase(),
+        current_src: node.currentSrc || node.src || null,
+        ready_state: Number.isFinite(node.readyState) ? node.readyState : null,
+        network_state: Number.isFinite(node.networkState) ? node.networkState : null,
+        duration: Number.isFinite(node.duration) ? node.duration : null,
+        paused: !!node.paused,
+        ended: !!node.ended,
+        muted: !!node.muted,
+        seeking: !!node.seeking,
+        current_time: Number.isFinite(node.currentTime) ? node.currentTime : null,
+        error
+      };
+    });
   }
 
   function isIgnoredNode(node) {
@@ -733,35 +795,95 @@
     return el;
   }
 
-  function dispatchMouseLikeEvent(el, type) {
-    el.dispatchEvent(
+  function dispatchMouseLikeEvent(el, type, init) {
+    const buttons = init && typeof init.buttons === "number"
+      ? init.buttons
+      : (type === "mouseup" || type === "mouseenter" || type === "mouseover") ? 0 : 1;
+    const accepted = el.dispatchEvent(
       new MouseEvent(type, {
         bubbles: true,
         cancelable: true,
         composed: true,
         view: window,
-        button: 0,
-        buttons: 1
+        button: init && typeof init.button === "number" ? init.button : 0,
+        buttons,
+        clientX: init && Number.isFinite(init.clientX) ? init.clientX : 0,
+        clientY: init && Number.isFinite(init.clientY) ? init.clientY : 0,
+        screenX: init && Number.isFinite(init.screenX) ? init.screenX : 0,
+        screenY: init && Number.isFinite(init.screenY) ? init.screenY : 0
       })
     );
+    return {
+      event: type,
+      target: assignId(el),
+      accepted
+    };
   }
 
-  function dispatchPointerLikeEvent(el, type) {
+  function dispatchPointerLikeEvent(el, type, init) {
     if (typeof PointerEvent !== "function") {
-      return;
+      return {
+        event: type,
+        target: assignId(el),
+        accepted: null,
+        unsupported: true
+      };
     }
-    el.dispatchEvent(
+    const buttons = init && typeof init.buttons === "number"
+      ? init.buttons
+      : (type === "pointerup" || type === "pointerenter" || type === "pointerover") ? 0 : 1;
+    const accepted = el.dispatchEvent(
       new PointerEvent(type, {
         bubbles: true,
         cancelable: true,
         composed: true,
-        pointerId: 1,
+        pointerId: init && Number.isFinite(init.pointerId) ? init.pointerId : 1,
         pointerType: "mouse",
         isPrimary: true,
-        button: 0,
-        buttons: 1
+        button: init && typeof init.button === "number" ? init.button : 0,
+        buttons,
+        clientX: init && Number.isFinite(init.clientX) ? init.clientX : 0,
+        clientY: init && Number.isFinite(init.clientY) ? init.clientY : 0,
+        screenX: init && Number.isFinite(init.screenX) ? init.screenX : 0,
+        screenY: init && Number.isFinite(init.screenY) ? init.screenY : 0
       })
     );
+    return {
+      event: type,
+      target: assignId(el),
+      accepted
+    };
+  }
+
+  function centerPoint(rect) {
+    return {
+      x: rect.left + (rect.width / 2),
+      y: rect.top + (rect.height / 2)
+    };
+  }
+
+  function dragAnchorPoint(rect, handle) {
+    if (!rect) {
+      return { x: 0, y: 0 };
+    }
+    if (handle === "start" || handle === "left") {
+      return { x: rect.left + Math.min(4, rect.width / 4), y: rect.top + (rect.height / 2) };
+    }
+    if (handle === "end" || handle === "right") {
+      return { x: rect.right - Math.min(4, rect.width / 4), y: rect.top + (rect.height / 2) };
+    }
+    return centerPoint(rect);
+  }
+
+  function pointerInit(point, pointerId, buttons) {
+    return {
+      pointerId,
+      buttons,
+      clientX: point.x,
+      clientY: point.y,
+      screenX: point.x,
+      screenY: point.y
+    };
   }
 
   function baseActionResult(resolved, el, before, after) {
@@ -786,16 +908,19 @@
     const before = currentPageState();
     const resolved = resolveTarget(target, "click");
     const el = resolveActionTarget(resolved.node, "click");
+    const rect = el.getBoundingClientRect();
+    const point = centerPoint(rect);
+    const event_debug = [];
     scrollIntoViewIfNeeded(el);
     focusIfPossible(el);
-    dispatchPointerLikeEvent(el, "pointerover");
-    dispatchMouseLikeEvent(el, "mouseover");
-    dispatchPointerLikeEvent(el, "pointermove");
-    dispatchMouseLikeEvent(el, "mousemove");
-    dispatchPointerLikeEvent(el, "pointerdown");
-    dispatchMouseLikeEvent(el, "mousedown");
-    dispatchPointerLikeEvent(el, "pointerup");
-    dispatchMouseLikeEvent(el, "mouseup");
+    event_debug.push(dispatchPointerLikeEvent(el, "pointerover", pointerInit(point, 1, 0)));
+    event_debug.push(dispatchMouseLikeEvent(el, "mouseover", pointerInit(point, 1, 0)));
+    event_debug.push(dispatchPointerLikeEvent(el, "pointermove", pointerInit(point, 1, 0)));
+    event_debug.push(dispatchMouseLikeEvent(el, "mousemove", pointerInit(point, 1, 0)));
+    event_debug.push(dispatchPointerLikeEvent(el, "pointerdown", pointerInit(point, 1, 1)));
+    event_debug.push(dispatchMouseLikeEvent(el, "mousedown", pointerInit(point, 1, 1)));
+    event_debug.push(dispatchPointerLikeEvent(el, "pointerup", pointerInit(point, 1, 0)));
+    event_debug.push(dispatchMouseLikeEvent(el, "mouseup", pointerInit(point, 1, 0)));
     const type = el instanceof HTMLInputElement || el instanceof HTMLButtonElement
       ? (el.getAttribute("type") || "").toLowerCase()
       : "";
@@ -812,6 +937,8 @@
     const after = currentPageState();
     return {
       clicked: resolved.targetId,
+      geometry_after: elementGeometry(el),
+      event_debug,
       ...baseActionResult(resolved, el, before, after)
     };
   }
@@ -879,16 +1006,21 @@
     const before = currentPageState();
     const resolved = resolveTarget(target, "hover");
     const el = resolveActionTarget(resolved.node, "hover");
+    const rect = el.getBoundingClientRect();
+    const point = centerPoint(rect);
+    const event_debug = [];
     scrollIntoViewIfNeeded(el);
-    dispatchPointerLikeEvent(el, "pointerover");
-    dispatchMouseLikeEvent(el, "mouseover");
-    dispatchPointerLikeEvent(el, "pointerenter");
-    dispatchMouseLikeEvent(el, "mouseenter");
-    dispatchPointerLikeEvent(el, "pointermove");
-    dispatchMouseLikeEvent(el, "mousemove");
+    event_debug.push(dispatchPointerLikeEvent(el, "pointerover", pointerInit(point, 1, 0)));
+    event_debug.push(dispatchMouseLikeEvent(el, "mouseover", pointerInit(point, 1, 0)));
+    event_debug.push(dispatchPointerLikeEvent(el, "pointerenter", pointerInit(point, 1, 0)));
+    event_debug.push(dispatchMouseLikeEvent(el, "mouseenter", pointerInit(point, 1, 0)));
+    event_debug.push(dispatchPointerLikeEvent(el, "pointermove", pointerInit(point, 1, 0)));
+    event_debug.push(dispatchMouseLikeEvent(el, "mousemove", pointerInit(point, 1, 0)));
     const after = currentPageState();
     return {
       hovered: resolved.targetId,
+      geometry_after: elementGeometry(el),
+      event_debug,
       ...baseActionResult(resolved, el, before, after)
     };
   }
@@ -963,6 +1095,91 @@
     return { x: window.scrollX, y: window.scrollY };
   }
 
+  function geometry(target) {
+    const resolved = resolveTarget(target, null);
+    const el = resolved.node;
+    return {
+      id: resolved.targetId,
+      tag: el.tagName.toLowerCase(),
+      target: resolved.debug.chosen,
+      matcher_debug: resolved.debug,
+      geometry: elementGeometry(el),
+      page: currentPageState()
+    };
+  }
+
+  function drag(target, options) {
+    const before = currentPageState();
+    const resolved = resolveTarget(target, "hover");
+    const el = resolveActionTarget(resolved.node, "hover");
+    scrollIntoViewIfNeeded(el);
+    focusIfPossible(el);
+
+    const startRect = el.getBoundingClientRect();
+    const startPoint = dragAnchorPoint(startRect, options && options.handle ? String(options.handle).toLowerCase() : null);
+    const endPoint = {
+      x: Number.isFinite(options && options.toX) ? options.toX : startPoint.x + (Number.isFinite(options && options.deltaX) ? options.deltaX : 0),
+      y: Number.isFinite(options && options.toY) ? options.toY : startPoint.y + (Number.isFinite(options && options.deltaY) ? options.deltaY : 0)
+    };
+    if (!Number.isFinite(endPoint.x) || !Number.isFinite(endPoint.y)) {
+      throw new Error("drag requires toX/toY or deltaX/deltaY");
+    }
+
+    const pointerId = 1;
+    const steps = Math.max(1, Math.min(60, Math.round(Number.isFinite(options && options.steps) ? options.steps : 12)));
+    const event_debug = [];
+    const beforeGeometry = elementGeometry(el);
+
+    event_debug.push(dispatchPointerLikeEvent(el, "pointerover", pointerInit(startPoint, pointerId, 0)));
+    event_debug.push(dispatchMouseLikeEvent(el, "mouseover", pointerInit(startPoint, pointerId, 0)));
+    event_debug.push(dispatchPointerLikeEvent(el, "pointermove", pointerInit(startPoint, pointerId, 0)));
+    event_debug.push(dispatchMouseLikeEvent(el, "mousemove", pointerInit(startPoint, pointerId, 0)));
+    event_debug.push(dispatchPointerLikeEvent(el, "pointerdown", pointerInit(startPoint, pointerId, 1)));
+    event_debug.push(dispatchMouseLikeEvent(el, "mousedown", pointerInit(startPoint, pointerId, 1)));
+
+    for (let index = 1; index <= steps; index += 1) {
+      const progress = index / steps;
+      const point = {
+        x: startPoint.x + ((endPoint.x - startPoint.x) * progress),
+        y: startPoint.y + ((endPoint.y - startPoint.y) * progress)
+      };
+      const moveTarget = document.elementFromPoint(point.x, point.y) || document.body || el;
+      event_debug.push(dispatchPointerLikeEvent(document, "pointermove", pointerInit(point, pointerId, 1)));
+      event_debug.push(dispatchMouseLikeEvent(document, "mousemove", pointerInit(point, pointerId, 1)));
+      if (moveTarget !== document) {
+        event_debug.push(dispatchPointerLikeEvent(moveTarget, "pointermove", pointerInit(point, pointerId, 1)));
+        event_debug.push(dispatchMouseLikeEvent(moveTarget, "mousemove", pointerInit(point, pointerId, 1)));
+      }
+    }
+
+    const releaseTarget = document.elementFromPoint(endPoint.x, endPoint.y) || document.body || el;
+    event_debug.push(dispatchPointerLikeEvent(releaseTarget, "pointerup", pointerInit(endPoint, pointerId, 0)));
+    event_debug.push(dispatchMouseLikeEvent(releaseTarget, "mouseup", pointerInit(endPoint, pointerId, 0)));
+
+    const after = currentPageState();
+    const afterGeometry = elementGeometry(el);
+    return {
+      dragged: resolved.targetId,
+      requested: {
+        handle: options && options.handle ? options.handle : null,
+        delta_x: Number.isFinite(options && options.deltaX) ? options.deltaX : null,
+        delta_y: Number.isFinite(options && options.deltaY) ? options.deltaY : null,
+        to_x: Number.isFinite(options && options.toX) ? options.toX : null,
+        to_y: Number.isFinite(options && options.toY) ? options.toY : null,
+        steps
+      },
+      start_point: startPoint,
+      end_point: endPoint,
+      pointer_capture: typeof el.hasPointerCapture === "function" ? el.hasPointerCapture(pointerId) : null,
+      geometry_before: beforeGeometry,
+      geometry_after: afterGeometry,
+      scroll_before: { x: before.scroll_x, y: before.scroll_y },
+      scroll_after: { x: after.scroll_x, y: after.scroll_y },
+      event_debug,
+      ...baseActionResult(resolved, el, before, after)
+    };
+  }
+
   function exec(commands) {
     return commands.map((command) => {
       try {
@@ -990,6 +1207,20 @@
             };
           case "scroll":
             return { ok: true, value: scrollToPosition(command.x, command.y) };
+          case "drag":
+            return {
+              ok: true,
+              value: drag(command.match || command.id, {
+                deltaX: command.delta_x,
+                deltaY: command.delta_y,
+                toX: command.to_x,
+                toY: command.to_y,
+                steps: command.steps,
+                handle: command.handle
+              })
+            };
+          case "geometry":
+            return { ok: true, value: geometry(command.match || command.id) };
           case "eval":
             return { ok: true, value: Function(command.code)() };
           default:
@@ -1099,6 +1330,8 @@
     pressKey,
     setValue,
     scrollToPosition,
+    drag,
+    geometry,
     drainEvents,
     queue,
     assignId,

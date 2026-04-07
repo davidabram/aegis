@@ -933,7 +933,9 @@ mod tests {
 
     #[test]
     fn linux_status_falls_back_to_workspace_host_library_without_installed_bundle() {
-        let _guard = home_env_lock().lock().expect("home env lock should not poison");
+        let _guard = home_env_lock()
+            .lock()
+            .expect("home env lock should not poison");
         let temp = tempfile::tempdir().expect("temporary dir should be created");
         let repo_root = temp.path().join("repo");
         let workspace_host = workspace_host_library(&repo_root, NativePlatform::Linux);
@@ -959,7 +961,9 @@ mod tests {
 
     #[test]
     fn linux_doctor_reports_expected_canonical_install_paths() {
-        let _guard = home_env_lock().lock().expect("home env lock should not poison");
+        let _guard = home_env_lock()
+            .lock()
+            .expect("home env lock should not poison");
         let temp = tempfile::tempdir().expect("temporary dir should be created");
         let repo_root = temp.path().join("repo");
         let home_dir = temp.path().join("home");
@@ -1015,7 +1019,9 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_status_prefers_bundled_host_library_for_installed_app() {
-        let _guard = home_env_lock().lock().expect("home env lock should not poison");
+        let _guard = home_env_lock()
+            .lock()
+            .expect("home env lock should not poison");
         let temp = tempfile::tempdir().expect("temporary dir should be created");
         let repo_root = temp.path().join("repo");
         let home_dir = temp.path().join("home");
@@ -1047,7 +1053,9 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_status_does_not_fall_back_to_workspace_host_library() {
-        let _guard = home_env_lock().lock().expect("home env lock should not poison");
+        let _guard = home_env_lock()
+            .lock()
+            .expect("home env lock should not poison");
         let temp = tempfile::tempdir().expect("temporary dir should be created");
         let repo_root = temp.path().join("repo");
         let home_dir = temp.path().join("home");

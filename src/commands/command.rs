@@ -76,6 +76,8 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target: Option<CommandTarget>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        selector: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         url_contains: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         title_contains: Option<String>,
@@ -84,6 +86,20 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ready_state: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        scroll_x: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scroll_y: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scroll_changed: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        media_current_src_contains: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        media_ready_state_at_least: Option<u8>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        media_duration_known: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        animation_idle_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         timeout_ms: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         poll_interval_ms: Option<u64>,
@@ -91,6 +107,26 @@ pub enum Command {
     Scroll {
         x: i64,
         y: i64,
+    },
+    Drag {
+        #[serde(flatten)]
+        target: CommandTarget,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        delta_x: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        delta_y: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to_x: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to_y: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        steps: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        handle: Option<String>,
+    },
+    Geometry {
+        #[serde(flatten)]
+        target: CommandTarget,
     },
     Eval {
         code: String,

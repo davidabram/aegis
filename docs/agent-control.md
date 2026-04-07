@@ -229,6 +229,16 @@ Use trace recording for:
 
 Base address defaults to `http://127.0.0.1:7878`.
 
+### Discovery
+
+```bash
+curl http://127.0.0.1:7878/
+curl http://127.0.0.1:7878/manifest
+```
+
+These endpoints return a stable JSON route manifest plus supported command types so agents can
+discover the control plane without probing for undocumented routes.
+
 ### Health
 
 ```bash
@@ -272,6 +282,7 @@ The embedded host state is the concrete readiness contract:
 - `browser.browser_available`
 - `browser.browser_closed`
 - `browser.load_in_progress`
+- `runtime.media`
 
 ### Inject Session
 
@@ -365,6 +376,36 @@ curl -X POST http://127.0.0.1:7878/execute \
   }'
 ```
 
+Drag example:
+
+```bash
+curl -X POST http://127.0.0.1:7878/execute \
+  -H 'content-type: application/json' \
+  -d '{
+    "commands": [
+      {
+        "type": "drag",
+        "match": {
+          "role": "slider",
+          "name": "Timeline",
+          "actionable": true
+        },
+        "delta_x": 240,
+        "handle": "end",
+        "steps": 8
+      },
+      {
+        "type": "geometry",
+        "match": {
+          "role": "slider",
+          "name": "Timeline",
+          "actionable": true
+        }
+      }
+    ]
+  }'
+```
+
 Supported matcher fields:
 
 - `role`
@@ -384,13 +425,18 @@ Additional command types:
 - `hover`
 - `press_key`
 - `wait_for`
+- `scroll`
+- `drag`
+- `geometry`
 
 Notes:
 - `navigate` returns quickly with ordered navigation/events and invalidates the cached DOM tree
 - `GET /dom` or a DOM-targeting command such as `click` / `set_value` repopulates the DOM snapshot on demand
 - `click`, `hover`, and `set_value` use strict action-aware target resolution and return richer match diagnostics
 - `press_key` can target the currently focused element or an explicit nested `target`
-- `wait_for` can poll `url_contains`, `title_contains`, `text`, `ready_state`, and an optional `target`
+- `wait_for` can poll `url_contains`, `title_contains`, `text`, `ready_state`, an optional `target`, a CSS `selector`, scroll position/change, media readiness, known duration, and animation idle time
+- `drag` supports drag-by-delta and drag-to-point requests, plus optional `handle` hints such as `start`, `end`, `left`, and `right`
+- `geometry` returns a first-class element geometry snapshot without forcing custom `eval`
 - `execute` may return `"snapshot": null` for low-latency commands such as `eval` and `scroll`
 - agents should treat the event stream as the incremental source of truth between full snapshots
 - the most reliable loop on live sites is `navigate -> /dom -> execute(match...)`

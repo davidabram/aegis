@@ -2042,7 +2042,9 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
         aegis::kOpEvalJs,
         "(() => !!(window.__aegis && typeof window.__aegis.snapshot === 'function' && "
         "typeof window.__aegis.drainEvents === 'function' && "
-        "typeof window.__aegis.currentPageState === 'function'))()");
+        "typeof window.__aegis.currentPageState === 'function' && "
+        "typeof window.__aegis.drag === 'function' && "
+        "typeof window.__aegis.geometry === 'function'))()");
     if (TrimAscii(probe) != "true") {
       InvalidateRuntime("renderer runtime api probe failed");
       throw std::runtime_error("renderer runtime api is unavailable");

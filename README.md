@@ -195,6 +195,8 @@ Base address defaults to `http://127.0.0.1:7878`.
 
 Core routes:
 
+- `GET /`
+- `GET /manifest`
 - `GET /healthz`
 - `GET /readyz`
 - `GET /runtime`
@@ -211,6 +213,9 @@ Core routes:
 server does not merely mean the control plane is bound; it means the active page reached a
 verified automation-ready state. `/healthz` and `/readyz` stay false until the browser,
 renderer context, and live runtime API are all usable.
+
+`GET /` and `GET /manifest` expose a stable JSON discovery surface with the route list and
+supported command types so agents do not need to guess the control plane.
 
 ### `GET /runtime`
 
@@ -229,6 +234,7 @@ The `runtime` object includes:
 - `current_url`
 - `current_title`
 - `document_ready_state`
+- `media`
 - `last_live_state_refresh_at_ms`
 
 The response also includes:
@@ -281,18 +287,45 @@ Supported command types:
 - `press_key`
 - `wait_for`
 - `scroll`
+- `drag`
+- `geometry`
 
 `eval.code` should be a JavaScript expression such as `document.title`.
 Aegis also normalizes a leading `return ...;` if you accidentally send one.
+
+`drag` supports drag-by-delta and drag-to-point flows, plus optional `handle` hints such as
+`start`, `end`, `left`, and `right`. `geometry` returns a first-class element geometry snapshot.
 
 Execution model:
 
 - `navigate` returns ordered navigation/events quickly and invalidates the cached DOM tree
 - `GET /dom` or a node-ID command such as `click` / `set_value` materializes a fresh DOM snapshot on demand
 - `hover` and matcher-based `press_key` resolve against the live DOM with strict action-aware ranking
-- `wait_for` executes inside the runtime owner loop, polling live page metadata and optionally DOM conditions until the condition is satisfied or times out
+- `wait_for` executes inside the runtime owner loop, polling live page metadata, selectors, scroll position/change, media readiness, and optional DOM conditions until the condition is satisfied or times out
 - `execute` can omit the snapshot for low-latency commands like `eval` and `scroll`
 - incremental state flows through `GET /events`
+
+Example drag and geometry batch:
+
+```bash
+curl -X POST http://127.0.0.1:7878/execute \
+  -H 'content-type: application/json' \
+  -d '{
+    "commands": [
+      {
+        "type":"drag",
+        "match":{"role":"slider","name":"Timeline","actionable":true},
+        "delta_x":240,
+        "handle":"end",
+        "steps":8
+      },
+      {
+        "type":"geometry",
+        "match":{"role":"slider","name":"Timeline","actionable":true}
+      }
+    ]
+  }'
+```
 
 ### `GET /dom`
 

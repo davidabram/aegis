@@ -4,9 +4,8 @@ use std::path::PathBuf;
 
 use aegis::api::server;
 use aegis::{
-    AegisConfigStore, AegisSecretStore, BrowserConfig, BrowserMode,
-    CredentialInput, NativeConfiguration, app_executable, build_native, configure_native, native,
-    replay_trace,
+    AegisConfigStore, AegisSecretStore, BrowserConfig, BrowserMode, CredentialInput,
+    NativeConfiguration, app_executable, build_native, configure_native, native, replay_trace,
 };
 use clap::{Parser, Subcommand};
 
