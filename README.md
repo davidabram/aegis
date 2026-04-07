@@ -294,7 +294,10 @@ Supported command types:
 Aegis also normalizes a leading `return ...;` if you accidentally send one.
 
 `drag` supports drag-by-delta and drag-to-point flows, plus optional `handle` hints such as
-`start`, `end`, `left`, and `right`. `geometry` returns a first-class element geometry snapshot.
+`start`, `end`, `left`, and `right`. `delta_x` / `delta_y` move relative to the matched target's
+drag anchor, while `to_x` / `to_y` target absolute viewport coordinates. Native `input[type=range]`
+controls also update their value and emit `input` / `change` events during drag. `geometry`
+returns a first-class element geometry snapshot.
 
 Execution model:
 

@@ -436,6 +436,8 @@ Notes:
 - `press_key` can target the currently focused element or an explicit nested `target`
 - `wait_for` can poll `url_contains`, `title_contains`, `text`, `ready_state`, an optional `target`, a CSS `selector`, scroll position/change, media readiness, known duration, and animation idle time
 - `drag` supports drag-by-delta and drag-to-point requests, plus optional `handle` hints such as `start`, `end`, `left`, and `right`
+- `delta_x` / `delta_y` are relative to the matched target anchor, while `to_x` / `to_y` are absolute viewport coordinates
+- native `input[type=range]` targets update their value and emit `input` / `change` events during drag
 - `geometry` returns a first-class element geometry snapshot without forcing custom `eval`
 - `execute` may return `"snapshot": null` for low-latency commands such as `eval` and `scroll`
 - agents should treat the event stream as the incremental source of truth between full snapshots

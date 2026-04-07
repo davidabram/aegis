@@ -30,7 +30,13 @@
     "aria-expanded",
     "aria-pressed",
     "aria-describedby",
-    "aria-disabled"
+    "aria-disabled",
+    "aria-valuemin",
+    "aria-valuemax",
+    "aria-valuenow",
+    "min",
+    "max",
+    "step"
   ]);
   const ignoredTags = new Set(["script", "style", "meta", "link", "noscript", "template"]);
   const semanticTextTags = new Set([
@@ -960,6 +966,119 @@
     el.value = value;
   }
 
+  function emitValueMutationEvents(el, value, inputType) {
+    if (typeof InputEvent === "function") {
+      el.dispatchEvent(
+        new InputEvent("input", {
+          bubbles: true,
+          composed: true,
+          inputType: inputType || "insertText",
+          data: value == null ? null : String(value)
+        })
+      );
+    } else {
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  function updateTrackedElementValue(el, nextValue) {
+    const previousValue = "value" in el ? el.value : "";
+    setNativeElementValue(el, nextValue);
+    if (el._valueTracker && typeof el._valueTracker.setValue === "function") {
+      el._valueTracker.setValue(previousValue);
+    }
+    return previousValue;
+  }
+
+  function clamp(value, minimum, maximum) {
+    return Math.min(maximum, Math.max(minimum, value));
+  }
+
+  function numericAttr(el, name, fallback) {
+    const raw = el.getAttribute(name);
+    const parsed = raw == null || raw == "" ? NaN : Number(raw);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  }
+
+  function applyRangeDragValue(el, endPoint) {
+    if (!(el instanceof HTMLInputElement) || (el.getAttribute("type") || "").toLowerCase() !== "range") {
+      return null;
+    }
+
+    const rect = el.getBoundingClientRect();
+    if (!rect || rect.width <= 0) {
+      return null;
+    }
+
+    const min = numericAttr(el, "min", 0);
+    const max = numericAttr(el, "max", 100);
+    const stepAttr = (el.getAttribute("step") || "").toLowerCase();
+    const step = stepAttr && stepAttr !== "any" ? numericAttr(el, "step", 1) : null;
+    const ratio = clamp((endPoint.x - rect.left) / rect.width, 0, 1);
+    let next = min + ((max - min) * ratio);
+    if (step && step > 0) {
+      next = min + (Math.round((next - min) / step) * step);
+    }
+    next = clamp(next, min, max);
+
+    const normalized = step && step > 0
+      ? String(Number(next.toFixed(6)))
+      : String(next);
+    updateTrackedElementValue(el, normalized);
+    emitValueMutationEvents(el, normalized, "insertReplacementText");
+    return {
+      applied: true,
+      mode: "native_range",
+      value: normalized,
+      min,
+      max,
+      step
+    };
+  }
+
+  function dispatchDocumentPointerMove(point, pointerId, event_debug) {
+    const init = pointerInit(point, pointerId, 1);
+    event_debug.push(dispatchPointerLikeEvent(document, "pointermove", init));
+    event_debug.push(dispatchMouseLikeEvent(document, "mousemove", init));
+    if (window && typeof window.dispatchEvent === "function") {
+      event_debug.push({
+        event: "window:pointermove",
+        target: null,
+        accepted: window.dispatchEvent(new PointerEvent("pointermove", {
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+          pointerId,
+          pointerType: "mouse",
+          isPrimary: true,
+          button: 0,
+          buttons: 1,
+          clientX: point.x,
+          clientY: point.y,
+          screenX: point.x,
+          screenY: point.y
+        }))
+      });
+      event_debug.push({
+        event: "window:mousemove",
+        target: null,
+        accepted: window.dispatchEvent(new MouseEvent("mousemove", {
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+          view: window,
+          button: 0,
+          buttons: 1,
+          clientX: point.x,
+          clientY: point.y,
+          screenX: point.x,
+          screenY: point.y
+        }))
+      });
+    }
+  }
+
   function setValue(target, value) {
     const before = currentPageState();
     const resolved = resolveTarget(target, "type");
@@ -981,19 +1100,7 @@
       throw new Error(`node ${resolved.targetId} is not typeable`);
     }
 
-    if (typeof InputEvent === "function") {
-      el.dispatchEvent(
-        new InputEvent("input", {
-          bubbles: true,
-          composed: true,
-          inputType: "insertText",
-          data: String(value)
-        })
-      );
-    } else {
-      el.dispatchEvent(new Event("input", { bubbles: true }));
-    }
-    el.dispatchEvent(new Event("change", { bubbles: true }));
+    emitValueMutationEvents(el, value, "insertText");
     const after = currentPageState();
     return {
       id: resolved.targetId,
@@ -1129,6 +1236,7 @@
     const steps = Math.max(1, Math.min(60, Math.round(Number.isFinite(options && options.steps) ? options.steps : 12)));
     const event_debug = [];
     const beforeGeometry = elementGeometry(el);
+    const beforeValue = "value" in el ? el.value : null;
 
     event_debug.push(dispatchPointerLikeEvent(el, "pointerover", pointerInit(startPoint, pointerId, 0)));
     event_debug.push(dispatchMouseLikeEvent(el, "mouseover", pointerInit(startPoint, pointerId, 0)));
@@ -1136,6 +1244,14 @@
     event_debug.push(dispatchMouseLikeEvent(el, "mousemove", pointerInit(startPoint, pointerId, 0)));
     event_debug.push(dispatchPointerLikeEvent(el, "pointerdown", pointerInit(startPoint, pointerId, 1)));
     event_debug.push(dispatchMouseLikeEvent(el, "mousedown", pointerInit(startPoint, pointerId, 1)));
+    if (typeof el.setPointerCapture === "function") {
+      try {
+        el.setPointerCapture(pointerId);
+        event_debug.push({ event: "setPointerCapture", target: assignId(el), accepted: true });
+      } catch (_error) {
+        event_debug.push({ event: "setPointerCapture", target: assignId(el), accepted: false });
+      }
+    }
 
     for (let index = 1; index <= steps; index += 1) {
       const progress = index / steps;
@@ -1144,17 +1260,34 @@
         y: startPoint.y + ((endPoint.y - startPoint.y) * progress)
       };
       const moveTarget = document.elementFromPoint(point.x, point.y) || document.body || el;
-      event_debug.push(dispatchPointerLikeEvent(document, "pointermove", pointerInit(point, pointerId, 1)));
-      event_debug.push(dispatchMouseLikeEvent(document, "mousemove", pointerInit(point, pointerId, 1)));
+      dispatchDocumentPointerMove(point, pointerId, event_debug);
       if (moveTarget !== document) {
         event_debug.push(dispatchPointerLikeEvent(moveTarget, "pointermove", pointerInit(point, pointerId, 1)));
         event_debug.push(dispatchMouseLikeEvent(moveTarget, "mousemove", pointerInit(point, pointerId, 1)));
       }
+      if (moveTarget !== el) {
+        event_debug.push(dispatchPointerLikeEvent(el, "pointermove", pointerInit(point, pointerId, 1)));
+        event_debug.push(dispatchMouseLikeEvent(el, "mousemove", pointerInit(point, pointerId, 1)));
+      }
     }
+
+    const range_update = applyRangeDragValue(el, endPoint);
 
     const releaseTarget = document.elementFromPoint(endPoint.x, endPoint.y) || document.body || el;
     event_debug.push(dispatchPointerLikeEvent(releaseTarget, "pointerup", pointerInit(endPoint, pointerId, 0)));
     event_debug.push(dispatchMouseLikeEvent(releaseTarget, "mouseup", pointerInit(endPoint, pointerId, 0)));
+    if (releaseTarget !== el) {
+      event_debug.push(dispatchPointerLikeEvent(el, "pointerup", pointerInit(endPoint, pointerId, 0)));
+      event_debug.push(dispatchMouseLikeEvent(el, "mouseup", pointerInit(endPoint, pointerId, 0)));
+    }
+    if (typeof el.releasePointerCapture === "function") {
+      try {
+        if (el.hasPointerCapture && el.hasPointerCapture(pointerId)) {
+          el.releasePointerCapture(pointerId);
+        }
+      } catch (_error) {
+      }
+    }
 
     const after = currentPageState();
     const afterGeometry = elementGeometry(el);
@@ -1171,6 +1304,9 @@
       start_point: startPoint,
       end_point: endPoint,
       pointer_capture: typeof el.hasPointerCapture === "function" ? el.hasPointerCapture(pointerId) : null,
+      range_update,
+      value_before: beforeValue,
+      value_after: "value" in el ? el.value : null,
       geometry_before: beforeGeometry,
       geometry_after: afterGeometry,
       scroll_before: { x: before.scroll_x, y: before.scroll_y },
