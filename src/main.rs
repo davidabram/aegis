@@ -5,7 +5,8 @@ use std::path::PathBuf;
 use aegis::api::server;
 use aegis::{
     AegisConfigStore, AegisSecretStore, BrowserConfig, BrowserMode, CredentialInput,
-    NativeConfiguration, app_executable, build_native, configure_native, native, replay_trace,
+    NativeConfiguration, app_executable, build_native, configure_native,
+    ensure_workspace_serve_runtime, native, replay_trace,
 };
 use clap::{Parser, Subcommand};
 
@@ -20,7 +21,7 @@ struct Cli {
     #[arg(
         long,
         global = true,
-        help = "Path to the native host library. On macOS the default is the canonical installed app bundle; use --host-lib to override explicitly."
+        help = "Path to the native host library. By default `serve` uses the workspace release runtime and refreshes it when sources are newer."
     )]
     #[arg(long, global = true)]
     host_lib: Option<PathBuf>,
@@ -333,22 +334,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let host_lib = if let Some(path) = cli.host_lib.clone() {
                 path
             } else {
-                #[cfg(target_os = "macos")]
-                {
-                    native::status(".").default_host_library
-                }
-                #[cfg(not(target_os = "macos"))]
-                {
-                    let current_exe = std::env::current_exe()?;
-                    let workspace_root = resolve_workspace_root(&current_exe)?;
-                    native::status(&workspace_root).default_host_library
-                }
+                let current_exe = std::env::current_exe()?;
+                let workspace_root = resolve_workspace_root(&current_exe)?;
+                ensure_workspace_serve_runtime(&workspace_root)?
             };
             if !host_lib.exists() {
-                #[cfg(target_os = "macos")]
-                let help = "host library not found at {path}. Run `./install.sh` or `aegis native install` to refresh the canonical macOS app bundle, or pass --host-lib explicitly.";
-                #[cfg(not(target_os = "macos"))]
-                let help = "host library not found at {path}. Run `aegis native build --configuration release --target aegis_host` first or pass --host-lib.";
+                let help = "host library not found at {path}. Run `aegis native build --configuration release --target aegis_host` or pass --host-lib explicitly.";
                 return Err(help
                     .replace("{path}", &host_lib.display().to_string())
                     .into());

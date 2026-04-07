@@ -274,6 +274,27 @@ pub fn build_native(
     Ok(artifact_for_target(root, configuration, target))
 }
 
+pub fn ensure_workspace_serve_runtime(root: impl AsRef<Path>) -> Result<PathBuf, AegisError> {
+    let root = root.as_ref();
+    let platform = current_platform();
+    let workspace_app = default_workspace_app_dir(root, platform);
+    let workspace_app_executable = app_executable(&workspace_app, platform);
+    let workspace_host = workspace_host_library(root, platform);
+
+    if workspace_runtime_is_current(root, &workspace_app_executable, &workspace_host)? {
+        return Ok(workspace_host);
+    }
+
+    build_native(
+        root,
+        NativeConfiguration::Release,
+        Some(HOST_LIBRARY_TARGET),
+    )?;
+    build_native(root, NativeConfiguration::Release, Some(DEFAULT_TARGET))?;
+
+    Ok(workspace_host_library(root, platform))
+}
+
 pub fn artifact_for_target(
     root: impl AsRef<Path>,
     configuration: NativeConfiguration,
@@ -550,6 +571,46 @@ fn default_workspace_app_dir(root: &Path, platform: NativePlatform) -> PathBuf {
     }
 }
 
+fn workspace_runtime_is_current(
+    root: &Path,
+    workspace_app_executable: &Path,
+    workspace_host_library: &Path,
+) -> Result<bool, AegisError> {
+    if !workspace_app_executable.exists() || !workspace_host_library.exists() {
+        return Ok(false);
+    }
+
+    let app_mtime = workspace_app_executable.metadata()?.modified()?;
+    let host_mtime = workspace_host_library.metadata()?.modified()?;
+    let artifact_mtime = std::cmp::min(app_mtime, host_mtime);
+
+    for input in workspace_runtime_inputs(root) {
+        if input.exists() && input.metadata()?.modified()? > artifact_mtime {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
+
+fn workspace_runtime_inputs(root: &Path) -> Vec<PathBuf> {
+    vec![
+        root.join("assets").join("js").join("aegis_runtime.js"),
+        root.join("scripts").join("generate_runtime_header.py"),
+        root.join("native").join("CMakeLists.txt"),
+        root.join("native").join("aegis_app.cc"),
+        root.join("native").join("aegis_client.cc"),
+        root.join("native").join("src").join("aegis_cef_host.cpp"),
+        root.join("native").join("src").join("aegis_protocol.cpp"),
+        root.join("native")
+            .join("include")
+            .join("aegis_cef_host.hpp"),
+        root.join("native")
+            .join("include")
+            .join("aegis_protocol.hpp"),
+    ]
+}
+
 fn installed_app_dir(platform: NativePlatform) -> Option<PathBuf> {
     let path = canonical_install_dir(platform)?;
     path.exists().then_some(path)
@@ -578,9 +639,15 @@ fn workspace_host_library(root: &Path, platform: NativePlatform) -> PathBuf {
 
 fn preferred_host_library(root: &Path, platform: NativePlatform, app_dir: &Path) -> PathBuf {
     match platform {
-        NativePlatform::Macos => canonical_install_dir(platform)
-            .map(|install_dir| bundled_host_library(&install_dir, platform))
-            .unwrap_or_else(|| bundled_host_library(app_dir, platform)),
+        NativePlatform::Macos => {
+            let workspace = workspace_host_library(root, platform);
+            if workspace.exists() {
+                return workspace;
+            }
+            canonical_install_dir(platform)
+                .map(|install_dir| bundled_host_library(&install_dir, platform))
+                .unwrap_or_else(|| bundled_host_library(app_dir, platform))
+        }
         NativePlatform::Linux => {
             let bundled = bundled_host_library(app_dir, platform);
             if bundled.exists() {
@@ -1018,7 +1085,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn macos_status_prefers_bundled_host_library_for_installed_app() {
+    fn macos_status_prefers_workspace_host_library_for_runtime() {
         let _guard = home_env_lock()
             .lock()
             .expect("home env lock should not poison");
@@ -1027,6 +1094,7 @@ mod tests {
         let home_dir = temp.path().join("home");
         let install_dir = home_dir.join("Applications").join("Aegis.app");
         let installed_host = bundled_host_library(&install_dir, NativePlatform::Macos);
+        let workspace_host = workspace_host_library(&repo_root, NativePlatform::Macos);
 
         fs::create_dir_all(
             installed_host
@@ -1036,13 +1104,20 @@ mod tests {
         .expect("bundle framework dir should be created");
         fs::write(&installed_host, b"host").expect("bundled host should be created");
         fs::create_dir_all(&repo_root).expect("repo root should be created");
+        fs::create_dir_all(
+            workspace_host
+                .parent()
+                .expect("workspace host library should have a parent"),
+        )
+        .expect("workspace host dir should be created");
+        fs::write(&workspace_host, b"host").expect("workspace host should be created");
 
         unsafe {
             std::env::set_var("HOME", &home_dir);
         }
 
         let status = status(&repo_root);
-        assert_eq!(status.default_host_library, installed_host);
+        assert_eq!(status.default_host_library, workspace_host);
         assert!(status.default_host_library_present);
 
         unsafe {
@@ -1052,29 +1127,26 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn macos_status_does_not_fall_back_to_workspace_host_library() {
+    fn macos_status_falls_back_to_installed_host_library_when_workspace_missing() {
         let _guard = home_env_lock()
             .lock()
             .expect("home env lock should not poison");
         let temp = tempfile::tempdir().expect("temporary dir should be created");
         let repo_root = temp.path().join("repo");
         let home_dir = temp.path().join("home");
-        let expected_host = home_dir
-            .join("Applications")
-            .join("Aegis.app")
-            .join("Contents")
-            .join("Frameworks")
-            .join("libaegis_host.dylib");
+        let install_dir = home_dir.join("Applications").join("Aegis.app");
+        let expected_host = bundled_host_library(&install_dir, NativePlatform::Macos);
         let workspace_host = workspace_host_library(&repo_root, NativePlatform::Macos);
 
-        fs::create_dir_all(
-            workspace_host
-                .parent()
-                .expect("workspace host library should have a parent"),
-        )
-        .expect("workspace host dir should be created");
-        fs::write(&workspace_host, b"host").expect("workspace host should be created");
         fs::create_dir_all(&repo_root).expect("repo root should be created");
+        fs::create_dir_all(
+            expected_host
+                .parent()
+                .expect("installed host library should have a parent"),
+        )
+        .expect("installed host dir should be created");
+        fs::write(&expected_host, b"host").expect("installed host should be created");
+        assert!(!workspace_host.exists());
 
         unsafe {
             std::env::set_var("HOME", &home_dir);
@@ -1082,7 +1154,7 @@ mod tests {
 
         let status = status(&repo_root);
         assert_eq!(status.default_host_library, expected_host);
-        assert!(!status.default_host_library_present);
+        assert!(status.default_host_library_present);
 
         unsafe {
             std::env::remove_var("HOME");

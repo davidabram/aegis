@@ -41,7 +41,7 @@ Global flags:
 
 - `--mode headless|headful`
 - `--start-url <url>`
-- `--host-lib <path>` overrides the resolved native host library; macOS defaults to the canonical installed app bundle
+- `--host-lib <path>` overrides the resolved native host library; `serve` defaults to the workspace release runtime and refreshes it when sources are newer
 - `--profile <name>`
 
 Production state model:
@@ -483,7 +483,7 @@ For robust control, use this sequence:
 
 ## Constraints
 
-- on macOS, `serve` defaults to the canonical installed app bundle host library; use `--host-lib` for an explicit override
+- `serve` defaults to the workspace release host library and refreshes the workspace runtime when sources are newer; use `--host-lib` for an explicit override
 - the canonical local command path uses the installed bundled CLI, not an on-demand rebuild
 - native builds require the platform CEF SDK under `third_party/cef/...`
 - the published GitHub repo intentionally excludes the vendored CEF binary payload

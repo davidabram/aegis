@@ -100,7 +100,7 @@ Global runtime flags:
 
 - `--mode headless|headful`
 - `--start-url <url>`
-- `--host-lib <path>` overrides the resolved native host library; macOS defaults to the canonical installed app bundle
+- `--host-lib <path>` overrides the resolved native host library; `serve` defaults to the workspace release runtime and refreshes it when sources are newer
 - `--profile <name>`
 
 Built-in CLI guidance:
