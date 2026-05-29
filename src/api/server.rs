@@ -104,6 +104,8 @@ pub struct ContextSummary {
     pub host_library: PathBuf,
     pub browser: BrowserConfig,
     pub profile: SessionProfileInfo,
+    pub runtime_state: String,
+    pub command_ready: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -112,6 +114,8 @@ pub struct CreateContextBody {
     pub id: Option<String>,
     #[serde(default)]
     pub profile: Option<String>,
+    #[serde(default)]
+    pub seed_from_context: Option<String>,
     #[serde(default)]
     pub mode: Option<crate::browser::BrowserMode>,
     #[serde(default)]
@@ -153,6 +157,7 @@ enum ApiCommand {
     SnapshotDom(oneshot::Sender<Result<DomSnapshot, AegisError>>),
     Events(u64, oneshot::Sender<Result<EventReadWindow, AegisError>>),
     EnableTrace(PathBuf, oneshot::Sender<Result<(), AegisError>>),
+    Shutdown(oneshot::Sender<Result<(), AegisError>>),
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -307,6 +312,7 @@ fn spawn_context_state(
     };
     let (startup_tx, startup_rx) = mpsc::channel::<Result<ServeStartupMetrics, AegisError>>();
     let state_for_thread = state.clone();
+    let shutdown_state = state_for_thread.clone();
     thread::spawn(move || {
         let client_connect_started = std::time::Instant::now();
         let mut client = match LoadedAegisClient::connect(
@@ -649,6 +655,12 @@ fn spawn_context_state(
                         );
                         let _ = reply.send(Ok(()));
                     }
+                    ApiCommand::Shutdown(reply) => {
+                        request_runtime_cancel(&shutdown_state);
+                        mark_operation_cancel_requested(&diagnostics);
+                        let _ = reply.send(Ok(()));
+                        break;
+                    }
                 },
                 Err(mpsc::RecvTimeoutError::Timeout) => match client.pump() {
                     Ok(()) => record_heartbeat(&diagnostics, &client),
@@ -937,6 +949,23 @@ fn origin_key(url: &str) -> String {
     trimmed.to_string()
 }
 
+fn validate_context_name(name: &str) -> Result<(), ApiError> {
+    if name.trim().is_empty() {
+        return Err(ApiError::from(AegisError::Bridge(
+            "context id must not be empty".into(),
+        )));
+    }
+    if !name
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+    {
+        return Err(ApiError::from(AegisError::Bridge(format!(
+            "context id {name:?} must use only letters, numbers, '.', '-', or '_'"
+        ))));
+    }
+    Ok(())
+}
+
 impl ServeRootState {
     fn default_context_state(&self) -> Option<ApiState> {
         self.context_state(&self.default_context_id)
@@ -970,12 +999,20 @@ impl ServeRootState {
         })?;
         let mut items = contexts
             .iter()
-            .map(|(id, state)| ContextSummary {
-                id: id.clone(),
-                default: id == &self.default_context_id,
-                host_library: state.host_library.clone(),
-                browser: state.browser.clone(),
-                profile: state.profile.clone(),
+            .map(|(id, state)| {
+                let diagnostics = read_diagnostics(&state.diagnostics);
+                ContextSummary {
+                    id: id.clone(),
+                    default: id == &self.default_context_id,
+                    host_library: state.host_library.clone(),
+                    browser: state.browser.clone(),
+                    profile: state.profile.clone(),
+                    runtime_state: serde_json::to_value(&diagnostics.state)
+                        .ok()
+                        .and_then(|value| value.as_str().map(ToOwned::to_owned))
+                        .unwrap_or_else(|| "unknown".into()),
+                    command_ready: diagnostics.command_ready,
+                }
             })
             .collect::<Vec<_>>();
         items.sort_by(|left, right| left.id.cmp(&right.id));
@@ -1050,6 +1087,51 @@ fn require_default_context_state(root: &ServeRootState) -> Result<ApiState, ApiE
 fn require_context_state(root: &ServeRootState, context_id: &str) -> Result<ApiState, ApiError> {
     root.context_state(context_id)
         .ok_or_else(|| ApiError::not_found(format!("context `{context_id}` was not found")))
+}
+
+async fn shutdown_context(context_id: &str, state: &ApiState) -> Result<(), ApiError> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    state
+        .tx
+        .send(ApiCommand::Shutdown(reply_tx))
+        .map_err(channel_error)?;
+    match timeout(COMMAND_TIMEOUT, reply_rx).await {
+        Ok(Ok(Ok(()))) => Ok(()),
+        Ok(Ok(Err(error))) => Err(ApiError::from(error)),
+        Ok(Err(error)) => Err(reply_error(error)),
+        Err(_) => Err(ApiError::timeout(&format!("shutdown_context:{context_id}"))),
+    }
+}
+
+async fn snapshot_context_session_state(state: &ApiState) -> Result<SessionState, ApiError> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    state
+        .tx
+        .send(ApiCommand::SnapshotSession(reply_tx))
+        .map_err(channel_error)?;
+    match timeout(COMMAND_TIMEOUT, reply_rx).await {
+        Ok(Ok(Ok(session))) => Ok(session),
+        Ok(Ok(Err(error))) => Err(ApiError::from(error)),
+        Ok(Err(error)) => Err(reply_error(error)),
+        Err(_) => Err(ApiError::timeout("snapshot_context_session_state")),
+    }
+}
+
+async fn inject_context_session_state(
+    state: &ApiState,
+    session: SessionState,
+) -> Result<(), ApiError> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    state
+        .tx
+        .send(ApiCommand::InjectSession(session, reply_tx))
+        .map_err(channel_error)?;
+    match timeout(COMMAND_TIMEOUT, reply_rx).await {
+        Ok(Ok(Ok(()))) => Ok(()),
+        Ok(Ok(Err(error))) => Err(ApiError::from(error)),
+        Ok(Err(error)) => Err(reply_error(error)),
+        Err(_) => Err(ApiError::timeout("inject_context_session_state")),
+    }
 }
 
 async fn health(State(root): State<ServeRootState>) -> Result<Json<HealthResponse>, ApiError> {
@@ -1453,33 +1535,54 @@ async fn create_context(
     State(root): State<ServeRootState>,
     Json(body): Json<CreateContextBody>,
 ) -> Result<(StatusCode, Json<ContextSummary>), ApiError> {
+    let CreateContextBody {
+        id,
+        profile,
+        seed_from_context,
+        mode,
+        start_url,
+    } = body;
     let existing = root.list_contexts()?;
     let next_index = existing.len() + 1;
-    let context_id = body
-        .id
+    let context_id = id
         .clone()
-        .or_else(|| body.profile.clone())
+        .or_else(|| profile.clone())
         .unwrap_or_else(|| format!("context-{next_index}"));
+    validate_context_name(&context_id)?;
     if root.context_state(&context_id).is_some() {
         return Err(ApiError::from(AegisError::Bridge(format!(
             "context `{context_id}` already exists"
         ))));
     }
-    let profile = body.profile.unwrap_or_else(|| context_id.clone());
+    let profile = profile.unwrap_or_else(|| context_id.clone());
     let mut browser = root.browser.clone();
-    if let Some(mode) = body.mode {
+    if let Some(mode) = mode {
         browser.mode = mode;
     }
-    if body.start_url.is_some() {
-        browser.start_url = body.start_url;
+    if start_url.is_some() {
+        browser.start_url = start_url;
     }
     let state = spawn_context_state(root.host_library.clone(), browser, profile)?;
+    if let Some(source_context_id) = seed_from_context.as_deref() {
+        let source_state = require_context_state(&root, source_context_id)?;
+        let session = snapshot_context_session_state(&source_state).await?;
+        if let Err(error) = inject_context_session_state(&state, session).await {
+            let _ = shutdown_context(&context_id, &state).await;
+            return Err(error);
+        }
+    }
+    let diagnostics = read_diagnostics(&state.diagnostics);
     let summary = ContextSummary {
         id: context_id.clone(),
         default: false,
         host_library: state.host_library.clone(),
         browser: state.browser.clone(),
         profile: state.profile.clone(),
+        runtime_state: serde_json::to_value(&diagnostics.state)
+            .ok()
+            .and_then(|value| value.as_str().map(ToOwned::to_owned))
+            .unwrap_or_else(|| "unknown".into()),
+        command_ready: diagnostics.command_ready,
     };
     root.insert_context(context_id, state)?;
     Ok((StatusCode::CREATED, Json(summary)))
@@ -1495,7 +1598,10 @@ async fn delete_context(
         )));
     }
     match root.remove_context(&context_id)? {
-        Some(_) => Ok(StatusCode::NO_CONTENT),
+        Some(state) => {
+            shutdown_context(&context_id, &state).await?;
+            Ok(StatusCode::NO_CONTENT)
+        }
         None => Err(ApiError::not_found(format!(
             "context `{context_id}` was not found"
         ))),
@@ -1995,6 +2101,7 @@ fn channel_error(error: mpsc::SendError<ApiCommand>) -> ApiError {
     ApiError::from(AegisError::Bridge(error.to_string()))
 }
 
+#[derive(Debug)]
 struct ApiError {
     status: StatusCode,
     body: ApiErrorBody,
@@ -2500,4 +2607,60 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dummy_api_state(profile: &str) -> ApiState {
+        let (tx, _rx) = mpsc::channel();
+        ApiState {
+            tx,
+            cancel: Arc::new(Mutex::new(None)),
+            host_library: PathBuf::from("/tmp/aegis_host.dylib"),
+            browser: BrowserConfig::default(),
+            startup: Arc::new(Mutex::new(ServeStartupMetrics {
+                client_connect_ms: 0,
+                api_bind_ms: 0,
+                total_ready_ms: 0,
+            })),
+            profile: SessionProfileInfo {
+                profile: profile.into(),
+                path: PathBuf::from(format!("/tmp/{profile}.json")),
+            },
+            diagnostics: Arc::new(Mutex::new(ServeDiagnostics::new(default_runtime_status()))),
+        }
+    }
+
+    #[test]
+    fn validate_context_name_rejects_invalid_characters() {
+        assert!(validate_context_name("guest-1").is_ok());
+        assert!(validate_context_name("guest/admin").is_err());
+        assert!(validate_context_name("").is_err());
+    }
+
+    #[test]
+    fn list_contexts_sorts_and_marks_default() {
+        let root = ServeRootState {
+            host_library: PathBuf::from("/tmp/aegis_host.dylib"),
+            browser: BrowserConfig::default(),
+            default_context_id: "default".into(),
+            contexts: Arc::new(Mutex::new(HashMap::from([
+                ("guest".into(), dummy_api_state("guest")),
+                ("default".into(), dummy_api_state("default")),
+            ]))),
+        };
+
+        let contexts = root
+            .list_contexts()
+            .unwrap_or_else(|error| panic!("contexts should list: {error:?}"));
+        assert_eq!(contexts.len(), 2);
+        assert_eq!(contexts[0].id, "default");
+        assert!(contexts[0].default);
+        assert_eq!(contexts[0].runtime_state, "starting");
+        assert!(!contexts[0].command_ready);
+        assert_eq!(contexts[1].id, "guest");
+        assert!(!contexts[1].default);
+    }
 }
