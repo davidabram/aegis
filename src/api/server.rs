@@ -876,7 +876,21 @@ pub fn serve_main_thread(
     match bind_rx.recv() {
         Ok(Ok(())) => {}
         Ok(Err(error)) => return Err(error),
-        Err(error) => return Err(AegisError::Bridge(error.to_string())),
+        Err(_) => {
+            return match server_thread.join() {
+                Ok(()) => match server_exit_rx.try_recv() {
+                    Ok(result) => result,
+                    Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => {
+                        Err(AegisError::Bridge(
+                            "serve HTTP bootstrap exited before signaling readiness".into(),
+                        ))
+                    }
+                },
+                Err(_) => Err(AegisError::Bridge(
+                    "serve HTTP server thread panicked before signaling readiness".into(),
+                )),
+            };
+        }
     }
 
     let result = run_main_thread_serve_loop(&root, &mut runtimes, manager_rx, &server_exit_rx);
@@ -1303,6 +1317,14 @@ struct ApiRouteDoc {
 }
 
 #[derive(Debug, Serialize)]
+struct ApiCapabilityStatusDoc {
+    name: &'static str,
+    supported: bool,
+    runtime_validated: bool,
+    details: &'static str,
+}
+
+#[derive(Debug, Serialize)]
 struct ApiSchemaFieldDoc {
     name: &'static str,
     kind: &'static str,
@@ -1326,10 +1348,20 @@ struct ApiManifest {
     discovery: &'static str,
     routes: Vec<ApiRouteDoc>,
     capabilities: Vec<&'static str>,
+    capability_status: Vec<ApiCapabilityStatusDoc>,
     commands: Vec<ApiCommandDoc>,
 }
 
-async fn api_manifest() -> Json<ApiManifest> {
+async fn api_manifest(State(root): State<ServeRootState>) -> Json<ApiManifest> {
+    let runtime_validated = root
+        .default_context_state()
+        .map(|state| {
+            let diagnostics = read_diagnostics(&state.diagnostics);
+            diagnostics.command_ready
+                && diagnostics.bridge_healthy
+                && diagnostics.browser_backend_healthy
+        })
+        .unwrap_or(false);
     Json(ApiManifest {
         service: "aegis",
         version: env!("CARGO_PKG_VERSION"),
@@ -1531,6 +1563,56 @@ async fn api_manifest() -> Json<ApiManifest> {
             "named_multi_context_control_plane",
             "session_snapshotting",
             "trace_recording",
+        ],
+        capability_status: vec![
+            ApiCapabilityStatusDoc {
+                name: "semantic_dom_snapshot",
+                supported: true,
+                runtime_validated,
+                details: "DOM snapshots are execute-grade when the active runtime is command-ready.",
+            },
+            ApiCapabilityStatusDoc {
+                name: "event_stream",
+                supported: true,
+                runtime_validated,
+                details: "Buffered and live events are validated against the active runtime readiness state.",
+            },
+            ApiCapabilityStatusDoc {
+                name: "network_event_capture",
+                supported: true,
+                runtime_validated,
+                details: "Network capture depends on the active runtime being command-ready.",
+            },
+            ApiCapabilityStatusDoc {
+                name: "first_class_file_upload",
+                supported: true,
+                runtime_validated,
+                details: "File upload is validated against the active runtime and supports hidden file inputs.",
+            },
+            ApiCapabilityStatusDoc {
+                name: "media_diagnostics",
+                supported: true,
+                runtime_validated,
+                details: "Media diagnostics are available when the browser runtime is attached and command-ready.",
+            },
+            ApiCapabilityStatusDoc {
+                name: "named_multi_context_control_plane",
+                supported: true,
+                runtime_validated,
+                details: "Named contexts are available when the default runtime is healthy.",
+            },
+            ApiCapabilityStatusDoc {
+                name: "session_snapshotting",
+                supported: true,
+                runtime_validated,
+                details: "Session snapshot and restore are validated against the active runtime surface.",
+            },
+            ApiCapabilityStatusDoc {
+                name: "trace_recording",
+                supported: true,
+                runtime_validated,
+                details: "Trace recording is available when the runtime reaches command-ready state.",
+            },
         ],
         commands: vec![
             ApiCommandDoc {

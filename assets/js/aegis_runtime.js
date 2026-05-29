@@ -780,7 +780,13 @@
   }
 
   function isTargetableForAction(descriptor, action) {
-    if (!descriptor.semantic.visible || descriptor.semantic.disabled) {
+    if (descriptor.semantic.disabled) {
+      return false;
+    }
+    if (action === "set_files") {
+      return descriptor.tag === "input" && descriptor.semantic.control_type === "file";
+    }
+    if (!descriptor.semantic.visible) {
       return false;
     }
     if (action === "click") {
@@ -1039,6 +1045,9 @@
 
   function resolveActionTarget(el, action) {
     if (action === "type" && el instanceof HTMLLabelElement && el.control) {
+      return el.control;
+    }
+    if (action === "set_files" && el instanceof HTMLLabelElement && el.control) {
       return el.control;
     }
     return el;
@@ -1380,16 +1389,18 @@
 
   function setFiles(target, files) {
     const before = currentPageState();
-    const resolved = resolveTarget(target, "type");
-    const el = resolveActionTarget(resolved.node, "type");
+    const resolved = resolveTarget(target, "set_files");
+    const el = resolveActionTarget(resolved.node, "set_files");
     if (!(el instanceof HTMLInputElement) || (el.getAttribute("type") || "").toLowerCase() !== "file") {
       throw new Error(`node ${resolved.targetId} is not a file input`);
     }
     if (typeof DataTransfer !== "function") {
       throw new Error("DataTransfer is not available in this runtime");
     }
-    scrollIntoViewIfNeeded(el);
-    focusIfPossible(el);
+    if (isElementVisible(el)) {
+      scrollIntoViewIfNeeded(el);
+      focusIfPossible(el);
+    }
     const dataTransfer = new DataTransfer();
     for (const file of Array.isArray(files) ? files : []) {
       const bytes = decodeBase64(file.base64);

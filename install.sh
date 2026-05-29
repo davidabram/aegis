@@ -7,7 +7,8 @@ fi
 
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PLATFORM="$(uname -s)"
-RELEASE_BIN="$REPO_ROOT/target/release/aegis"
+HOST_TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
+RELEASE_BIN=""
 LAUNCHER_DIR=""
 LAUNCHER_PATH=""
 INSTALLED_APP_DIR=""
@@ -73,6 +74,21 @@ trap on_error ERR
 
 require_command() {
   command -v "$1" >/dev/null 2>&1 || fail "Missing required command: $1"
+}
+
+resolve_release_bin() {
+  local -a candidates=(
+    "$REPO_ROOT/target/release/aegis"
+    "$REPO_ROOT/target/$HOST_TRIPLE/release/aegis"
+  )
+  local candidate
+  for candidate in "${candidates[@]}"; do
+    if [[ -x "$candidate" ]]; then
+      RELEASE_BIN="$candidate"
+      return 0
+    fi
+  done
+  return 1
 }
 
 run_step() {
@@ -268,8 +284,8 @@ LAUNCHER_PATH="$LAUNCHER_DIR/aegis"
 log_section "Build"
 run_step "building release Rust binary" cargo build --release
 
-if [[ ! -x "$RELEASE_BIN" ]]; then
-  fail "Expected release binary at $RELEASE_BIN after build, but it was not found."
+if ! resolve_release_bin; then
+  fail "Expected release binary at $REPO_ROOT/target/release/aegis or $REPO_ROOT/target/$HOST_TRIPLE/release/aegis after build, but it was not found."
 fi
 
 log_section "Install"
