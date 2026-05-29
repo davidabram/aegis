@@ -50,6 +50,8 @@ pub struct MediaDiagnostics {
     pub node_id: Option<u64>,
     pub tag: String,
     pub current_src: Option<String>,
+    #[serde(default)]
+    pub source_codec_support: MediaCodecSupport,
     pub ready_state: Option<u8>,
     pub network_state: Option<u8>,
     pub duration: Option<f64>,
@@ -69,12 +71,51 @@ pub struct MediaDiagnostics {
     pub pause_calls: Option<u64>,
     pub load_calls: Option<u64>,
     pub loaded_metadata_count: Option<u64>,
+    pub metadata_parse_attempted: Option<bool>,
     pub stalled_count: Option<u64>,
     pub last_event: Option<String>,
     #[serde(default)]
     pub recent_events: Vec<String>,
+    #[serde(default)]
+    pub event_timeline: Vec<MediaEventSnapshot>,
+    pub resource_timing: Option<MediaResourceTiming>,
     pub error: Option<String>,
+    pub error_code: Option<u8>,
+    pub error_message: Option<String>,
+    pub likely_failure_cause: Option<String>,
     pub last_play_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MediaCodecSupport {
+    pub audio_mp4: Option<String>,
+    pub audio_mp4_aac_lc: Option<String>,
+    pub audio_aac: Option<String>,
+    pub audio_mpeg: Option<String>,
+    pub audio_ogg_opus: Option<String>,
+    pub audio_wav_pcm: Option<String>,
+    pub video_mp4_h264_aac: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MediaEventSnapshot {
+    pub event: String,
+    pub at_ms: Option<u64>,
+    pub ready_state: Option<u8>,
+    pub network_state: Option<u8>,
+    pub paused: Option<bool>,
+    pub current_time: Option<f64>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MediaResourceTiming {
+    pub initiator_type: Option<String>,
+    pub transfer_size: Option<u64>,
+    pub encoded_body_size: Option<u64>,
+    pub decoded_body_size: Option<u64>,
+    pub duration_ms: Option<f64>,
+    pub response_end_ms: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

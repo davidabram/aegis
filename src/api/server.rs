@@ -44,6 +44,7 @@ const DEFAULT_EVENT_STREAM_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const MIN_EVENT_STREAM_POLL_INTERVAL_MS: u64 = 25;
 const MAX_EVENT_STREAM_POLL_INTERVAL_MS: u64 = 1_000;
 static TELEMETRY_START: OnceLock<Instant> = OnceLock::new();
+static PROCESS_STARTED_AT_MS: OnceLock<u64> = OnceLock::new();
 
 #[derive(Clone)]
 pub struct ApiState {
@@ -1307,6 +1308,7 @@ struct RuntimeInfo {
     diagnostics: RuntimeDiagnosticsResponse,
     startup: ServeStartupMetrics,
     profile: SessionProfileInfo,
+    runtime_identity: RuntimeIdentity,
 }
 
 #[derive(Debug, Serialize)]
@@ -1320,8 +1322,18 @@ struct ApiRouteDoc {
 struct ApiCapabilityStatusDoc {
     name: &'static str,
     supported: bool,
+    status: &'static str,
     runtime_validated: bool,
+    validated_by: &'static str,
     details: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct RuntimeIdentity {
+    process_id: u32,
+    executable_path: Option<PathBuf>,
+    started_at_ms: u64,
+    uptime_ms: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -1346,6 +1358,7 @@ struct ApiManifest {
     version: &'static str,
     protocol_version: u16,
     discovery: &'static str,
+    runtime_identity: RuntimeIdentity,
     routes: Vec<ApiRouteDoc>,
     capabilities: Vec<&'static str>,
     capability_status: Vec<ApiCapabilityStatusDoc>,
@@ -1367,6 +1380,7 @@ async fn api_manifest(State(root): State<ServeRootState>) -> Json<ApiManifest> {
         version: env!("CARGO_PKG_VERSION"),
         protocol_version: PROTOCOL_VERSION,
         discovery: "/manifest",
+        runtime_identity: runtime_identity(),
         routes: vec![
             ApiRouteDoc {
                 method: "GET",
@@ -1560,6 +1574,7 @@ async fn api_manifest(State(root): State<ServeRootState>) -> Json<ApiManifest> {
             "network_event_capture",
             "first_class_file_upload",
             "media_diagnostics",
+            "embedded_audio_playback",
             "named_multi_context_control_plane",
             "session_snapshotting",
             "trace_recording",
@@ -1568,49 +1583,105 @@ async fn api_manifest(State(root): State<ServeRootState>) -> Json<ApiManifest> {
             ApiCapabilityStatusDoc {
                 name: "semantic_dom_snapshot",
                 supported: true,
+                status: if runtime_validated {
+                    "validated"
+                } else {
+                    "supported"
+                },
                 runtime_validated,
+                validated_by: "/readyz + /dom",
                 details: "DOM snapshots are execute-grade when the active runtime is command-ready.",
             },
             ApiCapabilityStatusDoc {
                 name: "event_stream",
                 supported: true,
+                status: if runtime_validated {
+                    "validated"
+                } else {
+                    "supported"
+                },
                 runtime_validated,
+                validated_by: "/readyz + /events",
                 details: "Buffered and live events are validated against the active runtime readiness state.",
             },
             ApiCapabilityStatusDoc {
                 name: "network_event_capture",
                 supported: true,
+                status: if runtime_validated {
+                    "validated"
+                } else {
+                    "supported"
+                },
                 runtime_validated,
+                validated_by: "/readyz + /events",
                 details: "Network capture depends on the active runtime being command-ready.",
             },
             ApiCapabilityStatusDoc {
                 name: "first_class_file_upload",
                 supported: true,
+                status: if runtime_validated {
+                    "validated"
+                } else {
+                    "supported"
+                },
                 runtime_validated,
+                validated_by: "/readyz + /execute(set_files)",
                 details: "File upload is validated against the active runtime and supports hidden file inputs.",
             },
             ApiCapabilityStatusDoc {
                 name: "media_diagnostics",
                 supported: true,
+                status: if runtime_validated {
+                    "validated"
+                } else {
+                    "supported"
+                },
                 runtime_validated,
-                details: "Media diagnostics are available when the browser runtime is attached and command-ready.",
+                validated_by: "/readyz + /execute(media_state)",
+                details: "Media diagnostics are validated when the browser runtime is attached and command-ready. This does not imply codec-complete playback support.",
+            },
+            ApiCapabilityStatusDoc {
+                name: "embedded_audio_playback",
+                supported: true,
+                status: "experimental",
+                runtime_validated: false,
+                validated_by: "per-page media_state codec probe",
+                details: "Actual audio playback depends on the embedded browser build, codecs, and response semantics. Inspect media_state.source_codec_support and likely_failure_cause before treating playback as production-ready.",
             },
             ApiCapabilityStatusDoc {
                 name: "named_multi_context_control_plane",
                 supported: true,
+                status: if runtime_validated {
+                    "validated"
+                } else {
+                    "supported"
+                },
                 runtime_validated,
+                validated_by: "/contexts + /contexts/{context_id}/readyz",
                 details: "Named contexts are available when the default runtime is healthy.",
             },
             ApiCapabilityStatusDoc {
                 name: "session_snapshotting",
                 supported: true,
+                status: if runtime_validated {
+                    "validated"
+                } else {
+                    "supported"
+                },
                 runtime_validated,
+                validated_by: "/session + /session/save + /session/load",
                 details: "Session snapshot and restore are validated against the active runtime surface.",
             },
             ApiCapabilityStatusDoc {
                 name: "trace_recording",
                 supported: true,
+                status: if runtime_validated {
+                    "validated"
+                } else {
+                    "supported"
+                },
                 runtime_validated,
+                validated_by: "/trace/enable",
                 details: "Trace recording is available when the runtime reaches command-ready state.",
             },
         ],
@@ -1717,12 +1788,14 @@ async fn api_manifest(State(root): State<ServeRootState>) -> Json<ApiManifest> {
 struct ApiVersion {
     version: &'static str,
     protocol_version: u16,
+    runtime_identity: RuntimeIdentity,
 }
 
 async fn api_version() -> Json<ApiVersion> {
     Json(ApiVersion {
         version: env!("CARGO_PKG_VERSION"),
         protocol_version: PROTOCOL_VERSION,
+        runtime_identity: runtime_identity(),
     })
 }
 
@@ -1851,6 +1924,7 @@ async fn runtime_info(State(root): State<ServeRootState>) -> Result<Json<Runtime
         browser: state.browser.clone(),
         diagnostics: read_diagnostics(&state.diagnostics),
         profile: state.profile.clone(),
+        runtime_identity: runtime_identity(),
         startup: state
             .startup
             .lock()
@@ -2077,6 +2151,7 @@ async fn context_runtime_info(
         browser: state.browser.clone(),
         diagnostics: read_diagnostics(&state.diagnostics),
         profile: state.profile.clone(),
+        runtime_identity: runtime_identity(),
         startup: state
             .startup
             .lock()
@@ -2931,6 +3006,20 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+fn process_started_at_ms() -> u64 {
+    *PROCESS_STARTED_AT_MS.get_or_init(now_ms)
+}
+
+fn runtime_identity() -> RuntimeIdentity {
+    let started_at_ms = process_started_at_ms();
+    RuntimeIdentity {
+        process_id: std::process::id(),
+        executable_path: std::env::current_exe().ok(),
+        started_at_ms,
+        uptime_ms: now_ms().saturating_sub(started_at_ms),
+    }
 }
 
 #[cfg(test)]

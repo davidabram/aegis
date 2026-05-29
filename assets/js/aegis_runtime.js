@@ -132,6 +132,87 @@
     }
   }
 
+  function codecProbeNode(tagName) {
+    try {
+      return document.createElement(tagName);
+    } catch (_error) {
+      return null;
+    }
+  }
+
+  function canPlayTypeSafe(node, mimeType) {
+    if (!node || typeof node.canPlayType !== "function") {
+      return null;
+    }
+    try {
+      const result = node.canPlayType(mimeType);
+      return typeof result === "string" ? result : null;
+    } catch (_error) {
+      return null;
+    }
+  }
+
+  function mediaCodecSupport() {
+    const audio = codecProbeNode("audio");
+    const video = codecProbeNode("video");
+    return {
+      audio_mp4: canPlayTypeSafe(audio, "audio/mp4"),
+      audio_mp4_aac_lc: canPlayTypeSafe(audio, 'audio/mp4; codecs="mp4a.40.2"'),
+      audio_aac: canPlayTypeSafe(audio, "audio/aac"),
+      audio_mpeg: canPlayTypeSafe(audio, "audio/mpeg"),
+      audio_ogg_opus: canPlayTypeSafe(audio, 'audio/ogg; codecs="opus"'),
+      audio_wav_pcm: canPlayTypeSafe(audio, 'audio/wav; codecs="1"'),
+      video_mp4_h264_aac: canPlayTypeSafe(video, 'video/mp4; codecs="avc1.42E01E, mp4a.40.2"')
+    };
+  }
+
+  function mediaResourceTiming(url) {
+    if (!url || !performance || typeof performance.getEntriesByName !== "function") {
+      return null;
+    }
+    const entries = performance.getEntriesByName(url);
+    if (!Array.isArray(entries) || entries.length === 0) {
+      return null;
+    }
+    const entry = entries[entries.length - 1];
+    return {
+      initiator_type: entry.initiatorType || null,
+      transfer_size: Number.isFinite(entry.transferSize) ? entry.transferSize : null,
+      encoded_body_size: Number.isFinite(entry.encodedBodySize) ? entry.encodedBodySize : null,
+      decoded_body_size: Number.isFinite(entry.decodedBodySize) ? entry.decodedBodySize : null,
+      duration_ms: Number.isFinite(entry.duration) ? entry.duration : null,
+      response_end_ms: Number.isFinite(entry.responseEnd) ? entry.responseEnd : null
+    };
+  }
+
+  function mediaLikelyFailure(node, state, error, codecSupport, resourceTiming) {
+    if (state && state.last_play_error && /user didn't interact|user gesture|gesture/i.test(state.last_play_error)) {
+      return "autoplay_policy_blocked";
+    }
+    if (error && error.code === 4) {
+      const currentSrc = String(node.currentSrc || node.src || "").toLowerCase();
+      const looksLikeAacMp4 = currentSrc.includes(".m4a") ||
+        currentSrc.includes(".mp4") ||
+        currentSrc.includes("audio/mp4") ||
+        currentSrc.includes("mp4a") ||
+        (node instanceof HTMLAudioElement && state && state.metadata_parse_attempted && !state.loaded_metadata_count);
+      if (looksLikeAacMp4 && codecSupport && codecSupport.audio_mp4_aac_lc === "") {
+        return "embedded_runtime_missing_aac_mp4_decoder";
+      }
+      if (resourceTiming && resourceTiming.transfer_size === 0 && resourceTiming.encoded_body_size === 0) {
+        return "media_resource_timing_unavailable_or_empty";
+      }
+      return "media_format_or_decoder_rejection";
+    }
+    if (error && error.code === 2) {
+      return "media_network_failure";
+    }
+    if (error && error.code === 3) {
+      return "media_decode_failure";
+    }
+    return null;
+  }
+
   function mediaState(node) {
     if (!node || !(node instanceof HTMLMediaElement)) {
       return null;
@@ -148,6 +229,8 @@
         stalled_count: 0,
         last_event: null,
         recent_events: [],
+        event_timeline: [],
+        metadata_parse_attempted: false,
         last_play_error: null
       };
       mediaStateByNode.set(node, state);
@@ -161,14 +244,29 @@
       return;
     }
     state.last_event = eventName;
-    const entry = `${eventName}@${Date.now()}`;
+    const atMs = Date.now();
+    const entry = `${eventName}@${atMs}`;
     state.recent_events.push(entry);
     trimArray(state.recent_events, 12);
+    state.event_timeline.push({
+      event: eventName,
+      at_ms: atMs,
+      ready_state: Number.isFinite(node.readyState) ? node.readyState : null,
+      network_state: Number.isFinite(node.networkState) ? node.networkState : null,
+      paused: !!node.paused,
+      current_time: Number.isFinite(node.currentTime) ? node.currentTime : null,
+      error: details && details.error ? details.error : null
+    });
+    trimArray(state.event_timeline, 32);
     if (eventName === "loadedmetadata") {
       state.loaded_metadata_count += 1;
+      state.metadata_parse_attempted = true;
     }
     if (eventName === "stalled") {
       state.stalled_count += 1;
+    }
+    if (eventName === "loadstart" || eventName === "loadeddata" || eventName === "canplay") {
+      state.metadata_parse_attempted = true;
     }
     if (eventName === "play_rejected" && details && details.error) {
       state.last_play_error = String(details.error);
@@ -277,6 +375,7 @@
     const state = mediaState(node);
     if (state && node.readyState >= 1) {
       state.loaded_metadata_count = Math.max(state.loaded_metadata_count, 1);
+      state.metadata_parse_attempted = true;
       if (!state.last_event) {
         state.last_event = "metadata_available";
       }
@@ -329,14 +428,23 @@
   function mediaDiagnostics() {
     patchMediaPrototype();
     instrumentMediaTree(document);
+    const codecSupport = mediaCodecSupport();
     return Array.from(document.querySelectorAll("video, audio")).map((node, index) => {
       const state = mediaState(node) || {};
+      const errorCode = node.error && Number.isFinite(node.error.code) ? node.error.code : null;
+      const errorMessage = node.error && node.error.message ? String(node.error.message) : null;
       const error = node.error ? `${node.error.code || "media_error"}${node.error.message ? `: ${node.error.message}` : ""}` : null;
+      const resourceTiming = mediaResourceTiming(node.currentSrc || node.src || null);
+      const likelyFailure = mediaLikelyFailure(node, state, {
+        code: errorCode,
+        message: errorMessage
+      }, codecSupport, resourceTiming);
       return {
         index,
         node_id: assignId(node),
         tag: node.tagName.toLowerCase(),
         current_src: node.currentSrc || node.src || null,
+        source_codec_support: codecSupport,
         ready_state: Number.isFinite(node.readyState) ? node.readyState : null,
         network_state: Number.isFinite(node.networkState) ? node.networkState : null,
         duration: Number.isFinite(node.duration) ? node.duration : null,
@@ -356,10 +464,16 @@
         pause_calls: state.pause_calls || 0,
         load_calls: state.load_calls || 0,
         loaded_metadata_count: state.loaded_metadata_count || 0,
+        metadata_parse_attempted: !!state.metadata_parse_attempted,
         stalled_count: state.stalled_count || 0,
         last_event: state.last_event || null,
         recent_events: Array.isArray(state.recent_events) ? state.recent_events.slice() : [],
+        event_timeline: Array.isArray(state.event_timeline) ? state.event_timeline.slice() : [],
+        resource_timing: resourceTiming,
         error,
+        error_code: errorCode,
+        error_message: errorMessage,
+        likely_failure_cause: likelyFailure,
         last_play_error: state.last_play_error || null
       };
     });
