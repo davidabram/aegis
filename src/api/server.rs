@@ -32,6 +32,7 @@ use crate::runtime::executor::{ExecutionReport, RuntimeStatus};
 use crate::session::cookies::SessionState;
 use crate::session::profile::{SessionProfileInfo, SessionProfileStore};
 use crate::transport::bridge::AegisError;
+use crate::transport::protocol::PROTOCOL_VERSION;
 
 const HEADLESS_IDLE_PUMP_INTERVAL: Duration = Duration::from_millis(10);
 const HEADFUL_IDLE_PUMP_INTERVAL: Duration = Duration::from_millis(2);
@@ -61,11 +62,18 @@ pub struct ServeStartupMetrics {
 
 #[derive(Debug, Serialize)]
 struct HealthResponse {
+    version: &'static str,
+    protocol_version: u16,
     control_plane_up: bool,
     runtime_state: RuntimeOperationalState,
     command_ready: bool,
     bridge_healthy: bool,
     browser_backend_healthy: bool,
+    browser_process_up: bool,
+    page_attached: bool,
+    renderer_attached: bool,
+    dom_snapshot_available: bool,
+    event_decoder_ok: bool,
     active_operation: Option<OperationSnapshot>,
     last_failure: Option<FailureSnapshot>,
 }
@@ -173,12 +181,18 @@ struct ServeDiagnostics {
 
 #[derive(Debug, Clone, Serialize)]
 struct RuntimeDiagnosticsResponse {
+    version: &'static str,
+    protocol_version: u16,
     state: RuntimeOperationalState,
     control_plane_up: bool,
     command_ready: bool,
     bridge_healthy: bool,
     browser_backend_healthy: bool,
+    browser_process_up: bool,
+    page_attached: bool,
+    renderer_attached: bool,
     dom_snapshot_available: bool,
+    event_decoder_ok: bool,
     active_operation: Option<OperationSnapshot>,
     last_failure: Option<FailureSnapshot>,
     total_operations: u64,
@@ -847,6 +861,7 @@ pub fn router(state: ApiState) -> Router {
     Router::new()
         .route("/", get(api_manifest))
         .route("/manifest", get(api_manifest))
+        .route("/version", get(api_version))
         .route("/healthz", get(health))
         .route("/readyz", get(readiness))
         .route("/doctor", get(doctor))
@@ -867,11 +882,18 @@ pub fn router(state: ApiState) -> Router {
 async fn health(State(state): State<ApiState>) -> Json<HealthResponse> {
     let diagnostics = read_diagnostics(&state.diagnostics);
     Json(HealthResponse {
+        version: env!("CARGO_PKG_VERSION"),
+        protocol_version: PROTOCOL_VERSION,
         control_plane_up: true,
         runtime_state: diagnostics.state.clone(),
         command_ready: diagnostics.command_ready,
         bridge_healthy: diagnostics.bridge_healthy,
         browser_backend_healthy: diagnostics.browser_backend_healthy,
+        browser_process_up: diagnostics.browser_process_up,
+        page_attached: diagnostics.page_attached,
+        renderer_attached: diagnostics.renderer_attached,
+        dom_snapshot_available: diagnostics.dom_snapshot_available,
+        event_decoder_ok: diagnostics.event_decoder_ok,
         active_operation: diagnostics.active_operation,
         last_failure: diagnostics.last_failure,
     })
@@ -894,18 +916,37 @@ struct ApiRouteDoc {
 }
 
 #[derive(Debug, Serialize)]
+struct ApiSchemaFieldDoc {
+    name: &'static str,
+    kind: &'static str,
+    required: bool,
+    description: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct ApiCommandDoc {
+    name: &'static str,
+    summary: &'static str,
+    targeting: &'static str,
+    fields: Vec<ApiSchemaFieldDoc>,
+}
+
+#[derive(Debug, Serialize)]
 struct ApiManifest {
     service: &'static str,
     version: &'static str,
+    protocol_version: u16,
     discovery: &'static str,
     routes: Vec<ApiRouteDoc>,
-    command_types: Vec<&'static str>,
+    capabilities: Vec<&'static str>,
+    commands: Vec<ApiCommandDoc>,
 }
 
 async fn api_manifest() -> Json<ApiManifest> {
     Json(ApiManifest {
         service: "aegis",
         version: env!("CARGO_PKG_VERSION"),
+        protocol_version: PROTOCOL_VERSION,
         discovery: "/manifest",
         routes: vec![
             ApiRouteDoc {
@@ -917,6 +958,11 @@ async fn api_manifest() -> Json<ApiManifest> {
                 method: "GET",
                 path: "/manifest",
                 summary: "JSON API discovery document",
+            },
+            ApiRouteDoc {
+                method: "GET",
+                path: "/version",
+                summary: "Version and protocol metadata",
             },
             ApiRouteDoc {
                 method: "GET",
@@ -951,7 +997,7 @@ async fn api_manifest() -> Json<ApiManifest> {
             ApiRouteDoc {
                 method: "POST",
                 path: "/execute",
-                summary: "Execute a command batch",
+                summary: "Execute a command batch including file upload and media diagnostics",
             },
             ApiRouteDoc {
                 method: "GET",
@@ -994,17 +1040,124 @@ async fn api_manifest() -> Json<ApiManifest> {
                 summary: "Enable trace recording",
             },
         ],
-        command_types: vec![
-            "click",
-            "hover",
-            "set_value",
-            "press_key",
-            "wait_for",
-            "scroll",
-            "drag",
-            "geometry",
-            "eval",
+        capabilities: vec![
+            "semantic_dom_snapshot",
+            "event_stream",
+            "network_event_capture",
+            "first_class_file_upload",
+            "media_diagnostics",
+            "session_snapshotting",
+            "trace_recording",
         ],
+        commands: vec![
+            ApiCommandDoc {
+                name: "click",
+                summary: "Click one actionable node",
+                targeting: "id or match",
+                fields: vec![],
+            },
+            ApiCommandDoc {
+                name: "hover",
+                summary: "Hover one node",
+                targeting: "id or match",
+                fields: vec![],
+            },
+            ApiCommandDoc {
+                name: "set_value",
+                summary: "Set the value of one form control",
+                targeting: "id or match",
+                fields: vec![ApiSchemaFieldDoc {
+                    name: "value",
+                    kind: "string",
+                    required: true,
+                    description: "Text value to apply",
+                }],
+            },
+            ApiCommandDoc {
+                name: "set_files",
+                summary: "Attach one or more local files to a file input",
+                targeting: "id or match",
+                fields: vec![ApiSchemaFieldDoc {
+                    name: "paths",
+                    kind: "string[]",
+                    required: true,
+                    description: "Absolute local file paths to attach",
+                }],
+            },
+            ApiCommandDoc {
+                name: "press_key",
+                summary: "Dispatch keyboard interaction",
+                targeting: "optional id or match",
+                fields: vec![ApiSchemaFieldDoc {
+                    name: "key",
+                    kind: "string",
+                    required: true,
+                    description: "Key value such as Enter or Space",
+                }],
+            },
+            ApiCommandDoc {
+                name: "wait_for",
+                summary: "Wait for URL, DOM, text, scroll, or media conditions",
+                targeting: "optional id or match",
+                fields: vec![
+                    ApiSchemaFieldDoc {
+                        name: "timeout_ms",
+                        kind: "u64",
+                        required: false,
+                        description: "Overall wait deadline in milliseconds",
+                    },
+                    ApiSchemaFieldDoc {
+                        name: "selector",
+                        kind: "string",
+                        required: false,
+                        description: "CSS selector that must exist",
+                    },
+                ],
+            },
+            ApiCommandDoc {
+                name: "scroll",
+                summary: "Scroll the page viewport",
+                targeting: "none",
+                fields: vec![],
+            },
+            ApiCommandDoc {
+                name: "drag",
+                summary: "Perform pointer drag gestures, including range controls",
+                targeting: "id or match",
+                fields: vec![],
+            },
+            ApiCommandDoc {
+                name: "geometry",
+                summary: "Read geometry for a matched node",
+                targeting: "id or match",
+                fields: vec![],
+            },
+            ApiCommandDoc {
+                name: "media_state",
+                summary: "Read diagnostics for all media nodes or one matched media node",
+                targeting: "optional id or match",
+                fields: vec![],
+            },
+            ApiCommandDoc {
+                name: "eval",
+                summary: "Execute JavaScript and return the result",
+                targeting: "none",
+                fields: vec![],
+            },
+        ],
+    })
+}
+
+#[derive(Debug, Serialize)]
+struct ApiVersion {
+    version: &'static str,
+    protocol_version: u16,
+}
+
+async fn api_version() -> Json<ApiVersion> {
+    Json(ApiVersion {
+        version: env!("CARGO_PKG_VERSION"),
+        protocol_version: PROTOCOL_VERSION,
     })
 }
 
@@ -1666,6 +1819,8 @@ impl ServeDiagnostics {
         };
         let command_ready = matches!(state, RuntimeOperationalState::Ready);
         RuntimeDiagnosticsResponse {
+            version: env!("CARGO_PKG_VERSION"),
+            protocol_version: PROTOCOL_VERSION,
             state,
             control_plane_up: true,
             command_ready,
@@ -1682,7 +1837,14 @@ impl ServeDiagnostics {
                     .last_failure
                     .as_ref()
                     .is_none_or(|failure| !failure.restart_recommended),
+            browser_process_up: host.browser_available && !host.browser_closed,
+            page_attached: host.page_ready,
+            renderer_attached: host.renderer_ready,
             dom_snapshot_available: self.runtime.dom_snapshot_available,
+            event_decoder_ok: self
+                .last_failure
+                .as_ref()
+                .is_none_or(|failure| !failure.message.contains("unknown variant")),
             active_operation,
             last_failure: self.last_failure.clone(),
             total_operations: self.total_operations,

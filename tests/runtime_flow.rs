@@ -1,6 +1,6 @@
 use aegis::{
     BatchRequest, BrowserConfig, BrowserMode, Command, CommandMatcher, CommandTarget, Cookie,
-    NetworkOverride, RuntimeEvent, SessionState, StorageArea, TraceRecorder,
+    NetworkOverride, RuntimeEvent, SessionState, StorageArea, TraceRecorder, UploadFilePayload,
     dom::diff::{DomMutation, diff_snapshots},
     dom::node::{DomNode, DomNodeSemantics, DomSnapshot},
     events::stream::{
@@ -26,6 +26,8 @@ fn encodes_batch_request_with_stable_shape() {
             Command::Hover {
                 target: CommandTarget::Match {
                     matcher: CommandMatcher {
+                        selector: None,
+                        test_id: None,
                         role: Some("button".into()),
                         name: Some("Open".into()),
                         label: None,
@@ -43,6 +45,8 @@ fn encodes_batch_request_with_stable_shape() {
             Command::SetValue {
                 target: CommandTarget::Match {
                     matcher: CommandMatcher {
+                        selector: None,
+                        test_id: None,
                         control_type: Some("searchbox".into()),
                         name: Some("Search".into()),
                         role: None,
@@ -67,9 +71,37 @@ fn encodes_batch_request_with_stable_shape() {
                 meta_key: false,
                 shift_key: false,
             },
+            Command::SetFiles {
+                target: CommandTarget::Match {
+                    matcher: CommandMatcher {
+                        selector: Some("input[type='file']".into()),
+                        test_id: Some("upload-input".into()),
+                        role: None,
+                        name: Some("Upload".into()),
+                        label: None,
+                        control_type: None,
+                        tag: Some("input".into()),
+                        text: None,
+                        placeholder: None,
+                        href_contains: None,
+                        actionable: Some(true),
+                        disabled: Some(false),
+                        exact: None,
+                    },
+                },
+                paths: vec!["/tmp/example.pdf".into()],
+                files: Some(vec![UploadFilePayload {
+                    name: "example.pdf".into(),
+                    mime_type: Some("application/pdf".into()),
+                    base64: "SGVsbG8=".into(),
+                    last_modified_ms: Some(1_717_171_717_000),
+                }]),
+            },
             Command::WaitFor {
                 target: Some(CommandTarget::Match {
                     matcher: CommandMatcher {
+                        selector: None,
+                        test_id: None,
                         role: None,
                         name: Some("Results".into()),
                         label: None,
@@ -102,6 +134,8 @@ fn encodes_batch_request_with_stable_shape() {
             Command::Drag {
                 target: CommandTarget::Match {
                     matcher: CommandMatcher {
+                        selector: Some("[data-testid='timeline-slider']".into()),
+                        test_id: Some("timeline-slider".into()),
                         role: Some("slider".into()),
                         name: Some("Timeline".into()),
                         label: None,
@@ -125,6 +159,9 @@ fn encodes_batch_request_with_stable_shape() {
             Command::Geometry {
                 target: CommandTarget::Id { id: 12 },
             },
+            Command::MediaState {
+                target: Some(CommandTarget::Id { id: 44 }),
+            },
         ],
     };
 
@@ -134,11 +171,16 @@ fn encodes_batch_request_with_stable_shape() {
     assert!(encoded.contains("\"type\":\"hover\""));
     assert!(encoded.contains("\"type\":\"set_value\""));
     assert!(encoded.contains("\"type\":\"press_key\""));
+    assert!(encoded.contains("\"type\":\"set_files\""));
     assert!(encoded.contains("\"type\":\"wait_for\""));
     assert!(encoded.contains("\"type\":\"scroll\""));
     assert!(encoded.contains("\"type\":\"drag\""));
     assert!(encoded.contains("\"type\":\"geometry\""));
+    assert!(encoded.contains("\"type\":\"media_state\""));
     assert!(encoded.contains("\"match\""));
+    assert!(encoded.contains("\"selector\":\"[data-testid='timeline-slider']\""));
+    assert!(encoded.contains("\"test_id\":\"timeline-slider\""));
+    assert!(encoded.contains("\"mime_type\":\"application/pdf\""));
     assert!(encoded.contains("\"control_type\":\"searchbox\""));
     assert!(encoded.contains("\"exact\":true"));
     assert!(encoded.contains("\"handle\":\"end\""));
@@ -258,6 +300,28 @@ fn websocket_events_are_filterable() {
     let only_ws = stream.read_from(0, Some(EventType::WebSocket));
     assert_eq!(only_ws.events.len(), 1);
     assert_eq!(only_ws.events[0].sequence, 1);
+}
+
+#[test]
+fn unknown_runtime_events_round_trip_without_parse_failure() {
+    let value = serde_json::json!({
+        "type": "websocket_frame_v2",
+        "request_id": "ws-2",
+        "url": "wss://example.com/socket",
+        "payload_preview": "future",
+        "custom": { "seen": true }
+    });
+    let event: RuntimeEvent = serde_json::from_value(value.clone()).expect("unknown event parses");
+    match event {
+        RuntimeEvent::Unknown {
+            event_type,
+            payload,
+        } => {
+            assert_eq!(event_type, "websocket_frame_v2");
+            assert_eq!(payload, value);
+        }
+        other => panic!("expected unknown event, got {other:?}"),
+    }
 }
 
 #[test]

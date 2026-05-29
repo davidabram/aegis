@@ -65,11 +65,11 @@ void ApplyBooleanPreference(CefRefPtr<CefPreferenceManager> manager,
 }
 
 void ApplyAegisProductionPreferences(CefRefPtr<CefPreferenceManager> manager) {
-  ApplyBooleanPreference(manager, "credentials_enable_service", false);
-  ApplyBooleanPreference(manager, "profile.password_manager_enabled", false);
-  ApplyBooleanPreference(manager, "profile.password_manager_leak_detection", false);
-  ApplyBooleanPreference(manager, "autofill.profile_enabled", false);
-  ApplyBooleanPreference(manager, "autofill.credit_card_enabled", false);
+  ApplyBooleanPreference(manager, "credentials_enable_service", true);
+  ApplyBooleanPreference(manager, "profile.password_manager_enabled", true);
+  ApplyBooleanPreference(manager, "profile.password_manager_leak_detection", true);
+  ApplyBooleanPreference(manager, "autofill.profile_enabled", true);
+  ApplyBooleanPreference(manager, "autofill.credit_card_enabled", true);
 }
 
 #if defined(AEGIS_STANDALONE_APP)

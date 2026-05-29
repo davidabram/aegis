@@ -1,10 +1,25 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::path::PathBuf;
 
 pub type NodeId = u64;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UploadFilePayload {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    pub base64: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_modified_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommandMatcher {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selector: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -56,6 +71,13 @@ pub enum Command {
         #[serde(flatten)]
         target: CommandTarget,
         value: String,
+    },
+    SetFiles {
+        #[serde(flatten)]
+        target: CommandTarget,
+        paths: Vec<PathBuf>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        files: Option<Vec<UploadFilePayload>>,
     },
     PressKey {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -127,6 +149,10 @@ pub enum Command {
     Geometry {
         #[serde(flatten)]
         target: CommandTarget,
+    },
+    MediaState {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<CommandTarget>,
     },
     Eval {
         code: String,

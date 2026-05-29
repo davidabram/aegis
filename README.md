@@ -49,7 +49,7 @@ Local release rule:
 Runtime state rules:
 
 - Chromium browser profiles are not a persistence API
-- Chromium credential storage and autofill persistence are disabled in the production runtime
+- Chromium credential storage and autofill are enabled by default in the production runtime
 - persistent agent state lives under `~/.aegis` by default, or `$AEGIS_HOME` if set
 - session persistence goes through `GET /session`, `POST /session`, `POST /session/save`, and `POST /session/load`
 - `--profile <name>` selects `~/.aegis/profiles/<name>/session.json`
@@ -60,7 +60,7 @@ Runtime state rules:
 - trace persistence goes through `POST /trace/enable`
 - if `--start-url` is omitted, the runtime boots into a local no-network bootstrap page
 - the canonical control style is semantic `match` targeting for `click` and `set_value`, not long-lived raw DOM ids
-- Aegis does not use Chrome/Brave Safe Storage, browser login DBs, or external keychain-backed browser profile storage anywhere in the production path
+- Aegis-owned credential capture is stored under `~/.aegis`; browser-managed credential storage and autofill use Chromium's runtime profile behavior
 
 ## CLI Surface
 

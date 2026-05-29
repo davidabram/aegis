@@ -3,6 +3,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use aegis::api::server;
+use aegis::transport::protocol::PROTOCOL_VERSION;
 use aegis::{
     AegisConfigStore, AegisSecretStore, BrowserConfig, BrowserMode, CredentialInput,
     NativeConfiguration, app_executable, build_native, configure_native,
@@ -12,6 +13,7 @@ use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(name = "aegis")]
+#[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(
     about = "Agentic web browser CLI and runtime control plane",
     long_about = "Aegis is an agentic web browser. Use it to launch the local browser, run one persistent serve process, manage Aegis-owned config and secrets, and control the runtime over a local HTTP API.",
@@ -62,6 +64,8 @@ enum BrowserModeArg {
 enum Commands {
     #[command(about = "Open the canonical local headful browser app")]
     Open,
+    #[command(about = "Print CLI, crate, and protocol version information")]
+    Version,
     #[command(about = "Start the persistent browser runtime and local HTTP control API")]
     Serve {
         #[arg(
@@ -318,6 +322,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("{USAGE_TEXT}");
             return Ok(());
         }
+        Commands::Version => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "cli_version": env!("CARGO_PKG_VERSION"),
+                    "crate_version": env!("CARGO_PKG_VERSION"),
+                    "protocol_version": PROTOCOL_VERSION,
+                }))?
+            );
+            return Ok(());
+        }
         Commands::Examples => {
             println!("{EXAMPLES_TEXT}");
             return Ok(());
@@ -351,6 +366,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             TraceCommands::Replay { .. } => unreachable!("handled before host init"),
         },
         Commands::Usage => unreachable!("handled before host init"),
+        Commands::Version => unreachable!("handled before host init"),
         Commands::Examples => unreachable!("handled before host init"),
         Commands::Config { .. } => unreachable!("handled before host init"),
         Commands::Native { .. } => unreachable!("handled before runtime startup"),

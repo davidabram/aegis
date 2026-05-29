@@ -6,7 +6,7 @@ use crate::events::stream::SequencedEvent;
 use crate::session::cookies::SessionState;
 use crate::transport::bridge::{AegisError, BatchRequest, BatchResponse};
 use crate::transport::protocol::{
-    BatchWireResponse, TraceBatchRecord, TraceEventRecord, TraceFile,
+    BatchWireResponse, PROTOCOL_VERSION, TraceBatchRecord, TraceEventRecord, TraceFile,
 };
 
 #[derive(Debug, Clone)]
@@ -20,7 +20,7 @@ impl TraceRecorder {
         Self {
             path: path.into(),
             trace: TraceFile {
-                protocol_version: 1,
+                protocol_version: PROTOCOL_VERSION,
                 browser_config,
                 initial_session: None,
                 batches: Vec::new(),

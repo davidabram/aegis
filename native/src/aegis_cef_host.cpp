@@ -119,11 +119,11 @@ void ApplyBooleanPreference(CefRefPtr<CefPreferenceManager> manager,
 }
 
 void ApplyAegisProductionPreferences(CefRefPtr<CefPreferenceManager> manager) {
-  ApplyBooleanPreference(manager, "credentials_enable_service", false);
-  ApplyBooleanPreference(manager, "profile.password_manager_enabled", false);
-  ApplyBooleanPreference(manager, "profile.password_manager_leak_detection", false);
-  ApplyBooleanPreference(manager, "autofill.profile_enabled", false);
-  ApplyBooleanPreference(manager, "autofill.credit_card_enabled", false);
+  ApplyBooleanPreference(manager, "credentials_enable_service", true);
+  ApplyBooleanPreference(manager, "profile.password_manager_enabled", true);
+  ApplyBooleanPreference(manager, "profile.password_manager_leak_detection", true);
+  ApplyBooleanPreference(manager, "autofill.profile_enabled", true);
+  ApplyBooleanPreference(manager, "autofill.credit_card_enabled", true);
 }
 
 void AppendDebugLog(const std::string& message) {
@@ -1662,6 +1662,8 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
     try {
       AppendDebugLog("host: start");
       RequireOwnerThread();
+      AegisPlatformInitializeMainApplication(true);
+      AegisPlatformConfigureActivation(true, !options_.headless);
 
       AppendDebugLog("host: cef_load_library begin");
       if (!cef_load_library(paths_.cef_library.string().c_str())) {
@@ -1679,14 +1681,11 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       bootstrap_options.main_bundle_path = paths_.main_bundle_path.string();
       bootstrap_options.resources_dir_path = paths_.resources_dir.string();
       bootstrap_options.locales_dir_path = paths_.locales_dir.string();
-      // Embedded headless sessions snapshot and restore browser state explicitly, so
-      // per-run Chromium disk caches only add cold-start variance without providing
-      // meaningful persistence value.
-      if (!options_.headless) {
-        bootstrap_options.root_cache_path = runtime_session_paths_.instance_dir.string();
-        bootstrap_options.cache_path =
-            (runtime_session_paths_.instance_dir / "cache").string();
-      }
+      // Always isolate Chromium disk state per runtime instance so serve
+      // sessions never collide on the shared default singleton path.
+      bootstrap_options.root_cache_path = runtime_session_paths_.instance_dir.string();
+      bootstrap_options.cache_path =
+          (runtime_session_paths_.instance_dir / "cache").string();
       app_ = new AegisApp(false);
       int subprocess_exit_code = -1;
       std::string initialize_error;

@@ -34,6 +34,8 @@
     "aria-valuemin",
     "aria-valuemax",
     "aria-valuenow",
+    "data-testid",
+    "data-test-id",
     "min",
     "max",
     "step"
@@ -62,6 +64,9 @@
     "legend"
   ]);
   const semanticTextRoles = new Set(["button", "link", "textbox", "searchbox", "option", "tab", "combobox"]);
+  const mediaStateByNode = new WeakMap();
+  const mediaInstrumentedNodes = new WeakSet();
+  let mediaPrototypePatched = false;
 
   function normalizeText(value) {
     return String(value || "").replace(/\s+/g, " ").trim();
@@ -121,11 +126,215 @@
     };
   }
 
+  function trimArray(values, limit) {
+    if (values.length > limit) {
+      values.splice(0, values.length - limit);
+    }
+  }
+
+  function mediaState(node) {
+    if (!node || !(node instanceof HTMLMediaElement)) {
+      return null;
+    }
+    let state = mediaStateByNode.get(node);
+    if (!state) {
+      state = {
+        play_attempts: 0,
+        play_resolved: 0,
+        play_rejected: 0,
+        pause_calls: 0,
+        load_calls: 0,
+        loaded_metadata_count: 0,
+        stalled_count: 0,
+        last_event: null,
+        recent_events: [],
+        last_play_error: null
+      };
+      mediaStateByNode.set(node, state);
+    }
+    return state;
+  }
+
+  function recordMediaEvent(node, eventName, details) {
+    const state = mediaState(node);
+    if (!state) {
+      return;
+    }
+    state.last_event = eventName;
+    const entry = `${eventName}@${Date.now()}`;
+    state.recent_events.push(entry);
+    trimArray(state.recent_events, 12);
+    if (eventName === "loadedmetadata") {
+      state.loaded_metadata_count += 1;
+    }
+    if (eventName === "stalled") {
+      state.stalled_count += 1;
+    }
+    if (eventName === "play_rejected" && details && details.error) {
+      state.last_play_error = String(details.error);
+    }
+    queue.push({
+      event: {
+        type: "log",
+        level: details && details.level ? details.level : "debug",
+        message: `media:${eventName}`,
+        data: {
+          node_id: assignId(node),
+          tag: node.tagName ? node.tagName.toLowerCase() : "media",
+          current_src: node.currentSrc || node.src || null,
+          ready_state: Number.isFinite(node.readyState) ? node.readyState : null,
+          network_state: Number.isFinite(node.networkState) ? node.networkState : null,
+          paused: !!node.paused,
+          current_time: Number.isFinite(node.currentTime) ? node.currentTime : null,
+          ...(details || {})
+        }
+      }
+    });
+  }
+
+  function patchMediaPrototype() {
+    if (mediaPrototypePatched || typeof HTMLMediaElement !== "function") {
+      return;
+    }
+    mediaPrototypePatched = true;
+
+    const originalPlay = HTMLMediaElement.prototype.play;
+    const originalPause = HTMLMediaElement.prototype.pause;
+    const originalLoad = HTMLMediaElement.prototype.load;
+
+    if (typeof originalPlay === "function") {
+      HTMLMediaElement.prototype.play = function (...args) {
+        const state = mediaState(this);
+        if (state) {
+          state.play_attempts += 1;
+        }
+        recordMediaEvent(this, "play_call");
+        try {
+          const result = originalPlay.apply(this, args);
+          if (result && typeof result.then === "function") {
+            return result.then((value) => {
+              const nextState = mediaState(this);
+              if (nextState) {
+                nextState.play_resolved += 1;
+              }
+              recordMediaEvent(this, "play_resolved");
+              return value;
+            }).catch((error) => {
+              const nextState = mediaState(this);
+              if (nextState) {
+                nextState.play_rejected += 1;
+              }
+              recordMediaEvent(this, "play_rejected", {
+                level: "warn",
+                error: String(error && error.message ? error.message : error)
+              });
+              throw error;
+            });
+          }
+          return result;
+        } catch (error) {
+          const nextState = mediaState(this);
+          if (nextState) {
+            nextState.play_rejected += 1;
+          }
+          recordMediaEvent(this, "play_rejected", {
+            level: "warn",
+            error: String(error && error.message ? error.message : error)
+          });
+          throw error;
+        }
+      };
+    }
+
+    if (typeof originalPause === "function") {
+      HTMLMediaElement.prototype.pause = function (...args) {
+        const state = mediaState(this);
+        if (state) {
+          state.pause_calls += 1;
+        }
+        recordMediaEvent(this, "pause_call");
+        return originalPause.apply(this, args);
+      };
+    }
+
+    if (typeof originalLoad === "function") {
+      HTMLMediaElement.prototype.load = function (...args) {
+        const state = mediaState(this);
+        if (state) {
+          state.load_calls += 1;
+        }
+        recordMediaEvent(this, "load_call");
+        return originalLoad.apply(this, args);
+      };
+    }
+  }
+
+  function instrumentMediaNode(node) {
+    if (!node || !(node instanceof HTMLMediaElement) || mediaInstrumentedNodes.has(node)) {
+      return;
+    }
+    mediaInstrumentedNodes.add(node);
+    const state = mediaState(node);
+    if (state && node.readyState >= 1) {
+      state.loaded_metadata_count = Math.max(state.loaded_metadata_count, 1);
+      if (!state.last_event) {
+        state.last_event = "metadata_available";
+      }
+      state.recent_events.push(`metadata_available@${Date.now()}`);
+      trimArray(state.recent_events, 12);
+    }
+    const events = [
+      "loadstart",
+      "loadedmetadata",
+      "loadeddata",
+      "canplay",
+      "canplaythrough",
+      "play",
+      "playing",
+      "pause",
+      "seeking",
+      "seeked",
+      "stalled",
+      "waiting",
+      "suspend",
+      "progress",
+      "durationchange",
+      "timeupdate",
+      "ended",
+      "error"
+    ];
+    for (const eventName of events) {
+      node.addEventListener(eventName, () => {
+        recordMediaEvent(node, eventName, {
+          error: node.error ? `${node.error.code || "media_error"}${node.error.message ? `: ${node.error.message}` : ""}` : null
+        });
+      });
+    }
+  }
+
+  function instrumentMediaTree(root) {
+    if (!root) {
+      return;
+    }
+    if (root instanceof HTMLMediaElement) {
+      instrumentMediaNode(root);
+    }
+    if (root.querySelectorAll) {
+      for (const node of Array.from(root.querySelectorAll("video, audio"))) {
+        instrumentMediaNode(node);
+      }
+    }
+  }
+
   function mediaDiagnostics() {
+    patchMediaPrototype();
+    instrumentMediaTree(document);
     return Array.from(document.querySelectorAll("video, audio")).map((node, index) => {
+      const state = mediaState(node) || {};
       const error = node.error ? `${node.error.code || "media_error"}${node.error.message ? `: ${node.error.message}` : ""}` : null;
       return {
         index,
+        node_id: assignId(node),
         tag: node.tagName.toLowerCase(),
         current_src: node.currentSrc || node.src || null,
         ready_state: Number.isFinite(node.readyState) ? node.readyState : null,
@@ -136,7 +345,22 @@
         muted: !!node.muted,
         seeking: !!node.seeking,
         current_time: Number.isFinite(node.currentTime) ? node.currentTime : null,
-        error
+        playback_rate: Number.isFinite(node.playbackRate) ? node.playbackRate : null,
+        volume: Number.isFinite(node.volume) ? node.volume : null,
+        loop_enabled: !!node.loop,
+        autoplay: !!node.autoplay,
+        controls: !!node.controls,
+        play_attempts: state.play_attempts || 0,
+        play_resolved: state.play_resolved || 0,
+        play_rejected: state.play_rejected || 0,
+        pause_calls: state.pause_calls || 0,
+        load_calls: state.load_calls || 0,
+        loaded_metadata_count: state.loaded_metadata_count || 0,
+        stalled_count: state.stalled_count || 0,
+        last_event: state.last_event || null,
+        recent_events: Array.isArray(state.recent_events) ? state.recent_events.slice() : [],
+        error,
+        last_play_error: state.last_play_error || null
       };
     });
   }
@@ -326,6 +550,9 @@
     if (tag === "textarea" || tag === "select") {
       return tag;
     }
+    if (tag === "video" || tag === "audio") {
+      return "media";
+    }
     if (node.isContentEditable) {
       return "textbox";
     }
@@ -363,6 +590,9 @@
     }
     if (node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement || node instanceof HTMLSelectElement || node.isContentEditable) {
       actions.push("type", "focus", "hover", "press_key");
+    }
+    if (tag === "video" || tag === "audio") {
+      actions.push("click", "hover", "focus", "press_key");
     }
     if (tag === "label" || attrs.role || tag === "div" || tag === "span") {
       actions.push("hover");
@@ -617,6 +847,7 @@
 
   function exactMatch(descriptor, matcher) {
     return exactStringField(descriptor.semantic.role, matcher.role) &&
+      exactStringField(descriptor.attrs["data-testid"] || descriptor.attrs["data-test-id"], matcher.test_id) &&
       exactStringField(descriptor.semantic.name, matcher.name) &&
       exactStringField(descriptor.semantic.label, matcher.label) &&
       exactStringField(descriptor.semantic.control_type, matcher.control_type) &&
@@ -646,6 +877,7 @@
     const exactOnly = !!matcher.exact;
     let score = 0;
     const checks = [
+      ["test_id", descriptor.attrs["data-testid"] || descriptor.attrs["data-test-id"], matcher.test_id],
       ["role", descriptor.semantic.role, matcher.role],
       ["name", descriptor.semantic.name, matcher.name],
       ["label", descriptor.semantic.label, matcher.label],
@@ -731,7 +963,18 @@
 
     const matcher = target;
     const candidates = [];
-    for (const node of document.querySelectorAll("*")) {
+    let scopedNodes = null;
+    if (matcher.selector) {
+      try {
+        scopedNodes = Array.from(document.querySelectorAll(String(matcher.selector)));
+      } catch (error) {
+        throw new Error(`invalid selector ${JSON.stringify(matcher.selector)}: ${String(error && error.message ? error.message : error)}`);
+      }
+      if (scopedNodes.length === 0) {
+        throw new Error(`no node matched selector ${JSON.stringify(matcher.selector)}`);
+      }
+    }
+    for (const node of scopedNodes || document.querySelectorAll("*")) {
       if (isIgnoredNode(node)) {
         continue;
       }
@@ -795,7 +1038,7 @@
   }
 
   function resolveActionTarget(el, action) {
-    if ((action === "click" || action === "type") && el instanceof HTMLLabelElement && el.control) {
+    if (action === "type" && el instanceof HTMLLabelElement && el.control) {
       return el.control;
     }
     return el;
@@ -930,7 +1173,9 @@
     const type = el instanceof HTMLInputElement || el instanceof HTMLButtonElement
       ? (el.getAttribute("type") || "").toLowerCase()
       : "";
-    if ((el instanceof HTMLButtonElement || el instanceof HTMLInputElement) &&
+    if (el instanceof HTMLLabelElement && typeof el.click === "function") {
+      el.click();
+    } else if ((el instanceof HTMLButtonElement || el instanceof HTMLInputElement) &&
         (type === "submit" || type === "image") &&
         el.form &&
         typeof el.form.requestSubmit === "function") {
@@ -941,6 +1186,21 @@
       dispatchMouseLikeEvent(el, "click");
     }
     const after = currentPageState();
+    queue.push({
+      event: {
+        type: "log",
+        level: "debug",
+        message: "interaction:click",
+        data: {
+          node_id: resolved.targetId,
+          tag: el.tagName.toLowerCase(),
+          before_url: before.url,
+          after_url: after.url,
+          navigation_changed: before.url !== after.url,
+          title_changed: before.title !== after.title
+        }
+      }
+    });
     return {
       clicked: resolved.targetId,
       geometry_after: elementGeometry(el),
@@ -1109,6 +1369,52 @@
     };
   }
 
+  function decodeBase64(base64) {
+    const binary = atob(String(base64 || ""));
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index);
+    }
+    return bytes;
+  }
+
+  function setFiles(target, files) {
+    const before = currentPageState();
+    const resolved = resolveTarget(target, "type");
+    const el = resolveActionTarget(resolved.node, "type");
+    if (!(el instanceof HTMLInputElement) || (el.getAttribute("type") || "").toLowerCase() !== "file") {
+      throw new Error(`node ${resolved.targetId} is not a file input`);
+    }
+    if (typeof DataTransfer !== "function") {
+      throw new Error("DataTransfer is not available in this runtime");
+    }
+    scrollIntoViewIfNeeded(el);
+    focusIfPossible(el);
+    const dataTransfer = new DataTransfer();
+    for (const file of Array.isArray(files) ? files : []) {
+      const bytes = decodeBase64(file.base64);
+      dataTransfer.items.add(new File([bytes], file.name || "upload.bin", {
+        type: file.mime_type || "application/octet-stream",
+        lastModified: Number.isFinite(file.last_modified_ms) ? file.last_modified_ms : Date.now()
+      }));
+    }
+    el.files = dataTransfer.files;
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+    const after = currentPageState();
+    return {
+      id: resolved.targetId,
+      file_count: el.files ? el.files.length : 0,
+      files: Array.from(el.files || []).map((file) => ({
+        name: file.name,
+        size: file.size,
+        type: file.type || null,
+        last_modified_ms: Number.isFinite(file.lastModified) ? file.lastModified : null
+      })),
+      ...baseActionResult(resolved, el, before, after)
+    };
+  }
+
   function hover(target) {
     const before = currentPageState();
     const resolved = resolveTarget(target, "hover");
@@ -1144,7 +1450,58 @@
       metaKey: !!options.metaKey,
       shiftKey: !!options.shiftKey
     });
-    return el.dispatchEvent(event);
+    return {
+      accepted: el.dispatchEvent(event),
+      target: assignId(el),
+      event: type
+    };
+  }
+
+  function pressKeyDefaultAction(el, key, eventOptions) {
+    const normalizedKey = key === "Spacebar" || key === "Space" ? " " : key;
+    let triggeredClick = false;
+    let triggeredSubmit = false;
+    let mediaToggled = false;
+    const isSummaryElement = typeof HTMLSummaryElement === "function" && el instanceof HTMLSummaryElement;
+
+    if (normalizedKey === "Enter") {
+      if (el.form && typeof el.form.requestSubmit === "function" && !(el instanceof HTMLTextAreaElement)) {
+        el.form.requestSubmit();
+        triggeredSubmit = true;
+      } else if ((el instanceof HTMLButtonElement || el instanceof HTMLAnchorElement || el instanceof HTMLLabelElement) && typeof el.click === "function") {
+        el.click();
+        triggeredClick = true;
+      }
+    }
+
+    if (normalizedKey === " ") {
+      if ((el instanceof HTMLButtonElement || el instanceof HTMLInputElement || el instanceof HTMLLabelElement || isSummaryElement) && typeof el.click === "function") {
+        el.click();
+        triggeredClick = true;
+      } else if (el instanceof HTMLMediaElement) {
+        if (el.paused) {
+          try {
+            el.play();
+          } catch (_error) {
+          }
+        } else {
+          el.pause();
+        }
+        mediaToggled = true;
+      }
+    }
+
+    return {
+      triggered_click: triggeredClick,
+      triggered_submit: triggeredSubmit,
+      media_toggled: mediaToggled,
+      modifiers: {
+        alt: !!eventOptions.altKey,
+        ctrl: !!eventOptions.ctrlKey,
+        meta: !!eventOptions.metaKey,
+        shift: !!eventOptions.shiftKey
+      }
+    };
   }
 
   function pressKey(target, key, options) {
@@ -1169,25 +1526,51 @@
       shiftKey: !!(options && options.shiftKey)
     };
 
-    const keydownAccepted = dispatchKeyEvent(el, "keydown", eventOptions);
-    const keypressAccepted = dispatchKeyEvent(el, "keypress", eventOptions);
-    let triggeredSubmit = false;
-    if (keydownAccepted && keypressAccepted && key === "Enter") {
-      if (el.form && typeof el.form.requestSubmit === "function") {
-        el.form.requestSubmit();
-        triggeredSubmit = true;
-      } else if ((el instanceof HTMLButtonElement || el instanceof HTMLAnchorElement) && typeof el.click === "function") {
-        el.click();
-      }
-    }
-    dispatchKeyEvent(el, "keyup", eventOptions);
+    const event_debug = [];
+    const keydown = dispatchKeyEvent(el, "keydown", eventOptions);
+    event_debug.push(keydown);
+    const keypress = dispatchKeyEvent(el, "keypress", eventOptions);
+    event_debug.push(keypress);
+    const default_action = keydown.accepted && keypress.accepted
+      ? pressKeyDefaultAction(el, key, eventOptions)
+      : {
+          triggered_click: false,
+          triggered_submit: false,
+          media_toggled: false,
+          modifiers: {
+            alt: !!eventOptions.altKey,
+            ctrl: !!eventOptions.ctrlKey,
+            meta: !!eventOptions.metaKey,
+            shift: !!eventOptions.shiftKey
+          }
+        };
+    event_debug.push(dispatchKeyEvent(el, "keyup", eventOptions));
     const after = currentPageState();
+    queue.push({
+      event: {
+        type: "log",
+        level: "debug",
+        message: "interaction:press_key",
+        data: {
+          key,
+          code: eventOptions.code,
+          node_id: resolved ? resolved.targetId : assignId(el),
+          navigation_changed: before.url !== after.url,
+          title_changed: before.title !== after.title,
+          default_action
+        }
+      }
+    });
     return {
       key,
       code: eventOptions.code,
-      triggered_submit: triggeredSubmit,
+      triggered_submit: default_action.triggered_submit,
+      triggered_click: default_action.triggered_click,
+      media_toggled: default_action.media_toggled,
       target: resolved ? resolved.debug.chosen : null,
       matcher_debug: resolved ? resolved.debug : null,
+      event_debug,
+      default_action,
       page_before: before,
       page_after: after,
       navigation_changed: before.url !== after.url,
@@ -1290,6 +1673,20 @@
     }
 
     const after = currentPageState();
+    queue.push({
+      event: {
+        type: "log",
+        level: "debug",
+        message: "interaction:drag",
+        data: {
+          node_id: resolved.targetId,
+          start_point: startPoint,
+          end_point: endPoint,
+          before_scroll: { x: before.scroll_x, y: before.scroll_y },
+          after_scroll: { x: after.scroll_x, y: after.scroll_y }
+        }
+      }
+    });
     const afterGeometry = elementGeometry(el);
     return {
       dragged: resolved.targetId,
@@ -1326,6 +1723,11 @@
             return { ok: true, value: hover(command.match || command.id) };
           case "set_value":
             return { ok: true, value: setValue(command.match || command.id, command.value) };
+          case "set_files":
+            return {
+              ok: true,
+              value: setFiles(command.match || command.id, command.files || [])
+            };
           case "press_key":
             return {
               ok: true,
@@ -1426,6 +1828,13 @@
   }
 
   const observer = new MutationObserver((mutations) => {
+    for (const mutation of mutations) {
+      if (mutation.type === "childList") {
+        for (const node of Array.from(mutation.addedNodes || [])) {
+          instrumentMediaTree(node);
+        }
+      }
+    }
     const changes = mutations.flatMap(serializeMutation);
     if (changes.length > 0) {
       queue.push({
@@ -1453,6 +1862,8 @@
   }
 
   attachObserver();
+  patchMediaPrototype();
+  instrumentMediaTree(document);
   if (!observerAttached) {
     document.addEventListener("DOMContentLoaded", attachObserver, { once: true });
   }
@@ -1465,6 +1876,7 @@
     hover,
     pressKey,
     setValue,
+    setFiles,
     scrollToPosition,
     drag,
     geometry,

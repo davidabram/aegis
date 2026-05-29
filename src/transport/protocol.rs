@@ -9,7 +9,7 @@ use crate::session::cookies::SessionState;
 use crate::transport::bridge::{AegisError, BatchRequest, BridgeEventEnvelope};
 
 const MAGIC: [u8; 4] = *b"AEGS";
-const VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 1;
 const HEADER_LEN: usize = 16;
 
 fn is_false(value: &bool) -> bool {
@@ -106,7 +106,7 @@ pub fn encode_message<T: Serialize>(kind: MessageKind, payload: &T) -> Result<Ve
 
     let mut frame = Vec::with_capacity(HEADER_LEN + body.len());
     frame.extend_from_slice(&MAGIC);
-    frame.extend_from_slice(&VERSION.to_le_bytes());
+    frame.extend_from_slice(&PROTOCOL_VERSION.to_le_bytes());
     frame.extend_from_slice(&(kind as u16).to_le_bytes());
     frame.extend_from_slice(&(body.len() as u64).to_le_bytes());
     frame.extend_from_slice(&body);
@@ -125,7 +125,7 @@ pub fn decode_message<T: for<'de> Deserialize<'de>>(
     }
 
     let version = u16::from_le_bytes([bytes[4], bytes[5]]);
-    if version != VERSION {
+    if version != PROTOCOL_VERSION {
         return Err(AegisError::Protocol(format!(
             "unsupported protocol version {version}"
         )));

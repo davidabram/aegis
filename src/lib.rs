@@ -16,7 +16,9 @@ pub mod transport;
 pub use api::server;
 pub use browser::{BrowserConfig, BrowserMode};
 pub use client::AegisClient;
-pub use commands::command::{Command, CommandMatcher, CommandResult, CommandTarget, NodeId};
+pub use commands::command::{
+    Command, CommandMatcher, CommandResult, CommandTarget, NodeId, UploadFilePayload,
+};
 pub use config_store::{
     AegisConfigStore, AegisSecretStore, CredentialInput, CredentialsSettings, StoredCredentialEntry,
 };

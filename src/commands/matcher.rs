@@ -70,6 +70,9 @@ fn score_candidate<'a>(
     matcher: &CommandMatcher,
     desired_action: Option<DesiredAction>,
 ) -> Option<MatchCandidate<'a>> {
+    if matcher.selector.is_some() {
+        return None;
+    }
     let semantic = node.semantic.as_ref().cloned().unwrap_or_default();
     let actionable_for_action = is_actionable_for_action(node, &semantic, desired_action);
     if desired_action.is_some() && !actionable_for_action {
@@ -139,6 +142,16 @@ fn score_candidate<'a>(
         "href_contains",
         node.attrs.get("href").map(String::as_str),
         matcher.href_contains.as_deref(),
+        matcher.exact.unwrap_or(false),
+        &mut fields,
+    )?;
+    score += score_string_field(
+        "test_id",
+        node.attrs
+            .get("data-testid")
+            .or_else(|| node.attrs.get("data-test-id"))
+            .map(String::as_str),
+        matcher.test_id.as_deref(),
         matcher.exact.unwrap_or(false),
         &mut fields,
     )?;
@@ -247,6 +260,13 @@ fn exact_match(
         && exact_string_field(
             node.attrs.get("href").map(String::as_str),
             matcher.href_contains.as_deref(),
+        )
+        && exact_string_field(
+            node.attrs
+                .get("data-testid")
+                .or_else(|| node.attrs.get("data-test-id"))
+                .map(String::as_str),
+            matcher.test_id.as_deref(),
         )
 }
 
@@ -467,6 +487,8 @@ mod tests {
 
     fn matcher_with_text(text: &str) -> CommandMatcher {
         CommandMatcher {
+            selector: None,
+            test_id: None,
             role: None,
             name: None,
             label: None,
@@ -570,6 +592,8 @@ mod tests {
             }],
         };
         let matcher = CommandMatcher {
+            selector: None,
+            test_id: None,
             role: Some("button".into()),
             name: Some("Save".into()),
             label: None,

@@ -47,7 +47,7 @@ Global flags:
 Production state model:
 
 - Chromium browser profiles are ephemeral and not a persistence API
-- Chromium credential storage and autofill persistence are disabled in the runtime
+- Chromium credential storage and autofill are enabled by default in the runtime
 - Aegis-owned state lives under `~/.aegis` by default, or `$AEGIS_HOME` if set
 - session continuity goes through `GET /session`, `POST /session`, `POST /session/save`, and `POST /session/load`
 - the active profile persists to `~/.aegis/profiles/<profile>/session.json`
@@ -57,7 +57,7 @@ Production state model:
 - saved browser credentials live under each profile's `secrets.credentials.entries`
 - traces go through `POST /trace/enable`
 - if `--start-url` is omitted, the runtime boots into a local no-network bootstrap page
-- Aegis does not use Chrome/Brave Safe Storage or browser login/profile databases in the production path
+- Aegis-owned credential capture is stored under `~/.aegis`; browser-managed credential storage and autofill use Chromium's runtime profile behavior
 
 For local production-like use, the canonical path is one installed release app at a
 platform-native location:

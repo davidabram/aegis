@@ -6,7 +6,7 @@ HOST_LIB="${AEGIS_SMOKE_HOST_LIB:-}"
 ADDR="${AEGIS_SMOKE_ADDR:-127.0.0.1:7881}"
 BASE_URL="http://${ADDR}"
 TRACE_PATH="${ROOT_DIR}/.fozzy/host_backed_trace.fozzy"
-PROFILE="host-backed-smoke"
+PROFILE="${AEGIS_SMOKE_PROFILE:-host-backed-smoke}"
 MODE="${AEGIS_SMOKE_MODE:-headless}"
 
 DOCTOR_JSON="$(cargo run --quiet -- native doctor)"
@@ -58,6 +58,7 @@ if not isinstance(value, bool):
 print("true" if value else "false")
 PY
 )"
+WORKSPACE_APP_DIR="$(dirname "$(dirname "${WORKSPACE_APP_EXECUTABLE}")")"
 
 if [[ -z "${HOST_LIB}" ]]; then
   if [[ -f "${WORKSPACE_HOST_LIB}" ]]; then
@@ -102,19 +103,19 @@ cleanup() {
     kill -9 "${SERVER_PID}" 2>/dev/null || true
     wait "${SERVER_PID}" 2>/dev/null || true
   fi
+  pkill -f "${WORKSPACE_APP_DIR}/Contents/Frameworks/aegis_native Helper" 2>/dev/null || true
+  pkill -f "${WORKSPACE_APP_DIR}/Contents/MacOS/aegis_native" 2>/dev/null || true
   rm -rf "${TMP_DIR}"
 }
 trap cleanup EXIT
 
+pkill -f "${WORKSPACE_APP_DIR}/Contents/Frameworks/aegis_native Helper" 2>/dev/null || true
+pkill -f "${WORKSPACE_APP_DIR}/Contents/MacOS/aegis_native" 2>/dev/null || true
+sleep 1
+
 cd "${ROOT_DIR}"
 mkdir -p "$(dirname "${TRACE_PATH}")"
-cargo run --quiet -- \
-  --host-lib "${HOST_LIB}" \
-  --mode "${MODE}" \
-  --profile "${PROFILE}" \
-  serve --addr "${ADDR}" >"${SERVER_LOG}" 2>&1 &
-SERVER_PID=$!
-
+wait_for_server() {
 python3 - <<'PY' "${BASE_URL}" "${SERVER_LOG}"
 import json, sys, time, urllib.request, urllib.error
 
@@ -144,9 +145,37 @@ except FileNotFoundError:
 
 raise SystemExit(f"server failed to become command-ready: {last_error}")
 PY
+}
+
+SERVER_READY=0
+for attempt in 1 2 3; do
+  cargo run --quiet -- \
+    --host-lib "${HOST_LIB}" \
+    --mode "${MODE}" \
+    --profile "${PROFILE}-${attempt}" \
+    serve --addr "${ADDR}" >"${SERVER_LOG}" 2>&1 &
+  SERVER_PID=$!
+
+  if wait_for_server; then
+    SERVER_READY=1
+    break
+  fi
+
+  if [[ -n "${SERVER_PID:-}" ]] && kill -0 "${SERVER_PID}" 2>/dev/null; then
+    kill "${SERVER_PID}" 2>/dev/null || true
+    wait "${SERVER_PID}" 2>/dev/null || true
+  fi
+  pkill -f "${WORKSPACE_APP_DIR}/Contents/Frameworks/aegis_native Helper" 2>/dev/null || true
+  pkill -f "${WORKSPACE_APP_DIR}/Contents/MacOS/aegis_native" 2>/dev/null || true
+  sleep 1
+done
+
+if [[ "${SERVER_READY}" != "1" ]]; then
+  exit 1
+fi
 
 python3 - <<'PY' "${BASE_URL}" "${TRACE_PATH}"
-import json, sys, urllib.parse, urllib.request
+import base64, io, json, sys, urllib.parse, urllib.request, wave
 
 base_url = sys.argv[1]
 trace_path = sys.argv[2]
@@ -166,6 +195,14 @@ def request(method, path, payload=None):
 
 request("POST", "/trace/enable", {"path": trace_path})
 
+wav_buffer = io.BytesIO()
+with wave.open(wav_buffer, "wb") as wav_file:
+    wav_file.setnchannels(1)
+    wav_file.setsampwidth(2)
+    wav_file.setframerate(8000)
+    wav_file.writeframes(b"\x00\x00" * 8000)
+audio_data_url = "data:audio/wav;base64," + base64.b64encode(wav_buffer.getvalue()).decode("ascii")
+
 html = """<!doctype html>
 <html>
   <head><title>Aegis Smoke</title></head>
@@ -177,6 +214,22 @@ html = """<!doctype html>
       <li>Open result</li>
     </ul>
     <div id="status" role="status">Idle</div>
+    <label
+      id="marker-option"
+      data-testid="marker-option"
+      for="marker-type-static"
+      onclick="document.getElementById('status').textContent = 'Marker selected';"
+      style="display:inline-block;padding:8px;border:1px solid #888;cursor:pointer;"
+    >Static marker</label>
+    <input id="marker-type-static" type="radio" name="marker-type" value="static" />
+    <audio
+      id="media-probe"
+      data-testid="media-probe"
+      tabindex="0"
+      controls
+      muted
+      src="{audio_data_url}"
+    ></audio>
     <button
       id="submit"
       type="button"
@@ -184,7 +237,7 @@ html = """<!doctype html>
       onclick="document.title = document.getElementById('search').value; document.getElementById('status').textContent = 'Saved';"
     >Save</button>
   </body>
-</html>"""
+</html>""".format(audio_data_url=audio_data_url)
 data_url = "data:text/html," + urllib.parse.quote(html, safe="")
 
 navigate_events = request("POST", "/navigate", {"url": data_url})
@@ -262,6 +315,37 @@ report = request("POST", "/execute", {
         {
             "type": "click",
             "match": {
+                "selector": "[data-testid='marker-option']",
+                "test_id": "marker-option"
+            }
+        },
+        {
+            "type": "wait_for",
+            "text": "Marker selected",
+            "timeout_ms": 2000,
+            "poll_interval_ms": 25
+        },
+        {
+            "type": "press_key",
+            "key": "Space",
+            "target": {
+                "match": {
+                    "selector": "[data-testid='media-probe']",
+                    "test_id": "media-probe",
+                    "tag": "audio"
+                }
+            }
+        },
+        {
+            "type": "wait_for",
+            "media_ready_state_at_least": 1,
+            "media_duration_known": True,
+            "timeout_ms": 4000,
+            "poll_interval_ms": 25
+        },
+        {
+            "type": "click",
+            "match": {
                 "role": "link",
                 "name": "Open result",
                 "actionable": True,
@@ -287,8 +371,12 @@ assert report["results"][0]["value"]["matcher_debug"]["candidate_count"] >= 1, r
 assert report["results"][1]["value"]["id"] > 0, report
 assert report["results"][3]["value"]["triggered_submit"] is False, report
 assert report["results"][4]["ok"] is True, report
-assert report["results"][5]["value"]["navigation_changed"] is False, report
+assert report["results"][5]["value"]["clicked"] > 0, report
 assert report["results"][6]["ok"] is True, report
+assert report["results"][7]["value"]["media_toggled"] is True, report
+assert report["results"][8]["ok"] is True, report
+assert report["results"][9]["value"]["navigation_changed"] is False, report
+assert report["results"][10]["ok"] is True, report
 assert report["results"][-1]["value"]["title"] == "Result opened", report
 assert report["results"][-1]["value"]["status"] == "Result opened", report
 
@@ -308,4 +396,9 @@ assert doctor["runtime"]["document_ready_state"] in {"interactive", "complete"},
 assert doctor["runtime"]["host"]["browser_available"] is True, doctor
 assert doctor["runtime"]["host"]["renderer_ready"] is True, doctor
 assert doctor["runtime"]["host"]["cancel_requested"] is False, doctor
+assert len(doctor["runtime"]["media"]) >= 1, doctor
+assert doctor["runtime"]["media"][0]["play_attempts"] >= 1, doctor
+assert doctor["runtime"]["media"][0]["loaded_metadata_count"] >= 1, doctor
+assert doctor["runtime"]["media"][0]["duration"] is not None, doctor
+assert doctor["runtime"]["media"][0]["last_event"] is not None, doctor
 PY

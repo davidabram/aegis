@@ -1,11 +1,14 @@
 use crate::browser::BrowserConfig;
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::commands::command::{Command, CommandResult, CommandTarget};
+use crate::commands::command::{Command, CommandResult, CommandTarget, UploadFilePayload};
 use crate::commands::matcher::{DesiredAction, resolve_command_target};
 use crate::dom::diff::DomMutation;
 use crate::dom::node::DomSnapshot;
@@ -44,6 +47,7 @@ pub struct RuntimeStatus {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MediaDiagnostics {
     pub index: usize,
+    pub node_id: Option<u64>,
     pub tag: String,
     pub current_src: Option<String>,
     pub ready_state: Option<u8>,
@@ -54,7 +58,23 @@ pub struct MediaDiagnostics {
     pub muted: Option<bool>,
     pub seeking: Option<bool>,
     pub current_time: Option<f64>,
+    pub playback_rate: Option<f64>,
+    pub volume: Option<f64>,
+    pub loop_enabled: Option<bool>,
+    pub autoplay: Option<bool>,
+    pub controls: Option<bool>,
+    pub play_attempts: Option<u64>,
+    pub play_resolved: Option<u64>,
+    pub play_rejected: Option<u64>,
+    pub pause_calls: Option<u64>,
+    pub load_calls: Option<u64>,
+    pub loaded_metadata_count: Option<u64>,
+    pub stalled_count: Option<u64>,
+    pub last_event: Option<String>,
+    #[serde(default)]
+    pub recent_events: Vec<String>,
     pub error: Option<String>,
+    pub last_play_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -378,23 +398,22 @@ impl AegisRuntime {
     }
 
     fn commands_require_dom_snapshot(&self, commands: &[Command]) -> bool {
-        commands.iter().any(|command| {
-            matches!(
-                command,
-                Command::Click { .. }
-                    | Command::Hover { .. }
-                    | Command::SetValue { .. }
-                    | Command::Drag { .. }
-                    | Command::Geometry { .. }
-                    | Command::PressKey {
-                        target: Some(_),
-                        ..
-                    }
-                    | Command::WaitFor {
-                        target: Some(_),
-                        ..
-                    }
-            )
+        commands.iter().any(|command| match command {
+            Command::Click { target }
+            | Command::Hover { target }
+            | Command::SetValue { target, .. }
+            | Command::SetFiles { target, .. }
+            | Command::Drag { target, .. }
+            | Command::Geometry { target } => self.command_target_requires_snapshot(target),
+            Command::PressKey {
+                target: Some(target),
+                ..
+            }
+            | Command::WaitFor {
+                target: Some(target),
+                ..
+            } => self.command_target_requires_snapshot(target),
+            _ => false,
         })
     }
 
@@ -420,15 +439,22 @@ impl AegisRuntime {
         let mut final_snapshot = None;
 
         for command in commands {
-            if matches!(command, Command::WaitFor { .. }) {
+            if matches!(
+                command,
+                Command::WaitFor { .. } | Command::MediaState { .. }
+            ) {
                 let (batch_results, batch_events, _snapshot) =
                     self.flush_pending_commands(batch_id, &pending)?;
                 results.extend(batch_results);
                 all_events.extend(batch_events);
                 pending.clear();
 
-                let wait_result = self.execute_wait_for(command)?;
-                results.push(wait_result);
+                let command_result = match command {
+                    Command::WaitFor { .. } => self.execute_wait_for(command)?,
+                    Command::MediaState { target } => self.execute_media_state(target.as_ref())?,
+                    _ => unreachable!("non-bridge command handled above"),
+                };
+                results.push(command_result);
                 final_snapshot = Some(self.dom.snapshot());
             } else {
                 pending.push(command.clone());
@@ -515,6 +541,9 @@ impl AegisRuntime {
             } | Command::SetValue {
                 target: CommandTarget::Match { .. },
                 ..
+            } | Command::SetFiles {
+                target: CommandTarget::Match { .. },
+                ..
             } | Command::Drag {
                 target: CommandTarget::Match { .. },
                 ..
@@ -524,21 +553,54 @@ impl AegisRuntime {
                 target: Some(CommandTarget::Match { .. }),
                 ..
             }
-        )
+        ) && match command {
+            Command::Click { target }
+            | Command::Hover { target }
+            | Command::SetValue { target, .. }
+            | Command::SetFiles { target, .. }
+            | Command::Drag { target, .. }
+            | Command::Geometry { target } => self.command_target_requires_snapshot(target),
+            Command::PressKey {
+                target: Some(target),
+                ..
+            } => self.command_target_requires_snapshot(target),
+            _ => false,
+        }
     }
 
     fn resolve_command_for_bridge(&self, command: &Command) -> Result<Command, CommandResult> {
         let snapshot = self.dom.snapshot();
         match command {
             Command::Click { target } => Ok(Command::Click {
-                target: self.resolve_target_id(&snapshot, target, Some(DesiredAction::Click))?,
+                target: self.resolve_target_for_bridge(
+                    &snapshot,
+                    target,
+                    Some(DesiredAction::Click),
+                )?,
             }),
             Command::Hover { target } => Ok(Command::Hover {
-                target: self.resolve_target_id(&snapshot, target, Some(DesiredAction::Hover))?,
+                target: self.resolve_target_for_bridge(
+                    &snapshot,
+                    target,
+                    Some(DesiredAction::Hover),
+                )?,
             }),
             Command::SetValue { target, value } => Ok(Command::SetValue {
-                target: self.resolve_target_id(&snapshot, target, Some(DesiredAction::Type))?,
+                target: self.resolve_target_for_bridge(
+                    &snapshot,
+                    target,
+                    Some(DesiredAction::Type),
+                )?,
                 value: value.clone(),
+            }),
+            Command::SetFiles { target, paths, .. } => Ok(Command::SetFiles {
+                target: self.resolve_target_for_bridge(
+                    &snapshot,
+                    target,
+                    Some(DesiredAction::Type),
+                )?,
+                paths: paths.clone(),
+                files: Some(load_upload_payloads(paths)?),
             }),
             Command::PressKey {
                 target,
@@ -552,7 +614,11 @@ impl AegisRuntime {
                 target: target
                     .as_ref()
                     .map(|target| {
-                        self.resolve_target_id(&snapshot, target, Some(DesiredAction::PressKey))
+                        self.resolve_target_for_bridge(
+                            &snapshot,
+                            target,
+                            Some(DesiredAction::PressKey),
+                        )
                     })
                     .transpose()?,
                 key: key.clone(),
@@ -571,7 +637,11 @@ impl AegisRuntime {
                 steps,
                 handle,
             } => Ok(Command::Drag {
-                target: self.resolve_target_id(&snapshot, target, Some(DesiredAction::Hover))?,
+                target: self.resolve_target_for_bridge(
+                    &snapshot,
+                    target,
+                    Some(DesiredAction::Hover),
+                )?,
                 delta_x: *delta_x,
                 delta_y: *delta_y,
                 to_x: *to_x,
@@ -580,9 +650,29 @@ impl AegisRuntime {
                 handle: handle.clone(),
             }),
             Command::Geometry { target } => Ok(Command::Geometry {
-                target: self.resolve_target_id(&snapshot, target, None)?,
+                target: self.resolve_target_for_bridge(&snapshot, target, None)?,
             }),
+            Command::MediaState { .. } => Ok(command.clone()),
             _ => Ok(command.clone()),
+        }
+    }
+
+    fn resolve_target_for_bridge(
+        &self,
+        snapshot: &DomSnapshot,
+        target: &CommandTarget,
+        action: Option<DesiredAction>,
+    ) -> Result<CommandTarget, CommandResult> {
+        if !self.command_target_requires_snapshot(target) {
+            return Ok(target.clone());
+        }
+        self.resolve_target_id(snapshot, target, action)
+    }
+
+    fn command_target_requires_snapshot(&self, target: &CommandTarget) -> bool {
+        match target {
+            CommandTarget::Id { .. } => false,
+            CommandTarget::Match { matcher } => matcher.selector.is_none(),
         }
     }
 
@@ -672,6 +762,44 @@ impl AegisRuntime {
 
             thread::sleep(Duration::from_millis(poll_interval_ms));
         }
+    }
+
+    fn execute_media_state(
+        &mut self,
+        target: Option<&CommandTarget>,
+    ) -> Result<CommandResult, AegisError> {
+        self.refresh_live_state(true)?;
+        let resolved_target = if let Some(target) = target {
+            if self.command_target_requires_snapshot(target) {
+                self.refresh_dom_snapshot()?;
+            }
+            Some(
+                self.resolve_target_id(&self.dom.snapshot(), target, None)
+                    .map_err(|error| {
+                        AegisError::Bridge(
+                            error
+                                .error
+                                .unwrap_or_else(|| "media target resolution failed".into()),
+                        )
+                    })?,
+            )
+        } else {
+            None
+        };
+        let target_id = match resolved_target {
+            Some(CommandTarget::Id { id }) => Some(id),
+            _ => None,
+        };
+        let media = self
+            .media
+            .iter()
+            .filter(|entry| target_id.is_none_or(|id| entry.node_id == Some(id)))
+            .cloned()
+            .collect::<Vec<_>>();
+        Ok(CommandResult::ok(json!({
+            "count": media.len(),
+            "media": media,
+        })))
     }
 
     fn wait_condition_satisfied(
@@ -848,28 +976,12 @@ impl AegisRuntime {
             return Ok(());
         }
 
-        let script = r#"(() => {
-            const media = Array.from(document.querySelectorAll("video, audio")).map((node, index) => ({
-                index,
-                tag: node.tagName ? node.tagName.toLowerCase() : "media",
-                current_src: node.currentSrc || node.src || null,
-                ready_state: Number.isFinite(node.readyState) ? node.readyState : null,
-                network_state: Number.isFinite(node.networkState) ? node.networkState : null,
-                duration: Number.isFinite(node.duration) ? node.duration : null,
-                paused: !!node.paused,
-                ended: !!node.ended,
-                muted: !!node.muted,
-                seeking: !!node.seeking,
-                current_time: Number.isFinite(node.currentTime) ? node.currentTime : null,
-                error: node.error ? `${node.error.code || "media_error"}${node.error.message ? `: ${node.error.message}` : ""}` : null
-            }));
-            return JSON.stringify({
-                url: window.location ? window.location.href : null,
-                title: document.title || null,
-                readyState: document.readyState || null,
-                media
-            });
-        })()"#;
+        let script = r#"JSON.stringify(window.__aegis ? window.__aegis.currentPageState() : {
+            url: window.location ? window.location.href : null,
+            title: document.title || null,
+            ready_state: document.readyState || null,
+            media: []
+        })"#;
         let raw = self.bridge.eval_js(script)?;
         let value: Value = serde_json::from_str(&raw)
             .map_err(|error| AegisError::Bridge(format!("live state json parse error: {error}")))?;
@@ -883,7 +995,7 @@ impl AegisRuntime {
             .and_then(Value::as_str)
             .map(ToOwned::to_owned);
         self.document_ready_state = value
-            .get("readyState")
+            .get("ready_state")
             .and_then(Value::as_str)
             .map(ToOwned::to_owned);
         self.media = value
@@ -960,4 +1072,57 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+fn load_upload_payloads(paths: &[PathBuf]) -> Result<Vec<UploadFilePayload>, CommandResult> {
+    paths.iter().map(|path| load_upload_payload(path)).collect()
+}
+
+fn load_upload_payload(path: &Path) -> Result<UploadFilePayload, CommandResult> {
+    let bytes = fs::read(path).map_err(|error| {
+        CommandResult::err(format!(
+            "failed to read upload file {}: {error}",
+            path.display()
+        ))
+    })?;
+    let metadata = fs::metadata(path).map_err(|error| {
+        CommandResult::err(format!(
+            "failed to stat upload file {}: {error}",
+            path.display()
+        ))
+    })?;
+    let last_modified_ms = metadata
+        .modified()
+        .ok()
+        .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+        .map(|value| value.as_millis() as u64);
+    Ok(UploadFilePayload {
+        name: path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("upload.bin")
+            .to_string(),
+        mime_type: infer_mime_type(path),
+        base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+        last_modified_ms,
+    })
+}
+
+fn infer_mime_type(path: &Path) -> Option<String> {
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    let mime = match extension.as_str() {
+        "pdf" => "application/pdf",
+        "txt" => "text/plain",
+        "csv" => "text/csv",
+        "json" => "application/json",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "mp4" => "video/mp4",
+        _ => "application/octet-stream",
+    };
+    Some(mime.to_string())
 }

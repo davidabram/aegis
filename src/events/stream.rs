@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
 use crate::dom::diff::DomMutation;
@@ -32,8 +32,7 @@ pub enum WebSocketFrameDirection {
     Received,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq)]
 pub enum RuntimeEvent {
     DomMutation {
         changes: Vec<DomMutation>,
@@ -44,21 +43,13 @@ pub enum RuntimeEvent {
     Network {
         request_id: String,
         url: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         method: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         resource_type: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         phase: Option<NetworkResourcePhase>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         status: Option<u16>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         status_text: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         mime_type: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         from_cache: Option<bool>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         error_text: Option<String>,
     },
     WebSocketOpen {
@@ -68,18 +59,14 @@ pub enum RuntimeEvent {
     WebSocketHandshake {
         request_id: String,
         url: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         status: Option<u16>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         status_text: Option<String>,
     },
     WebSocketFrame {
         request_id: String,
         url: String,
         direction: WebSocketFrameDirection,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         opcode: Option<u8>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         mask: Option<bool>,
         payload_preview: String,
         payload_length: usize,
@@ -94,6 +81,251 @@ pub enum RuntimeEvent {
         message: String,
         data: Option<Value>,
     },
+    Unknown {
+        event_type: String,
+        payload: Value,
+    },
+}
+
+impl Serialize for RuntimeEvent {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let value = match self {
+            RuntimeEvent::DomMutation { changes } => {
+                serde_json::json!({ "type": "dom_mutation", "changes": changes })
+            }
+            RuntimeEvent::Navigation { url } => {
+                serde_json::json!({ "type": "navigation", "url": url })
+            }
+            RuntimeEvent::Network {
+                request_id,
+                url,
+                method,
+                resource_type,
+                phase,
+                status,
+                status_text,
+                mime_type,
+                from_cache,
+                error_text,
+            } => serde_json::json!({
+                "type": "network",
+                "request_id": request_id,
+                "url": url,
+                "method": method,
+                "resource_type": resource_type,
+                "phase": phase,
+                "status": status,
+                "status_text": status_text,
+                "mime_type": mime_type,
+                "from_cache": from_cache,
+                "error_text": error_text,
+            }),
+            RuntimeEvent::WebSocketOpen { request_id, url } => {
+                serde_json::json!({ "type": "websocket_open", "request_id": request_id, "url": url })
+            }
+            RuntimeEvent::WebSocketHandshake {
+                request_id,
+                url,
+                status,
+                status_text,
+            } => serde_json::json!({
+                "type": "websocket_handshake",
+                "request_id": request_id,
+                "url": url,
+                "status": status,
+                "status_text": status_text,
+            }),
+            RuntimeEvent::WebSocketFrame {
+                request_id,
+                url,
+                direction,
+                opcode,
+                mask,
+                payload_preview,
+                payload_length,
+                truncated,
+            } => serde_json::json!({
+                "type": "websocket_frame",
+                "request_id": request_id,
+                "url": url,
+                "direction": direction,
+                "opcode": opcode,
+                "mask": mask,
+                "payload_preview": payload_preview,
+                "payload_length": payload_length,
+                "truncated": truncated,
+            }),
+            RuntimeEvent::WebSocketClose { request_id, url } => {
+                serde_json::json!({ "type": "websocket_close", "request_id": request_id, "url": url })
+            }
+            RuntimeEvent::Log {
+                level,
+                message,
+                data,
+            } => serde_json::json!({
+                "type": "log",
+                "level": level,
+                "message": message,
+                "data": data,
+            }),
+            RuntimeEvent::Unknown { payload, .. } => payload.clone(),
+        };
+        value.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for RuntimeEvent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let payload = Value::deserialize(deserializer)?;
+        let event_type = payload
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
+
+        fn from_value<T: serde::de::DeserializeOwned, E: serde::de::Error>(
+            payload: &Value,
+        ) -> Result<T, E> {
+            serde_json::from_value(payload.clone()).map_err(E::custom)
+        }
+
+        match event_type.as_str() {
+            "dom_mutation" => {
+                #[derive(Deserialize)]
+                struct DomMutationEvent {
+                    changes: Vec<DomMutation>,
+                }
+                let value: DomMutationEvent = from_value(&payload)?;
+                Ok(RuntimeEvent::DomMutation {
+                    changes: value.changes,
+                })
+            }
+            "navigation" => {
+                #[derive(Deserialize)]
+                struct NavigationEvent {
+                    url: String,
+                }
+                let value: NavigationEvent = from_value(&payload)?;
+                Ok(RuntimeEvent::Navigation { url: value.url })
+            }
+            "network" => {
+                #[derive(Deserialize)]
+                struct NetworkEvent {
+                    request_id: String,
+                    url: String,
+                    method: Option<String>,
+                    resource_type: Option<String>,
+                    phase: Option<NetworkResourcePhase>,
+                    status: Option<u16>,
+                    status_text: Option<String>,
+                    mime_type: Option<String>,
+                    from_cache: Option<bool>,
+                    error_text: Option<String>,
+                }
+                let value: NetworkEvent = from_value(&payload)?;
+                Ok(RuntimeEvent::Network {
+                    request_id: value.request_id,
+                    url: value.url,
+                    method: value.method,
+                    resource_type: value.resource_type,
+                    phase: value.phase,
+                    status: value.status,
+                    status_text: value.status_text,
+                    mime_type: value.mime_type,
+                    from_cache: value.from_cache,
+                    error_text: value.error_text,
+                })
+            }
+            "websocket_open" => {
+                #[derive(Deserialize)]
+                struct WebSocketOpenEvent {
+                    request_id: String,
+                    url: String,
+                }
+                let value: WebSocketOpenEvent = from_value(&payload)?;
+                Ok(RuntimeEvent::WebSocketOpen {
+                    request_id: value.request_id,
+                    url: value.url,
+                })
+            }
+            "websocket_handshake" => {
+                #[derive(Deserialize)]
+                struct WebSocketHandshakeEvent {
+                    request_id: String,
+                    url: String,
+                    status: Option<u16>,
+                    status_text: Option<String>,
+                }
+                let value: WebSocketHandshakeEvent = from_value(&payload)?;
+                Ok(RuntimeEvent::WebSocketHandshake {
+                    request_id: value.request_id,
+                    url: value.url,
+                    status: value.status,
+                    status_text: value.status_text,
+                })
+            }
+            "websocket_frame" => {
+                #[derive(Deserialize)]
+                struct WebSocketFrameEvent {
+                    request_id: String,
+                    url: String,
+                    direction: WebSocketFrameDirection,
+                    opcode: Option<u8>,
+                    mask: Option<bool>,
+                    payload_preview: String,
+                    payload_length: usize,
+                    truncated: bool,
+                }
+                let value: WebSocketFrameEvent = from_value(&payload)?;
+                Ok(RuntimeEvent::WebSocketFrame {
+                    request_id: value.request_id,
+                    url: value.url,
+                    direction: value.direction,
+                    opcode: value.opcode,
+                    mask: value.mask,
+                    payload_preview: value.payload_preview,
+                    payload_length: value.payload_length,
+                    truncated: value.truncated,
+                })
+            }
+            "websocket_close" => {
+                #[derive(Deserialize)]
+                struct WebSocketCloseEvent {
+                    request_id: String,
+                    url: String,
+                }
+                let value: WebSocketCloseEvent = from_value(&payload)?;
+                Ok(RuntimeEvent::WebSocketClose {
+                    request_id: value.request_id,
+                    url: value.url,
+                })
+            }
+            "log" => {
+                #[derive(Deserialize)]
+                struct LogEvent {
+                    level: String,
+                    message: String,
+                    data: Option<Value>,
+                }
+                let value: LogEvent = from_value(&payload)?;
+                Ok(RuntimeEvent::Log {
+                    level: value.level,
+                    message: value.message,
+                    data: value.data,
+                })
+            }
+            _ => Ok(RuntimeEvent::Unknown {
+                event_type,
+                payload,
+            }),
+        }
+    }
 }
 
 impl RuntimeEvent {
@@ -107,6 +339,7 @@ impl RuntimeEvent {
             | RuntimeEvent::WebSocketFrame { .. }
             | RuntimeEvent::WebSocketClose { .. } => EventType::WebSocket,
             RuntimeEvent::Log { .. } => EventType::Log,
+            RuntimeEvent::Unknown { .. } => EventType::Log,
         }
     }
 }
