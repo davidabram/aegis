@@ -59,7 +59,12 @@ pub struct ServeRootState {
     host_library: PathBuf,
     browser: BrowserConfig,
     default_context_id: String,
-    contexts: Arc<Mutex<HashMap<String, ApiState>>>,
+    contexts: Arc<Mutex<HashMap<String, ManagedContext>>>,
+}
+
+struct ManagedContext {
+    api: ApiState,
+    owner_thread: Option<thread::JoinHandle<()>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -271,7 +276,7 @@ fn spawn_context_state(
     host_library: PathBuf,
     browser_config: BrowserConfig,
     profile_name: String,
-) -> Result<ApiState, AegisError> {
+) -> Result<ManagedContext, AegisError> {
     emit_telemetry(
         "context_start",
         json!({
@@ -313,7 +318,7 @@ fn spawn_context_state(
     let (startup_tx, startup_rx) = mpsc::channel::<Result<ServeStartupMetrics, AegisError>>();
     let state_for_thread = state.clone();
     let shutdown_state = state_for_thread.clone();
-    thread::spawn(move || {
+    let owner_thread = thread::spawn(move || {
         let client_connect_started = std::time::Instant::now();
         let mut client = match LoadedAegisClient::connect(
             startup_host_library.clone(),
@@ -696,7 +701,10 @@ fn spawn_context_state(
         Err(error) => return Err(AegisError::Bridge(error.to_string())),
     }
 
-    Ok(state_for_thread)
+    Ok(ManagedContext {
+        api: state_for_thread,
+        owner_thread: Some(owner_thread),
+    })
 }
 
 pub async fn serve(
@@ -708,7 +716,7 @@ pub async fn serve(
     let default_context_id = "default".to_string();
     let default_context =
         spawn_context_state(host_library.clone(), browser_config.clone(), profile_name)?;
-    if let Ok(mut startup) = default_context.startup.lock() {
+    if let Ok(mut startup) = default_context.api.startup.lock() {
         startup.api_bind_ms = 0;
     }
     let root = ServeRootState {
@@ -731,10 +739,13 @@ pub async fn serve(
         }
     }
     eprintln!("Aegis serve ready on http://{}", addr);
-    let app = router(root);
+    let app = router(root.clone());
     axum::serve(listener, app)
         .await
         .map_err(|error| AegisError::Bridge(error.to_string()))?;
+    shutdown_all_contexts(&root)
+        .await
+        .map_err(|error| AegisError::Bridge(error.body.error))?;
     Ok(())
 }
 
@@ -975,10 +986,10 @@ impl ServeRootState {
         self.contexts
             .lock()
             .ok()
-            .and_then(|contexts| contexts.get(context_id).cloned())
+            .and_then(|contexts| contexts.get(context_id).map(|context| context.api.clone()))
     }
 
-    fn insert_context(&self, context_id: String, state: ApiState) -> Result<(), ApiError> {
+    fn insert_context(&self, context_id: String, state: ManagedContext) -> Result<(), ApiError> {
         let mut contexts = self.contexts.lock().map_err(|_| {
             ApiError::from(AegisError::Bridge("context registry lock poisoned".into()))
         })?;
@@ -986,7 +997,7 @@ impl ServeRootState {
         Ok(())
     }
 
-    fn remove_context(&self, context_id: &str) -> Result<Option<ApiState>, ApiError> {
+    fn remove_context(&self, context_id: &str) -> Result<Option<ManagedContext>, ApiError> {
         let mut contexts = self.contexts.lock().map_err(|_| {
             ApiError::from(AegisError::Bridge("context registry lock poisoned".into()))
         })?;
@@ -1000,13 +1011,13 @@ impl ServeRootState {
         let mut items = contexts
             .iter()
             .map(|(id, state)| {
-                let diagnostics = read_diagnostics(&state.diagnostics);
+                let diagnostics = read_diagnostics(&state.api.diagnostics);
                 ContextSummary {
                     id: id.clone(),
                     default: id == &self.default_context_id,
-                    host_library: state.host_library.clone(),
-                    browser: state.browser.clone(),
-                    profile: state.profile.clone(),
+                    host_library: state.api.host_library.clone(),
+                    browser: state.api.browser.clone(),
+                    profile: state.api.profile.clone(),
                     runtime_state: serde_json::to_value(&diagnostics.state)
                         .ok()
                         .and_then(|value| value.as_str().map(ToOwned::to_owned))
@@ -1017,6 +1028,14 @@ impl ServeRootState {
             .collect::<Vec<_>>();
         items.sort_by(|left, right| left.id.cmp(&right.id));
         Ok(items)
+    }
+
+    fn drain_contexts(&self) -> Result<Vec<(String, ManagedContext)>, ApiError> {
+        let mut contexts = self.contexts.lock().map_err(|_| {
+            ApiError::from(AegisError::Bridge("context registry lock poisoned".into()))
+        })?;
+        let drained = contexts.drain().collect::<Vec<_>>();
+        Ok(drained)
     }
 }
 
@@ -1103,6 +1122,17 @@ async fn shutdown_context(context_id: &str, state: &ApiState) -> Result<(), ApiE
     }
 }
 
+fn join_context_thread(context_id: &str, mut managed: ManagedContext) -> Result<(), ApiError> {
+    let Some(owner_thread) = managed.owner_thread.take() else {
+        return Ok(());
+    };
+    owner_thread.join().map_err(|_| {
+        ApiError::from(AegisError::Bridge(format!(
+            "context `{context_id}` owner thread panicked during shutdown"
+        )))
+    })
+}
+
 async fn snapshot_context_session_state(state: &ApiState) -> Result<SessionState, ApiError> {
     let (reply_tx, reply_rx) = oneshot::channel();
     state
@@ -1132,6 +1162,27 @@ async fn inject_context_session_state(
         Ok(Err(error)) => Err(reply_error(error)),
         Err(_) => Err(ApiError::timeout("inject_context_session_state")),
     }
+}
+
+async fn shutdown_all_contexts(root: &ServeRootState) -> Result<(), ApiError> {
+    let contexts = root.drain_contexts()?;
+    let mut first_error = None;
+    for (context_id, managed) in contexts {
+        if let Err(error) = shutdown_context(&context_id, &managed.api).await
+            && first_error.is_none()
+        {
+            first_error = Some(error);
+        }
+        if let Err(error) = join_context_thread(&context_id, managed)
+            && first_error.is_none()
+        {
+            first_error = Some(error);
+        }
+    }
+    if let Some(error) = first_error {
+        return Err(error);
+    }
+    Ok(())
 }
 
 async fn health(State(root): State<ServeRootState>) -> Result<Json<HealthResponse>, ApiError> {
@@ -1566,18 +1617,19 @@ async fn create_context(
     if let Some(source_context_id) = seed_from_context.as_deref() {
         let source_state = require_context_state(&root, source_context_id)?;
         let session = snapshot_context_session_state(&source_state).await?;
-        if let Err(error) = inject_context_session_state(&state, session).await {
-            let _ = shutdown_context(&context_id, &state).await;
+        if let Err(error) = inject_context_session_state(&state.api, session).await {
+            let _ = shutdown_context(&context_id, &state.api).await;
+            let _ = join_context_thread(&context_id, state);
             return Err(error);
         }
     }
-    let diagnostics = read_diagnostics(&state.diagnostics);
+    let diagnostics = read_diagnostics(&state.api.diagnostics);
     let summary = ContextSummary {
         id: context_id.clone(),
         default: false,
-        host_library: state.host_library.clone(),
-        browser: state.browser.clone(),
-        profile: state.profile.clone(),
+        host_library: state.api.host_library.clone(),
+        browser: state.api.browser.clone(),
+        profile: state.api.profile.clone(),
         runtime_state: serde_json::to_value(&diagnostics.state)
             .ok()
             .and_then(|value| value.as_str().map(ToOwned::to_owned))
@@ -1599,7 +1651,8 @@ async fn delete_context(
     }
     match root.remove_context(&context_id)? {
         Some(state) => {
-            shutdown_context(&context_id, &state).await?;
+            shutdown_context(&context_id, &state.api).await?;
+            join_context_thread(&context_id, state)?;
             Ok(StatusCode::NO_CONTENT)
         }
         None => Err(ApiError::not_found(format!(
@@ -2633,6 +2686,13 @@ mod tests {
         }
     }
 
+    fn dummy_managed_context(profile: &str) -> ManagedContext {
+        ManagedContext {
+            api: dummy_api_state(profile),
+            owner_thread: None,
+        }
+    }
+
     #[test]
     fn validate_context_name_rejects_invalid_characters() {
         assert!(validate_context_name("guest-1").is_ok());
@@ -2647,8 +2707,8 @@ mod tests {
             browser: BrowserConfig::default(),
             default_context_id: "default".into(),
             contexts: Arc::new(Mutex::new(HashMap::from([
-                ("guest".into(), dummy_api_state("guest")),
-                ("default".into(), dummy_api_state("default")),
+                ("guest".into(), dummy_managed_context("guest")),
+                ("default".into(), dummy_managed_context("default")),
             ]))),
         };
 
