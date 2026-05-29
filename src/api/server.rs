@@ -1140,6 +1140,101 @@ async fn api_manifest() -> Json<ApiManifest> {
             },
             ApiRouteDoc {
                 method: "GET",
+                path: "/contexts",
+                summary: "List all named browser contexts",
+            },
+            ApiRouteDoc {
+                method: "POST",
+                path: "/contexts",
+                summary: "Create a new isolated browser context",
+            },
+            ApiRouteDoc {
+                method: "GET",
+                path: "/contexts/:context_id",
+                summary: "Read one browser context summary",
+            },
+            ApiRouteDoc {
+                method: "DELETE",
+                path: "/contexts/:context_id",
+                summary: "Delete one non-default browser context",
+            },
+            ApiRouteDoc {
+                method: "GET",
+                path: "/contexts/:context_id/healthz",
+                summary: "Context-scoped health",
+            },
+            ApiRouteDoc {
+                method: "GET",
+                path: "/contexts/:context_id/readyz",
+                summary: "Context-scoped readiness",
+            },
+            ApiRouteDoc {
+                method: "GET",
+                path: "/contexts/:context_id/doctor",
+                summary: "Context-scoped diagnostics",
+            },
+            ApiRouteDoc {
+                method: "GET",
+                path: "/contexts/:context_id/runtime",
+                summary: "Context runtime config and live state",
+            },
+            ApiRouteDoc {
+                method: "POST",
+                path: "/contexts/:context_id/runtime/cancel",
+                summary: "Cancel the active operation in one context",
+            },
+            ApiRouteDoc {
+                method: "GET",
+                path: "/contexts/:context_id/session",
+                summary: "Snapshot one context session",
+            },
+            ApiRouteDoc {
+                method: "POST",
+                path: "/contexts/:context_id/session",
+                summary: "Inject session state into one context",
+            },
+            ApiRouteDoc {
+                method: "POST",
+                path: "/contexts/:context_id/session/save",
+                summary: "Persist one context profile session",
+            },
+            ApiRouteDoc {
+                method: "POST",
+                path: "/contexts/:context_id/session/load",
+                summary: "Load one context profile session",
+            },
+            ApiRouteDoc {
+                method: "POST",
+                path: "/contexts/:context_id/navigate",
+                summary: "Navigate one context",
+            },
+            ApiRouteDoc {
+                method: "POST",
+                path: "/contexts/:context_id/execute",
+                summary: "Execute commands in one context",
+            },
+            ApiRouteDoc {
+                method: "GET",
+                path: "/contexts/:context_id/dom",
+                summary: "Fetch one context DOM snapshot",
+            },
+            ApiRouteDoc {
+                method: "GET",
+                path: "/contexts/:context_id/events",
+                summary: "Read buffered events for one context",
+            },
+            ApiRouteDoc {
+                method: "GET",
+                path: "/contexts/:context_id/events/live",
+                summary: "Stream events for one context over SSE",
+            },
+            ApiRouteDoc {
+                method: "POST",
+                path: "/contexts/:context_id/trace/enable",
+                summary: "Enable trace recording for one context",
+            },
+            ApiRouteDoc {
+                method: "GET",
                 path: "/healthz",
                 summary: "Control-plane and runtime health",
             },
@@ -1220,6 +1315,7 @@ async fn api_manifest() -> Json<ApiManifest> {
             "network_event_capture",
             "first_class_file_upload",
             "media_diagnostics",
+            "named_multi_context_control_plane",
             "session_snapshotting",
             "trace_recording",
         ],

@@ -197,6 +197,22 @@ Core routes:
 
 - `GET /`
 - `GET /manifest`
+- `GET /version`
+- `GET /contexts`
+- `POST /contexts`
+- `GET /contexts/:context_id`
+- `DELETE /contexts/:context_id`
+- `GET /contexts/:context_id/healthz`
+- `GET /contexts/:context_id/readyz`
+- `GET /contexts/:context_id/runtime`
+- `POST /contexts/:context_id/navigate`
+- `POST /contexts/:context_id/execute`
+- `GET /contexts/:context_id/dom`
+- `GET /contexts/:context_id/events`
+- `GET /contexts/:context_id/events/live`
+- `GET /contexts/:context_id/session`
+- `POST /contexts/:context_id/session`
+- `POST /contexts/:context_id/trace/enable`
 - `GET /healthz`
 - `GET /readyz`
 - `GET /runtime`
@@ -216,6 +232,10 @@ renderer context, and live runtime API are all usable.
 
 `GET /` and `GET /manifest` expose a stable JSON discovery surface with the route list and
 supported command types so agents do not need to guess the control plane.
+
+Named contexts let one server own multiple isolated browser runtimes at once. The legacy root
+routes still target the default context, while `/contexts/:context_id/...` gives explicit control
+for host/guest, admin/user, or inviter/invitee flows without spinning up a second HTTP server.
 
 ### `GET /runtime`
 

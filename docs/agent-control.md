@@ -239,6 +239,26 @@ curl http://127.0.0.1:7878/manifest
 These endpoints return a stable JSON route manifest plus supported command types so agents can
 discover the control plane without probing for undocumented routes.
 
+The manifest now also advertises named multi-context routes. Root routes target the default
+context, while `/contexts/:context_id/...` routes provide explicit isolation for multi-user and
+multi-profile workflows behind one server process.
+
+### Contexts
+
+```bash
+curl http://127.0.0.1:7878/contexts
+curl -X POST http://127.0.0.1:7878/contexts \
+  -H 'content-type: application/json' \
+  -d '{"id":"guest","profile":"guest","mode":"headless"}'
+curl http://127.0.0.1:7878/contexts/guest/runtime
+curl -X POST http://127.0.0.1:7878/contexts/guest/navigate \
+  -H 'content-type: application/json' \
+  -d '{"url":"https://example.com"}'
+```
+
+Use contexts when you need host and guest sessions, buyer and seller, admin and user, or any
+other independent browser identities at the same time.
+
 ### Health
 
 ```bash
