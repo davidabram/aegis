@@ -35,6 +35,8 @@ pub struct RuntimeStatus {
     pub current_title: Option<String>,
     pub document_ready_state: Option<String>,
     #[serde(default)]
+    pub page_bootstrap: PageBootstrapDiagnostics,
+    #[serde(default)]
     pub media: Vec<MediaDiagnostics>,
     pub last_dom_refresh_at_ms: Option<u64>,
     pub last_live_state_refresh_at_ms: Option<u64>,
@@ -42,6 +44,33 @@ pub struct RuntimeStatus {
     pub last_successful_command_at_ms: Option<u64>,
     pub last_successful_bridge_roundtrip_at_ms: Option<u64>,
     pub host: HostRuntimeState,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PageBootstrapDiagnostics {
+    pub document_loaded: bool,
+    pub document_loaded_at_ms: Option<u64>,
+    pub module_scripts_present: bool,
+    pub module_script_count: usize,
+    #[serde(default)]
+    pub module_script_sources: Vec<String>,
+    pub root_selector: Option<String>,
+    pub root_present: bool,
+    pub root_child_element_count: usize,
+    pub root_text_length: usize,
+    pub root_html_length: usize,
+    pub body_text_length: usize,
+    pub body_descendant_count: usize,
+    pub dom_mutation_count: usize,
+    pub app_dom_mutated_after_load: bool,
+    pub body_mutation_after_load_count: usize,
+    pub root_mutation_after_load_count: usize,
+    pub module_bootstrap_observed: bool,
+    pub inspectable_dom_ready: bool,
+    pub script_error_count: usize,
+    pub last_script_error: Option<String>,
+    pub unhandled_rejection_count: usize,
+    pub last_unhandled_rejection: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -147,6 +176,7 @@ pub struct AegisRuntime {
     current_title: Option<String>,
     document_ready_state: Option<String>,
     media: Vec<MediaDiagnostics>,
+    page_bootstrap: PageBootstrapDiagnostics,
     last_dom_refresh_at_ms: Option<u64>,
     last_live_state_refresh_at_ms: Option<u64>,
     last_event_at_ms: Option<u64>,
@@ -182,6 +212,7 @@ impl AegisRuntime {
             current_url: None,
             current_title: None,
             document_ready_state: None,
+            page_bootstrap: PageBootstrapDiagnostics::default(),
             media: Vec::new(),
             last_dom_refresh_at_ms: None,
             last_live_state_refresh_at_ms: None,
@@ -394,6 +425,7 @@ impl AegisRuntime {
             current_url: self.current_url.clone(),
             current_title: self.current_title.clone(),
             document_ready_state: self.document_ready_state.clone(),
+            page_bootstrap: self.page_bootstrap.clone(),
             media: self.media.clone(),
             last_dom_refresh_at_ms: self.last_dom_refresh_at_ms,
             last_live_state_refresh_at_ms: self.last_live_state_refresh_at_ms,
@@ -1039,6 +1071,15 @@ impl AegisRuntime {
             .get("ready_state")
             .and_then(Value::as_str)
             .map(ToOwned::to_owned);
+        self.page_bootstrap = value
+            .get("bootstrap")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|error| {
+                AegisError::Bridge(format!("page bootstrap json parse error: {error}"))
+            })?
+            .unwrap_or_default();
         self.media = value
             .get("media")
             .cloned()

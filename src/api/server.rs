@@ -31,7 +31,7 @@ use crate::config_store::{
 use crate::dom::node::{DomNode, DomSnapshot};
 use crate::events::stream::{EventReadWindow, SequencedEvent};
 use crate::host::{LoadedAegisClient, RuntimeCancelHandle};
-use crate::runtime::executor::{ExecutionReport, RuntimeStatus};
+use crate::runtime::executor::{ExecutionReport, PageBootstrapDiagnostics, RuntimeStatus};
 use crate::session::cookies::SessionState;
 use crate::session::profile::{SessionProfileInfo, SessionProfileStore};
 use crate::transport::bridge::AegisError;
@@ -251,6 +251,11 @@ struct RuntimeDiagnosticsResponse {
     state: RuntimeOperationalState,
     control_plane_up: bool,
     command_ready: bool,
+    inspectable_dom_ready: bool,
+    document_loaded: bool,
+    module_scripts_present: bool,
+    module_bootstrap_observed: bool,
+    app_dom_mutated_after_load: bool,
     bridge_healthy: bool,
     browser_backend_healthy: bool,
     browser_process_up: bool,
@@ -1942,7 +1947,10 @@ async fn readiness(
 ) -> Result<Json<RuntimeDiagnosticsResponse>, ApiError> {
     let state = require_default_context_state(&root)?;
     let diagnostics = read_diagnostics(&state.diagnostics);
-    if diagnostics.command_ready {
+    let inspectable_gate_passed = !diagnostics.document_loaded
+        || !diagnostics.module_scripts_present
+        || diagnostics.inspectable_dom_ready;
+    if diagnostics.command_ready && inspectable_gate_passed {
         Ok(Json(diagnostics))
     } else {
         Err(ApiError::readiness(diagnostics))
@@ -2170,7 +2178,10 @@ async fn context_readiness(
 ) -> Result<Json<RuntimeDiagnosticsResponse>, ApiError> {
     let state = require_context_state(&root, &context_id)?;
     let diagnostics = read_diagnostics(&state.diagnostics);
-    if diagnostics.command_ready {
+    let inspectable_gate_passed = !diagnostics.document_loaded
+        || !diagnostics.module_scripts_present
+        || diagnostics.inspectable_dom_ready;
+    if diagnostics.command_ready && inspectable_gate_passed {
         Ok(Json(diagnostics))
     } else {
         Err(ApiError::readiness(diagnostics))
@@ -2540,10 +2551,18 @@ impl ApiError {
     }
 
     fn readiness(diagnostics: RuntimeDiagnosticsResponse) -> Self {
+        let not_inspectable = diagnostics.command_ready
+            && diagnostics.document_loaded
+            && diagnostics.module_scripts_present
+            && !diagnostics.inspectable_dom_ready;
         Self {
             status: StatusCode::SERVICE_UNAVAILABLE,
             body: ApiErrorBody {
-                error: "runtime is not command-ready".into(),
+                error: if not_inspectable {
+                    "runtime is attached, but the page is not yet inspectable".into()
+                } else {
+                    "runtime is not command-ready".into()
+                },
                 code: "not_ready".into(),
                 operation: diagnostics
                     .active_operation
@@ -2552,7 +2571,14 @@ impl ApiError {
                 stage: diagnostics
                     .active_operation
                     .as_ref()
-                    .map(|op| op.stage.clone()),
+                    .map(|op| op.stage.clone())
+                    .or_else(|| {
+                        if not_inspectable {
+                            Some("awaiting_page_bootstrap".into())
+                        } else {
+                            None
+                        }
+                    }),
                 elapsed_ms: diagnostics
                     .active_operation
                     .as_ref()
@@ -2778,6 +2804,7 @@ fn default_runtime_status() -> RuntimeStatus {
         current_url: None,
         current_title: None,
         document_ready_state: None,
+        page_bootstrap: PageBootstrapDiagnostics::default(),
         media: Vec::new(),
         last_dom_refresh_at_ms: None,
         last_live_state_refresh_at_ms: None,
@@ -2964,12 +2991,18 @@ impl ServeDiagnostics {
             RuntimeOperationalState::Degraded
         };
         let command_ready = matches!(state, RuntimeOperationalState::Ready);
+        let page_bootstrap = &self.runtime.page_bootstrap;
         RuntimeDiagnosticsResponse {
             version: env!("CARGO_PKG_VERSION"),
             protocol_version: PROTOCOL_VERSION,
             state,
             control_plane_up: true,
             command_ready,
+            inspectable_dom_ready: page_bootstrap.inspectable_dom_ready,
+            document_loaded: page_bootstrap.document_loaded,
+            module_scripts_present: page_bootstrap.module_scripts_present,
+            module_bootstrap_observed: page_bootstrap.module_bootstrap_observed,
+            app_dom_mutated_after_load: page_bootstrap.app_dom_mutated_after_load,
             bridge_healthy: self
                 .runtime
                 .last_successful_bridge_roundtrip_at_ms

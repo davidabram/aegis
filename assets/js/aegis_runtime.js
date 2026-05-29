@@ -66,6 +66,17 @@
   const semanticTextRoles = new Set(["button", "link", "textbox", "searchbox", "option", "tab", "combobox"]);
   const mediaStateByNode = new WeakMap();
   const mediaInstrumentedNodes = new WeakSet();
+  const pageBootstrapState = {
+    document_loaded_at_ms: null,
+    dom_mutation_count: 0,
+    dom_mutation_after_load_count: 0,
+    body_mutation_after_load_count: 0,
+    root_mutation_after_load_count: 0,
+    script_error_count: 0,
+    last_script_error: null,
+    unhandled_rejection_count: 0,
+    last_unhandled_rejection: null
+  };
   let mediaPrototypePatched = false;
 
   function normalizeText(value) {
@@ -87,7 +98,101 @@
         width: Number.isFinite(window.innerWidth) ? window.innerWidth : null,
         height: Number.isFinite(window.innerHeight) ? window.innerHeight : null
       },
+      bootstrap: pageBootstrapDiagnostics(),
       media: mediaDiagnostics()
+    };
+  }
+
+  function documentLoaded() {
+    return document.readyState === "interactive" || document.readyState === "complete";
+  }
+
+  function markDocumentLoaded() {
+    if (documentLoaded() && !pageBootstrapState.document_loaded_at_ms) {
+      pageBootstrapState.document_loaded_at_ms = Date.now();
+    }
+  }
+
+  function rootCandidate() {
+    return document.getElementById("root")
+      || document.getElementById("app")
+      || document.querySelector("[data-reactroot]")
+      || null;
+  }
+
+  function rootSelectorName(root) {
+    if (!root) {
+      return null;
+    }
+    if (root.id) {
+      return `#${root.id}`;
+    }
+    if (root.hasAttribute && root.hasAttribute("data-reactroot")) {
+      return "[data-reactroot]";
+    }
+    return root.tagName ? root.tagName.toLowerCase() : "root";
+  }
+
+  function pageBootstrapDiagnostics() {
+    markDocumentLoaded();
+    const root = rootCandidate();
+    const body = document.body || null;
+    const bodyText = normalizeText(body && (body.innerText || body.textContent || ""));
+    const rootText = normalizeText(root && (root.innerText || root.textContent || ""));
+    const rootHtml = root && typeof root.innerHTML === "string" ? root.innerHTML.trim() : "";
+    const moduleScripts = Array.from(document.querySelectorAll("script[type='module']"));
+    const bodyDescendantCount = body && typeof body.querySelectorAll === "function"
+      ? body.querySelectorAll("*").length
+      : 0;
+    const rootChildElementCount = root && Number.isFinite(root.childElementCount)
+      ? root.childElementCount
+      : 0;
+    const document_loaded = documentLoaded();
+    const app_dom_mutated_after_load = pageBootstrapState.dom_mutation_after_load_count > 0;
+    const inspectable_dom_ready = !!(
+      document_loaded && (
+        bodyText.length > 0
+        || bodyDescendantCount > 3
+        || rootText.length > 0
+        || rootHtml.length > 0
+        || rootChildElementCount > 0
+        || app_dom_mutated_after_load
+      )
+    );
+    const module_scripts_present = moduleScripts.length > 0;
+    const module_bootstrap_observed = !!(
+      module_scripts_present && (
+        app_dom_mutated_after_load
+        || rootChildElementCount > 0
+        || rootText.length > 0
+        || bodyDescendantCount > 3
+      )
+    );
+    return {
+      document_loaded,
+      document_loaded_at_ms: pageBootstrapState.document_loaded_at_ms,
+      module_scripts_present,
+      module_script_count: moduleScripts.length,
+      module_script_sources: moduleScripts
+        .map((script) => script.getAttribute("src") || "<inline-module>")
+        .slice(0, 8),
+      root_selector: rootSelectorName(root),
+      root_present: !!root,
+      root_child_element_count: rootChildElementCount,
+      root_text_length: rootText.length,
+      root_html_length: rootHtml.length,
+      body_text_length: bodyText.length,
+      body_descendant_count: bodyDescendantCount,
+      dom_mutation_count: pageBootstrapState.dom_mutation_count,
+      app_dom_mutated_after_load,
+      body_mutation_after_load_count: pageBootstrapState.body_mutation_after_load_count,
+      root_mutation_after_load_count: pageBootstrapState.root_mutation_after_load_count,
+      module_bootstrap_observed,
+      inspectable_dom_ready,
+      script_error_count: pageBootstrapState.script_error_count,
+      last_script_error: pageBootstrapState.last_script_error,
+      unhandled_rejection_count: pageBootstrapState.unhandled_rejection_count,
+      last_unhandled_rejection: pageBootstrapState.last_unhandled_rejection
     };
   }
 
@@ -1953,10 +2058,30 @@
   }
 
   const observer = new MutationObserver((mutations) => {
+    markDocumentLoaded();
     for (const mutation of mutations) {
       if (mutation.type === "childList") {
         for (const node of Array.from(mutation.addedNodes || [])) {
           instrumentMediaTree(node);
+        }
+      }
+    }
+    pageBootstrapState.dom_mutation_count += mutations.length;
+    if (documentLoaded()) {
+      const body = document.body || null;
+      const root = rootCandidate();
+      pageBootstrapState.dom_mutation_after_load_count += mutations.length;
+      for (const mutation of mutations) {
+        const target = mutation.target && mutation.target.nodeType === Node.ELEMENT_NODE
+          ? mutation.target
+          : mutation.target && mutation.target.parentElement
+            ? mutation.target.parentElement
+            : null;
+        if (body && target && (target === body || body.contains(target))) {
+          pageBootstrapState.body_mutation_after_load_count += 1;
+        }
+        if (root && target && (target === root || root.contains(target))) {
+          pageBootstrapState.root_mutation_after_load_count += 1;
         }
       }
     }
@@ -1987,6 +2112,42 @@
   }
 
   attachObserver();
+  document.addEventListener("readystatechange", markDocumentLoaded);
+  window.addEventListener("load", markDocumentLoaded, { once: true });
+  window.addEventListener("error", (event) => {
+    const target = event.target;
+    const source = target && target.tagName
+      ? `${target.tagName.toLowerCase()}:${target.getAttribute("src") || target.getAttribute("href") || ""}`
+      : event.filename || "window";
+    pageBootstrapState.script_error_count += 1;
+    pageBootstrapState.last_script_error = `${source}:${event.message || "script error"}`;
+    queue.push({
+      event: {
+        type: "log",
+        level: "warn",
+        message: "page:script_error",
+        data: {
+          source,
+          message: event.message || null
+        }
+      }
+    });
+  }, true);
+  window.addEventListener("unhandledrejection", (event) => {
+    const reason = event && event.reason ? String(event.reason) : "unhandled rejection";
+    pageBootstrapState.unhandled_rejection_count += 1;
+    pageBootstrapState.last_unhandled_rejection = reason;
+    queue.push({
+      event: {
+        type: "log",
+        level: "warn",
+        message: "page:unhandled_rejection",
+        data: {
+          reason
+        }
+      }
+    });
+  });
   patchMediaPrototype();
   instrumentMediaTree(document);
   if (!observerAttached) {

@@ -6,8 +6,8 @@ use aegis::api::server;
 use aegis::transport::protocol::PROTOCOL_VERSION;
 use aegis::{
     AegisConfigStore, AegisSecretStore, BrowserConfig, BrowserMode, CredentialInput,
-    NativeConfiguration, app_executable, build_native, configure_native,
-    ensure_workspace_serve_runtime, native, replay_trace,
+    NativeConfiguration, app_executable, build_native, canonical_install_host_library,
+    configure_native, ensure_workspace_serve_runtime, native, replay_trace,
 };
 use clap::{Parser, Subcommand};
 
@@ -349,8 +349,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 path
             } else {
                 let current_exe = std::env::current_exe()?;
-                let workspace_root = resolve_workspace_root(&current_exe)?;
-                ensure_workspace_serve_runtime(&workspace_root)?
+                resolve_default_serve_host_lib(&current_exe)?
             };
             if !host_lib.exists() {
                 let help = "host library not found at {path}. Run `aegis native build --configuration release --target aegis_host` or pass --host-lib explicitly.";
@@ -387,6 +386,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+fn resolve_default_serve_host_lib(
+    current_exe: &Path,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    match default_serve_runtime_source(current_exe) {
+        ServeRuntimeSource::Workspace(root) => Ok(ensure_workspace_serve_runtime(root)?),
+        ServeRuntimeSource::Installed(installed_host_lib) => {
+            if installed_host_lib.exists() {
+                Ok(installed_host_lib)
+            } else {
+                Err(format!(
+                    "installed Aegis runtime not found at {}. Reinstall Aegis with ./install.sh or pass --host-lib explicitly.",
+                    installed_host_lib.display()
+                )
+                .into())
+            }
+        }
+        ServeRuntimeSource::MissingInstalled => Err(
+            "unable to resolve a default Aegis host runtime. Reinstall Aegis or pass --host-lib explicitly."
+                .into(),
+        ),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ServeRuntimeSource {
+    Workspace(PathBuf),
+    Installed(PathBuf),
+    MissingInstalled,
+}
+
+fn default_serve_runtime_source(current_exe: &Path) -> ServeRuntimeSource {
+    if let Some(root) = std::env::var_os("AEGIS_WORKSPACE_ROOT") {
+        return ServeRuntimeSource::Workspace(PathBuf::from(root));
+    }
+    if let Some(root) = find_aegis_workspace_root(current_exe) {
+        return ServeRuntimeSource::Workspace(root);
+    }
+    if let Some(installed_host_lib) = canonical_install_host_library() {
+        return ServeRuntimeSource::Installed(installed_host_lib);
+    }
+    ServeRuntimeSource::MissingInstalled
 }
 
 fn resolve_workspace_root(current_exe: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
@@ -633,9 +675,16 @@ fn handle_config_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::sync::{Mutex, OnceLock};
 
     fn parse_cli(args: &[&str]) -> Cli {
         Cli::parse_from(args)
+    }
+
+    fn home_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
     }
 
     #[test]
@@ -673,5 +722,46 @@ mod tests {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let binary = root.join("target/debug/aegis");
         assert_eq!(find_aegis_workspace_root(&binary).as_deref(), Some(root));
+    }
+
+    #[test]
+    fn serve_prefers_workspace_runtime_source_for_workspace_binary() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let binary = root.join("target/debug/aegis");
+        assert_eq!(
+            default_serve_runtime_source(&binary),
+            ServeRuntimeSource::Workspace(root.to_path_buf())
+        );
+    }
+
+    #[test]
+    fn serve_prefers_installed_runtime_source_for_non_workspace_binary() {
+        let _guard = home_env_lock()
+            .lock()
+            .expect("home env lock should not poison");
+        let temp = tempfile::tempdir().expect("temporary dir should be created");
+        let home_dir = temp.path().join("home");
+        let installed_host = home_dir
+            .join("Applications")
+            .join("Aegis.app")
+            .join("Contents")
+            .join("Frameworks")
+            .join("libaegis_host.dylib");
+        fs::create_dir_all(
+            installed_host
+                .parent()
+                .expect("installed host should have a parent"),
+        )
+        .expect("installed host dir should be created");
+        fs::write(&installed_host, b"host").expect("installed host should be created");
+        unsafe {
+            std::env::set_var("HOME", &home_dir);
+            std::env::remove_var("AEGIS_WORKSPACE_ROOT");
+        }
+        let non_workspace_binary = temp.path().join("bin").join("aegis");
+        assert_eq!(
+            default_serve_runtime_source(&non_workspace_binary),
+            ServeRuntimeSource::Installed(installed_host)
+        );
     }
 }

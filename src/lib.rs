@@ -29,7 +29,8 @@ pub use events::stream::{
 };
 pub use native::{
     NativeConfiguration, NativeDoctor, NativePlatform, NativeStatus, app_executable,
-    artifact_for_target, build_native, configure_native, ensure_workspace_serve_runtime,
+    artifact_for_target, build_native, canonical_install_host_library, configure_native,
+    ensure_workspace_serve_runtime,
 };
 pub use runtime::executor::{AegisRuntime, ExecutionReport};
 pub use session::cookies::{Cookie, SessionState};

@@ -628,6 +628,11 @@ fn canonical_install_dir(platform: NativePlatform) -> Option<PathBuf> {
     })
 }
 
+pub fn canonical_install_host_library() -> Option<PathBuf> {
+    let platform = current_platform();
+    canonical_install_dir(platform).map(|install_dir| bundled_host_library(&install_dir, platform))
+}
+
 fn workspace_host_library(root: &Path, platform: NativePlatform) -> PathBuf {
     match platform {
         NativePlatform::Macos => artifact_output_dir(root, platform, NativeConfiguration::Release)
