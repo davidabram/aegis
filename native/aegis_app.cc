@@ -368,6 +368,13 @@ bool EvalToJson(CefRefPtr<CefFrame> frame,
   return true;
 }
 
+std::string SerializeValueToJson(CefRefPtr<CefValue> value) {
+  if (!value.get()) {
+    return "null";
+  }
+  return CefWriteJSON(value, JSON_WRITER_DEFAULT).ToString();
+}
+
 void SendRendererReply(CefRefPtr<CefFrame> frame,
                        int request_id,
                        bool ok,
@@ -505,6 +512,21 @@ bool DispatchRendererOperation(const std::string& op,
           const auto wrapped =
               "(() => { try { return JSON.stringify({ok:true,value:(window.__aegis ? window.__aegis.setValue(" +
               target_argument + "," + value_json +
+              ") : null)}); } catch (error) { return JSON.stringify({ok:false,error:String(error && error.message ? error.message : error)}); } })()";
+          if (!EvalToString(frame, wrapped, &command_result, error)) {
+            return false;
+          }
+        } else if (type == "set_files") {
+          std::string target_argument;
+          if (!CommandTargetArgument(command, &target_argument, error)) {
+            return false;
+          }
+          const auto files_json = command->HasKey("files")
+                                      ? SerializeValueToJson(command->GetValue("files"))
+                                      : "[]";
+          const auto wrapped =
+              "(() => { try { return JSON.stringify({ok:true,value:(window.__aegis ? window.__aegis.setFiles(" +
+              target_argument + "," + files_json +
               ") : null)}); } catch (error) { return JSON.stringify({ok:false,error:String(error && error.message ? error.message : error)}); } })()";
           if (!EvalToString(frame, wrapped, &command_result, error)) {
             return false;
