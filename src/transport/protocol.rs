@@ -88,11 +88,19 @@ pub struct HostRuntimeState {
     pub startup_complete: bool,
     pub browser_available: bool,
     #[serde(default)]
+    pub active_context_id: Option<String>,
+    #[serde(default)]
+    pub active_browser_id: Option<i32>,
+    #[serde(default)]
     pub context_id: Option<String>,
     #[serde(default)]
     pub browser_id: Option<i32>,
     #[serde(default)]
     pub request_context_available: bool,
+    #[serde(default)]
+    pub attached_browser_ids: Vec<i32>,
+    #[serde(default)]
+    pub known_context_ids: Vec<String>,
     pub page_ready: bool,
     pub renderer_ready: bool,
     #[serde(default)]

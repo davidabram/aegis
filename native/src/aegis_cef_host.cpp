@@ -713,7 +713,7 @@ struct RendererReply {
   std::string body;
 };
 
-struct BrowserRuntimeState {
+struct BrowserContextState {
   std::string context_id = "primary";
   int browser_id = 0;
   bool page_ready = false;
@@ -1102,6 +1102,8 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       std::lock_guard lock(mutex_);
       state->SetBool("startup_complete", startup_complete_);
       state->SetBool("browser_available", browser_.get() != nullptr);
+      state->SetString("active_context_id", primary_context_.context_id);
+      state->SetInt("active_browser_id", active_browser_id_);
       state->SetString("context_id", primary_context_.context_id);
       state->SetInt("browser_id", primary_context_.browser_id);
       state->SetBool("request_context_available", request_context_.get() != nullptr);
@@ -1121,6 +1123,16 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       if (!current_operation_stage_.empty()) {
         state->SetString("active_stage", current_operation_stage_);
       }
+      auto attached_browser_ids = CefListValue::Create();
+      auto known_context_ids = CefListValue::Create();
+      int index = 0;
+      for (const auto& [browser_id, context] : browser_contexts_) {
+        attached_browser_ids->SetInt(index, browser_id);
+        known_context_ids->SetString(index, context.context_id);
+        index += 1;
+      }
+      state->SetList("attached_browser_ids", attached_browser_ids);
+      state->SetList("known_context_ids", known_context_ids);
     }
     return EncodeEnvelope(MessageKind::SnapshotHostState, state);
   }
@@ -1149,6 +1161,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       browser_ = browser;
       request_context_ = browser->GetHost()->GetRequestContext();
       primary_context_.AttachBrowser(browser);
+      SyncPrimaryContextToRegistryLocked();
       cv_.notify_all();
     }
     AppendTelemetry("primary_browser_created",
@@ -1187,6 +1200,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
     } else if (frame.get()) {
       primary_context_.current_url = frame->GetURL().ToString();
     }
+    SyncPrimaryContextToRegistryLocked();
   }
 
   void OnLoadingStateChange(CefRefPtr<CefBrowser> browser, bool is_loading) override {
@@ -1202,6 +1216,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       if (!is_loading) {
         primary_context_.current_url = browser->GetMainFrame()->GetURL().ToString();
       }
+      SyncPrimaryContextToRegistryLocked();
       cv_.notify_all();
     }
     if (!options_.headless && browser) {
@@ -1223,6 +1238,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       return;
     }
     primary_context_.current_url = frame->GetURL().ToString();
+    SyncPrimaryContextToRegistryLocked();
   }
 
   void OnAddressChange(CefRefPtr<CefBrowser>,
@@ -1247,10 +1263,13 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
     {
       std::lock_guard lock(mutex_);
       if (browser_.get() && browser->IsSame(browser_)) {
+        const auto browser_id = browser->GetIdentifier();
         browser_ = nullptr;
         request_context_ = nullptr;
         client_ = nullptr;
         primary_context_.DetachBrowser();
+        browser_contexts_.erase(browser_id);
+        active_browser_id_ = 0;
         devtools_registration_ = nullptr;
         devtools_network_enabled_ = false;
         cv_.notify_all();
@@ -1308,6 +1327,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
         {
           std::lock_guard lock(mutex_);
           primary_context_.MarkLifecycleReady(args->GetString(1).ToString());
+          SyncPrimaryContextToRegistryLocked();
           cv_.notify_all();
         }
         return true;
@@ -1341,14 +1361,83 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
 
   void SetOperationStage(const std::string& stage) { current_operation_stage_ = stage; }
 
-
-
-  bool IsPrimaryBrowser(CefRefPtr<CefBrowser> browser) const {
-    std::lock_guard lock(mutex_);
-    if (!browser_.get() || !browser.get()) {
-      return false;
+  BrowserContextState* ContextStateForBrowserLocked(CefRefPtr<CefBrowser> browser) {
+    if (!browser.get()) {
+      return nullptr;
     }
-    return browser->IsSame(browser_);
+    auto found = browser_contexts_.find(browser->GetIdentifier());
+    if (found == browser_contexts_.end()) {
+      return nullptr;
+    }
+    return &found->second;
+  }
+
+  const BrowserContextState* ContextStateForBrowserLocked(CefRefPtr<CefBrowser> browser) const {
+    if (!browser.get()) {
+      return nullptr;
+    }
+    auto found = browser_contexts_.find(browser->GetIdentifier());
+    if (found == browser_contexts_.end()) {
+      return nullptr;
+    }
+    return &found->second;
+  }
+
+  BrowserContextState* ActiveContextStateLocked() {
+    auto found = browser_contexts_.find(active_browser_id_);
+    if (found == browser_contexts_.end()) {
+      return nullptr;
+    }
+    return &found->second;
+  }
+
+  const BrowserContextState* ActiveContextStateLocked() const {
+    auto found = browser_contexts_.find(active_browser_id_);
+    if (found == browser_contexts_.end()) {
+      return nullptr;
+    }
+    return &found->second;
+  }
+
+  BrowserContextState& EnsureContextStateLocked(CefRefPtr<CefBrowser> browser,
+                                                const std::string& context_id = "primary") {
+    const auto browser_id = browser ? browser->GetIdentifier() : 0;
+    auto [it, inserted] = browser_contexts_.try_emplace(browser_id);
+    if (inserted) {
+      it->second.context_id = context_id;
+    }
+    return it->second;
+  }
+
+  void SyncPrimaryContextToRegistryLocked() {
+    if (primary_context_.browser_id <= 0) {
+      return;
+    }
+    browser_contexts_[primary_context_.browser_id] = primary_context_;
+    active_browser_id_ = primary_context_.browser_id;
+  }
+
+  void SyncRegistryToPrimaryContextLocked(int browser_id) {
+    auto found = browser_contexts_.find(browser_id);
+    if (found == browser_contexts_.end()) {
+      return;
+    }
+    primary_context_ = found->second;
+    active_browser_id_ = browser_id;
+  }
+
+  std::vector<int> AttachedBrowserIdsLocked() const {
+    std::vector<int> browser_ids;
+    browser_ids.reserve(browser_contexts_.size());
+    for (const auto& [browser_id, _state] : browser_contexts_) {
+      browser_ids.push_back(browser_id);
+    }
+    return browser_ids;
+  }
+
+  bool IsManagedBrowser(CefRefPtr<CefBrowser> browser) const {
+    std::lock_guard lock(mutex_);
+    return ContextStateForBrowserLocked(browser) != nullptr;
   }
 
   void EnsureDevToolsObserver(CefRefPtr<CefBrowser> browser) {
@@ -1393,7 +1482,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
   }
 
   void HandleDevToolsAgentAttached(CefRefPtr<CefBrowser> browser) {
-    if (!IsPrimaryBrowser(browser)) {
+    if (!IsManagedBrowser(browser)) {
       return;
     }
     AppendDebugLog("host: devtools agent attached");
@@ -1405,7 +1494,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
   }
 
   void HandleDevToolsAgentDetached(CefRefPtr<CefBrowser> browser) {
-    if (!IsPrimaryBrowser(browser)) {
+    if (!IsManagedBrowser(browser)) {
       return;
     }
     AppendDebugLog("host: devtools agent detached");
@@ -1424,16 +1513,19 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
   void RememberRequestUrl(const std::string& request_id, const std::string& url) {
     std::lock_guard lock(mutex_);
     primary_context_.request_urls[request_id] = url;
+    SyncPrimaryContextToRegistryLocked();
   }
 
   void ForgetRequestUrl(const std::string& request_id) {
     std::lock_guard lock(mutex_);
     primary_context_.request_urls.erase(request_id);
+    SyncPrimaryContextToRegistryLocked();
   }
 
   void RememberWebSocketUrl(const std::string& request_id, const std::string& url) {
     std::lock_guard lock(mutex_);
     primary_context_.websocket_urls[request_id] = url;
+    SyncPrimaryContextToRegistryLocked();
   }
 
   std::optional<std::string> WebSocketUrl(const std::string& request_id) const {
@@ -1448,13 +1540,14 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
   void ForgetWebSocketUrl(const std::string& request_id) {
     std::lock_guard lock(mutex_);
     primary_context_.websocket_urls.erase(request_id);
+    SyncPrimaryContextToRegistryLocked();
   }
 
   void HandleDevToolsEvent(CefRefPtr<CefBrowser> browser,
                            const CefString& method,
                            const void* params,
                            size_t params_size) {
-    if (!IsPrimaryBrowser(browser)) {
+    if (!IsManagedBrowser(browser)) {
       return;
     }
 
@@ -1726,12 +1819,14 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
   void PushLocalEvent(CefRefPtr<CefValue> event) {
     std::lock_guard lock(mutex_);
     primary_context_.local_events.push_back(WriteJson(event));
+    SyncPrimaryContextToRegistryLocked();
   }
 
   std::vector<std::string> DrainLocalEvents() {
     std::lock_guard lock(mutex_);
     auto events = std::move(primary_context_.local_events);
     primary_context_.local_events.clear();
+    SyncPrimaryContextToRegistryLocked();
     return events;
   }
 
@@ -1915,6 +2010,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
             browser_ = browser;
             request_context_ = browser->GetHost()->GetRequestContext();
             primary_context_.AttachBrowser(browser);
+            SyncPrimaryContextToRegistryLocked();
           }
         }
         return;
@@ -1959,6 +2055,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
           browser_ = browser;
           request_context_ = browser->GetHost()->GetRequestContext();
           primary_context_.AttachBrowser(browser);
+          SyncPrimaryContextToRegistryLocked();
         }
       }
     };
@@ -2063,6 +2160,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
         return;
       }
       primary_context_.BeginNavigation(url);
+      SyncPrimaryContextToRegistryLocked();
     }
     SetOperationStage("dispatching LoadURL on UI thread");
     RunOnUiThreadSync([this, url]() {
@@ -2116,6 +2214,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
     {
       std::lock_guard lock(mutex_);
       primary_context_.runtime_ready = true;
+      SyncPrimaryContextToRegistryLocked();
       cv_.notify_all();
     }
   }
@@ -2142,6 +2241,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       if (primary_context_.pending_storage_injection_payload == payload) {
         primary_context_.pending_storage_injection_payload.reset();
       }
+      SyncPrimaryContextToRegistryLocked();
     }
     AppendDebugLog("host: applied_pending_storage_injection");
     return true;
@@ -2203,6 +2303,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       {
         std::lock_guard lock(mutex_);
         primary_context_.runtime_ready = true;
+        SyncPrimaryContextToRegistryLocked();
         cv_.notify_all();
       }
       AppendDebugLog("host: invoke_renderer complete " + operation);
@@ -2223,6 +2324,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
         reason.find("timed out waiting for renderer response") != std::string::npos ||
         reason.find("browser is not available") != std::string::npos ||
         reason.find("main frame is not available") != std::string::npos);
+    SyncPrimaryContextToRegistryLocked();
     cv_.notify_all();
   }
 
@@ -2232,6 +2334,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
         .ok = ok,
         .body = std::move(body),
     };
+    SyncPrimaryContextToRegistryLocked();
     cv_.notify_all();
   }
 
@@ -2251,13 +2354,16 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       if (existing != primary_context_.cookie_jar.end()) {
         primary_context_.cookie_jar.erase(existing);
       }
+      SyncPrimaryContextToRegistryLocked();
       return;
     }
     if (existing != primary_context_.cookie_jar.end()) {
       *existing = std::move(cookie);
+      SyncPrimaryContextToRegistryLocked();
       return;
     }
     primary_context_.cookie_jar.push_back(std::move(cookie));
+    SyncPrimaryContextToRegistryLocked();
   }
 
   void ReplaceManagedCookies(CefRefPtr<CefListValue> cookies) {
@@ -2286,6 +2392,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
     }
     std::lock_guard lock(mutex_);
     primary_context_.cookie_jar = std::move(jar);
+    SyncPrimaryContextToRegistryLocked();
   }
 
   std::optional<ManagedCookie> ParseSetCookieHeader(const std::string& url,
@@ -2417,6 +2524,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
 
     std::lock_guard lock(mutex_);
     primary_context_.network_overrides = std::move(overrides);
+    SyncPrimaryContextToRegistryLocked();
   }
 
   void ReplaceCookies(CefRefPtr<CefDictionaryValue> session) {
@@ -2516,7 +2624,9 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
   bool devtools_network_enabled_ = false;
   std::string startup_error_;
   int next_request_id_ = 1;
-  BrowserRuntimeState primary_context_;
+  BrowserContextState primary_context_;
+  std::map<int, BrowserContextState> browser_contexts_;
+  int active_browser_id_ = 0;
   std::string current_operation_name_;
   std::string current_operation_stage_;
   std::chrono::steady_clock::time_point current_operation_started_at_ =
