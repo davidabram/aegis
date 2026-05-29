@@ -54,6 +54,7 @@ pub struct PageBootstrapDiagnostics {
     pub module_script_count: usize,
     #[serde(default)]
     pub module_script_sources: Vec<String>,
+    pub synthetic_shell_active: bool,
     pub root_selector: Option<String>,
     pub root_present: bool,
     pub root_child_element_count: usize,
@@ -1058,11 +1059,25 @@ impl AegisRuntime {
         let raw = self.bridge.eval_js(script)?;
         let value: Value = serde_json::from_str(&raw)
             .map_err(|error| AegisError::Bridge(format!("live state json parse error: {error}")))?;
-        self.current_url = value
+        let live_url = value
             .get("url")
             .and_then(Value::as_str)
             .map(ToOwned::to_owned)
             .or_else(|| self.current_url.clone());
+        let synthetic_shell_active = value
+            .get("bootstrap")
+            .and_then(|bootstrap| bootstrap.get("synthetic_shell_active"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        self.current_url = if synthetic_shell_active {
+            self.host_state
+                .current_url
+                .clone()
+                .or(live_url.clone())
+                .or_else(|| self.current_url.clone())
+        } else {
+            live_url
+        };
         self.current_title = value
             .get("title")
             .and_then(Value::as_str)

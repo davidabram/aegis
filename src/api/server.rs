@@ -256,6 +256,7 @@ struct RuntimeDiagnosticsResponse {
     module_scripts_present: bool,
     module_bootstrap_observed: bool,
     app_dom_mutated_after_load: bool,
+    synthetic_shell_active: bool,
     bridge_healthy: bool,
     browser_backend_healthy: bool,
     browser_process_up: bool,
@@ -1948,8 +1949,8 @@ async fn readiness(
     let state = require_default_context_state(&root)?;
     let diagnostics = read_diagnostics(&state.diagnostics);
     let inspectable_gate_passed = !diagnostics.document_loaded
-        || !diagnostics.module_scripts_present
-        || diagnostics.inspectable_dom_ready;
+        || (!diagnostics.module_scripts_present && !diagnostics.synthetic_shell_active)
+        || (diagnostics.inspectable_dom_ready && !diagnostics.synthetic_shell_active);
     if diagnostics.command_ready && inspectable_gate_passed {
         Ok(Json(diagnostics))
     } else {
@@ -2179,8 +2180,8 @@ async fn context_readiness(
     let state = require_context_state(&root, &context_id)?;
     let diagnostics = read_diagnostics(&state.diagnostics);
     let inspectable_gate_passed = !diagnostics.document_loaded
-        || !diagnostics.module_scripts_present
-        || diagnostics.inspectable_dom_ready;
+        || (!diagnostics.module_scripts_present && !diagnostics.synthetic_shell_active)
+        || (diagnostics.inspectable_dom_ready && !diagnostics.synthetic_shell_active);
     if diagnostics.command_ready && inspectable_gate_passed {
         Ok(Json(diagnostics))
     } else {
@@ -2552,14 +2553,19 @@ impl ApiError {
 
     fn readiness(diagnostics: RuntimeDiagnosticsResponse) -> Self {
         let not_inspectable = diagnostics.command_ready
-            && diagnostics.document_loaded
-            && diagnostics.module_scripts_present
-            && !diagnostics.inspectable_dom_ready;
+            && (diagnostics.synthetic_shell_active
+                || (diagnostics.document_loaded
+                    && diagnostics.module_scripts_present
+                    && !diagnostics.inspectable_dom_ready));
         Self {
             status: StatusCode::SERVICE_UNAVAILABLE,
             body: ApiErrorBody {
                 error: if not_inspectable {
-                    "runtime is attached, but the page is not yet inspectable".into()
+                    if diagnostics.synthetic_shell_active {
+                        "runtime is attached, but is still on the synthetic bootstrap shell".into()
+                    } else {
+                        "runtime is attached, but the page is not yet inspectable".into()
+                    }
                 } else {
                     "runtime is not command-ready".into()
                 },
@@ -2574,7 +2580,11 @@ impl ApiError {
                     .map(|op| op.stage.clone())
                     .or_else(|| {
                         if not_inspectable {
-                            Some("awaiting_page_bootstrap".into())
+                            Some(if diagnostics.synthetic_shell_active {
+                                "stuck_on_bootstrap_shell".into()
+                            } else {
+                                "awaiting_page_bootstrap".into()
+                            })
                         } else {
                             None
                         }
@@ -3003,6 +3013,7 @@ impl ServeDiagnostics {
             module_scripts_present: page_bootstrap.module_scripts_present,
             module_bootstrap_observed: page_bootstrap.module_bootstrap_observed,
             app_dom_mutated_after_load: page_bootstrap.app_dom_mutated_after_load,
+            synthetic_shell_active: page_bootstrap.synthetic_shell_active,
             bridge_healthy: self
                 .runtime
                 .last_successful_bridge_roundtrip_at_ms
@@ -3079,6 +3090,17 @@ mod tests {
         }
     }
 
+    fn ready_diagnostics() -> RuntimeDiagnosticsResponse {
+        let mut runtime = default_runtime_status();
+        runtime.bootstrapped = true;
+        runtime.last_successful_bridge_roundtrip_at_ms = Some(now_ms());
+        runtime.host.browser_available = true;
+        runtime.host.page_ready = true;
+        runtime.host.renderer_ready = true;
+        runtime.host.runtime_ready = true;
+        ServeDiagnostics::new(runtime).snapshot()
+    }
+
     #[test]
     fn validate_context_name_rejects_invalid_characters() {
         assert!(validate_context_name("guest-1").is_ok());
@@ -3109,5 +3131,44 @@ mod tests {
         assert!(!contexts[0].command_ready);
         assert_eq!(contexts[1].id, "guest");
         assert!(!contexts[1].default);
+    }
+
+    #[test]
+    fn readiness_error_reports_bootstrap_shell_truthfully() {
+        let mut diagnostics = ready_diagnostics();
+        diagnostics.document_loaded = true;
+        diagnostics.synthetic_shell_active = true;
+        diagnostics.inspectable_dom_ready = false;
+        diagnostics.module_scripts_present = false;
+
+        let error = ApiError::readiness(diagnostics);
+        assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.body.code, "not_ready");
+        assert_eq!(
+            error.body.error,
+            "runtime is attached, but is still on the synthetic bootstrap shell"
+        );
+        assert_eq!(
+            error.body.stage.as_deref(),
+            Some("stuck_on_bootstrap_shell")
+        );
+    }
+
+    #[test]
+    fn readiness_error_reports_uninspectable_module_page_truthfully() {
+        let mut diagnostics = ready_diagnostics();
+        diagnostics.document_loaded = true;
+        diagnostics.module_scripts_present = true;
+        diagnostics.inspectable_dom_ready = false;
+        diagnostics.synthetic_shell_active = false;
+
+        let error = ApiError::readiness(diagnostics);
+        assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.body.code, "not_ready");
+        assert_eq!(
+            error.body.error,
+            "runtime is attached, but the page is not yet inspectable"
+        );
+        assert_eq!(error.body.stage.as_deref(), Some("awaiting_page_bootstrap"));
     }
 }

@@ -137,6 +137,8 @@
     markDocumentLoaded();
     const root = rootCandidate();
     const body = document.body || null;
+    const pageUrl = window.location ? window.location.href : "";
+    const syntheticShellActive = pageUrl === "data:text/html," || pageUrl.startsWith("data:text/html,");
     const bodyText = normalizeText(body && (body.innerText || body.textContent || ""));
     const rootText = normalizeText(root && (root.innerText || root.textContent || ""));
     const rootHtml = root && typeof root.innerHTML === "string" ? root.innerHTML.trim() : "";
@@ -176,6 +178,7 @@
       module_script_sources: moduleScripts
         .map((script) => script.getAttribute("src") || "<inline-module>")
         .slice(0, 8),
+      synthetic_shell_active: syntheticShellActive,
       root_selector: rootSelectorName(root),
       root_present: !!root,
       root_child_element_count: rootChildElementCount,
