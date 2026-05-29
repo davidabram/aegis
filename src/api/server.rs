@@ -591,12 +591,17 @@ impl MainThreadContext {
                     "load_session_profile",
                     "loading session profile",
                 );
-                let result = self.profile_store.load().map_err(AegisError::Bridge).and_then(
-                    |maybe_session| match maybe_session {
-                        Some(session) => self.client.inject_session(session).map(|_| self.profile_store.info()),
+                let result = self
+                    .profile_store
+                    .load()
+                    .map_err(AegisError::Bridge)
+                    .and_then(|maybe_session| match maybe_session {
+                        Some(session) => self
+                            .client
+                            .inject_session(session)
+                            .map(|_| self.profile_store.info()),
                         None => Ok(self.profile_store.info()),
-                    },
-                );
+                    });
                 record_operation_finished(
                     &self.api.diagnostics,
                     "load_session_profile",
@@ -727,7 +732,11 @@ impl MainThreadContext {
             }
             ApiCommand::Events(since, reply) => {
                 let started_at = Instant::now();
-                record_operation_started(&self.api.diagnostics, "events", "draining runtime events");
+                record_operation_started(
+                    &self.api.diagnostics,
+                    "events",
+                    "draining runtime events",
+                );
                 let result = self.client.events_since(since);
                 record_operation_finished(&self.api.diagnostics, "events", &self.client, &result);
                 emit_operation_telemetry(
@@ -1245,7 +1254,9 @@ async fn manage_context<T>(
     reply_rx: oneshot::Receiver<Result<T, AegisError>>,
     timeout_operation: &str,
 ) -> Result<T, ApiError> {
-    root.manager_tx.send(command).map_err(manager_channel_error)?;
+    root.manager_tx
+        .send(command)
+        .map_err(manager_channel_error)?;
     match timeout(COMMAND_TIMEOUT, reply_rx).await {
         Ok(Ok(Ok(value))) => Ok(value),
         Ok(Ok(Err(error))) => Err(ApiError::from(error)),
@@ -2228,7 +2239,7 @@ fn run_main_thread_serve_loop(
             Err(mpsc::TryRecvError::Disconnected) => {
                 return Err(AegisError::Bridge(
                     "serve HTTP server status channel disconnected".into(),
-                ))
+                ));
             }
             Err(mpsc::TryRecvError::Empty) => {}
         }
@@ -2240,7 +2251,7 @@ fn run_main_thread_serve_loop(
                 Err(mpsc::TryRecvError::Disconnected) => {
                     return Err(AegisError::Bridge(
                         "serve manager channel disconnected".into(),
-                    ))
+                    ));
                 }
             }
         }

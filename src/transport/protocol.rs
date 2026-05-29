@@ -87,6 +87,12 @@ pub struct EventsResponse {
 pub struct HostRuntimeState {
     pub startup_complete: bool,
     pub browser_available: bool,
+    #[serde(default)]
+    pub context_id: Option<String>,
+    #[serde(default)]
+    pub browser_id: Option<i32>,
+    #[serde(default)]
+    pub request_context_available: bool,
     pub page_ready: bool,
     pub renderer_ready: bool,
     #[serde(default)]

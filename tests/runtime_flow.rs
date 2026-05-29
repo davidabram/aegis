@@ -407,6 +407,9 @@ fn host_runtime_state_round_trips() {
         &HostRuntimeState {
             startup_complete: true,
             browser_available: true,
+            context_id: Some("primary".into()),
+            browser_id: Some(41),
+            request_context_available: true,
             page_ready: false,
             renderer_ready: true,
             runtime_installed: true,
@@ -425,6 +428,9 @@ fn host_runtime_state_round_trips() {
         decode_message(MessageKind::SnapshotHostState, &frame).expect("frame decodes");
     assert!(payload.startup_complete);
     assert!(payload.browser_available);
+    assert_eq!(payload.context_id.as_deref(), Some("primary"));
+    assert_eq!(payload.browser_id, Some(41));
+    assert!(payload.request_context_available);
     assert!(payload.renderer_ready);
     assert!(payload.cancel_requested);
     assert_eq!(
