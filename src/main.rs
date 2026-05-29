@@ -257,8 +257,7 @@ Replay a trace:
 Inspect native paths:
   aegis native paths";
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let command = resolved_command(&cli);
     let browser_config = BrowserConfig {
@@ -359,7 +358,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .replace("{path}", &host_lib.display().to_string())
                     .into());
             }
-            server::serve(addr, host_lib, browser_config, cli.profile.clone()).await?;
+            #[cfg(target_os = "macos")]
+            {
+                server::serve_main_thread(addr, host_lib, browser_config, cli.profile.clone())?;
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()?;
+                runtime.block_on(server::serve(
+                    addr,
+                    host_lib,
+                    browser_config,
+                    cli.profile.clone(),
+                ))?;
+            }
         }
         Commands::Open => unreachable!("handled before runtime startup"),
         Commands::Trace { command } => match command {

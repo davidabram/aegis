@@ -25,7 +25,9 @@ use tokio::time::{sleep, timeout};
 use crate::browser::BrowserConfig;
 use crate::commands::command::{Command, CommandTarget};
 use crate::commands::matcher::resolve_command_target as resolve_snapshot_target;
-use crate::config_store::{AegisConfigStore, AegisSecretStore, CredentialInput};
+use crate::config_store::{
+    AegisConfigStore, AegisSecretStore, CredentialInput, CredentialsSettings,
+};
 use crate::dom::node::{DomNode, DomSnapshot};
 use crate::events::stream::{EventReadWindow, SequencedEvent};
 use crate::host::{LoadedAegisClient, RuntimeCancelHandle};
@@ -59,12 +61,21 @@ pub struct ServeRootState {
     host_library: PathBuf,
     browser: BrowserConfig,
     default_context_id: String,
-    contexts: Arc<Mutex<HashMap<String, ManagedContext>>>,
+    contexts: Arc<Mutex<HashMap<String, ApiState>>>,
+    manager_tx: mpsc::Sender<ManagerCommand>,
 }
 
-struct ManagedContext {
+struct MainThreadContext {
     api: ApiState,
-    owner_thread: Option<thread::JoinHandle<()>>,
+    rx: mpsc::Receiver<ApiCommand>,
+    client: LoadedAegisClient,
+    profile_store: SessionProfileStore,
+    credential_settings: CredentialsSettings,
+    credential_store: AegisSecretStore,
+    credential_capture: AutoCredentialCapture,
+    pending_startup_session: Option<SessionState>,
+    idle_pump_interval: Duration,
+    last_pump_at: Instant,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -162,7 +173,20 @@ enum ApiCommand {
     SnapshotDom(oneshot::Sender<Result<DomSnapshot, AegisError>>),
     Events(u64, oneshot::Sender<Result<EventReadWindow, AegisError>>),
     EnableTrace(PathBuf, oneshot::Sender<Result<(), AegisError>>),
-    Shutdown(oneshot::Sender<Result<(), AegisError>>),
+}
+
+enum ManagerCommand {
+    CreateContext {
+        context_id: String,
+        profile: String,
+        browser: BrowserConfig,
+        seed_from_context: Option<String>,
+        reply: oneshot::Sender<Result<ContextSummary, AegisError>>,
+    },
+    DeleteContext {
+        context_id: String,
+        reply: oneshot::Sender<Result<(), AegisError>>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -272,11 +296,11 @@ enum CredentialFieldKind {
     Password,
 }
 
-fn spawn_context_state(
+fn create_context_runtime(
     host_library: PathBuf,
     browser_config: BrowserConfig,
     profile_name: String,
-) -> Result<ManagedContext, AegisError> {
+) -> Result<MainThreadContext, AegisError> {
     emit_telemetry(
         "context_start",
         json!({
@@ -291,7 +315,7 @@ fn spawn_context_state(
         .and_then(|store| store.load_credentials_settings())
         .map_err(AegisError::Bridge)?;
     let credential_store = AegisSecretStore::detect().map_err(AegisError::Bridge)?;
-    let mut credential_capture = AutoCredentialCapture::default();
+    let credential_capture = AutoCredentialCapture::default();
     let pending_startup_session = profile_store.load().map_err(AegisError::Bridge)?;
     let (tx, rx) = mpsc::channel::<ApiCommand>();
     let startup = Arc::new(Mutex::new(ServeStartupMetrics {
@@ -310,404 +334,475 @@ fn spawn_context_state(
         profile: profile_store.info(),
         diagnostics: diagnostics.clone(),
     };
-    let startup_host_library = state.host_library.clone();
     let idle_pump_interval = match browser_config.mode {
         crate::browser::BrowserMode::Headful => HEADFUL_IDLE_PUMP_INTERVAL,
         crate::browser::BrowserMode::Headless => HEADLESS_IDLE_PUMP_INTERVAL,
     };
-    let (startup_tx, startup_rx) = mpsc::channel::<Result<ServeStartupMetrics, AegisError>>();
-    let state_for_thread = state.clone();
-    let shutdown_state = state_for_thread.clone();
-    let owner_thread = thread::spawn(move || {
-        let client_connect_started = std::time::Instant::now();
-        let mut client = match LoadedAegisClient::connect(
-            startup_host_library.clone(),
-            browser_config.clone(),
-        ) {
-            Ok(client) => client,
-            Err(error) => {
-                let _ = startup_tx.send(Err(error));
-                return;
-            }
-        };
-        emit_telemetry(
-            "serve_client_connected",
-            json!({
-                "latency_ms": client_connect_started.elapsed().as_millis() as u64,
-                "browser_mode": browser_config.mode,
-                "runtime": client.runtime_status(),
-            }),
-        );
-        if let Ok(mut shared_cancel) = cancel.lock() {
-            *shared_cancel = Some(client.cancel_handle());
-        }
-        let startup_metrics = ServeStartupMetrics {
-            client_connect_ms: client_connect_started.elapsed().as_millis() as u64,
-            api_bind_ms: 0,
-            total_ready_ms: serve_started.elapsed().as_millis() as u64,
-        };
-        if let Ok(mut shared) = startup.lock() {
-            *shared = startup_metrics.clone();
-        }
-        emit_telemetry(
-            "serve_ready",
-            json!({
-                "client_connect_ms": startup_metrics.client_connect_ms,
-                "api_bind_ms": startup_metrics.api_bind_ms,
-                "total_ready_ms": startup_metrics.total_ready_ms,
-                "browser_mode": browser_config.mode,
-            }),
-        );
-        eprintln!(
-            "Aegis context ready for profile {} ({:?}, host: {})",
-            profile_store.info().profile,
-            browser_config.mode,
-            startup_host_library.display()
-        );
-        let _ = startup_tx.send(Ok(startup_metrics));
-
-        let mut pending_startup_session = pending_startup_session;
-        loop {
-            if let Some(session) = pending_startup_session.take() {
-                let started_at = Instant::now();
-                record_operation_started(
-                    &diagnostics,
-                    "startup_restore_session",
-                    "restoring persisted startup session",
-                );
-                emit_telemetry(
-                    "startup_session_restore_started",
-                    json!({
-                        "browser_mode": browser_config.mode,
-                        "profile": profile_store.info().profile,
-                    }),
-                );
-                let result = client.inject_session(session);
-                record_operation_finished(
-                    &diagnostics,
-                    "startup_restore_session",
-                    &client,
-                    &result,
-                );
-                emit_operation_telemetry(
-                    "startup_restore_session",
-                    started_at,
-                    &result,
-                    client.runtime_status(),
-                );
-                if let Err(error) = result {
-                    emit_telemetry(
-                        "startup_session_restore_failed",
-                        json!({
-                            "browser_mode": browser_config.mode,
-                            "profile": profile_store.info().profile,
-                            "error": error.to_string(),
-                            "runtime": client.runtime_status(),
-                        }),
-                    );
-                    break;
-                }
-                emit_telemetry(
-                    "startup_session_restore_completed",
-                    json!({
-                        "browser_mode": browser_config.mode,
-                        "profile": profile_store.info().profile,
-                        "latency_ms": started_at.elapsed().as_millis() as u64,
-                        "runtime": client.runtime_status(),
-                    }),
-                );
-                continue;
-            }
-
-            match rx.recv_timeout(idle_pump_interval) {
-                Ok(command) => match command {
-                    ApiCommand::InjectSession(session, reply) => {
-                        let started_at = Instant::now();
-                        record_operation_started(
-                            &diagnostics,
-                            "inject_session",
-                            "injecting session",
-                        );
-                        let result = client.inject_session(session.clone()).and_then(|_| {
-                            profile_store
-                                .save(&session)
-                                .map(|_| ())
-                                .map_err(AegisError::Bridge)
-                        });
-                        record_operation_finished(&diagnostics, "inject_session", &client, &result);
-                        emit_operation_telemetry(
-                            "inject_session",
-                            started_at,
-                            &result,
-                            client.runtime_status(),
-                        );
-                        let _ = reply.send(result);
-                    }
-                    ApiCommand::SnapshotSession(reply) => {
-                        let started_at = Instant::now();
-                        record_operation_started(
-                            &diagnostics,
-                            "snapshot_session",
-                            "capturing session state",
-                        );
-                        let result = client.snapshot_session();
-                        record_operation_finished(
-                            &diagnostics,
-                            "snapshot_session",
-                            &client,
-                            &result,
-                        );
-                        emit_operation_telemetry(
-                            "snapshot_session",
-                            started_at,
-                            &result,
-                            client.runtime_status(),
-                        );
-                        let _ = reply.send(result);
-                    }
-                    ApiCommand::SaveSessionProfile(reply) => {
-                        let started_at = Instant::now();
-                        record_operation_started(
-                            &diagnostics,
-                            "save_session_profile",
-                            "persisting session profile",
-                        );
-                        let result = client.snapshot_session().and_then(|session| {
-                            profile_store
-                                .save(&session)
-                                .map(|_| profile_store.info())
-                                .map_err(AegisError::Bridge)
-                        });
-                        record_operation_finished(
-                            &diagnostics,
-                            "save_session_profile",
-                            &client,
-                            &result,
-                        );
-                        emit_operation_telemetry(
-                            "save_session_profile",
-                            started_at,
-                            &result,
-                            client.runtime_status(),
-                        );
-                        let _ = reply.send(result);
-                    }
-                    ApiCommand::LoadSessionProfile(reply) => {
-                        let started_at = Instant::now();
-                        record_operation_started(
-                            &diagnostics,
-                            "load_session_profile",
-                            "loading session profile",
-                        );
-                        let result = profile_store.load().map_err(AegisError::Bridge).and_then(
-                            |maybe_session| match maybe_session {
-                                Some(session) => {
-                                    client.inject_session(session).map(|_| profile_store.info())
-                                }
-                                None => Ok(profile_store.info()),
-                            },
-                        );
-                        record_operation_finished(
-                            &diagnostics,
-                            "load_session_profile",
-                            &client,
-                            &result,
-                        );
-                        emit_operation_telemetry(
-                            "load_session_profile",
-                            started_at,
-                            &result,
-                            client.runtime_status(),
-                        );
-                        let _ = reply.send(result);
-                    }
-                    ApiCommand::Navigate(url, reply) => {
-                        let started_at = Instant::now();
-                        record_operation_started(
-                            &diagnostics,
-                            "navigate",
-                            &format!("navigating to {url}"),
-                        );
-                        credential_capture.reset_on_explicit_navigation(&url);
-                        let result = client.navigate(url);
-                        record_operation_finished(&diagnostics, "navigate", &client, &result);
-                        emit_operation_telemetry(
-                            "navigate",
-                            started_at,
-                            &result,
-                            client.runtime_status(),
-                        );
-                        let _ = reply.send(result);
-                    }
-                    ApiCommand::Execute(commands, reply) => {
-                        let started_at = Instant::now();
-                        record_operation_started(
-                            &diagnostics,
-                            "execute",
-                            "executing browser command batch",
-                        );
-                        let maybe_snapshot = if credential_settings.auto_store
-                            && commands.iter().any(|command| {
-                                matches!(command, Command::SetValue { .. } | Command::Click { .. })
-                            }) {
-                            match client.snapshot_dom() {
-                                Ok(snapshot) => Some(snapshot),
-                                Err(error) => {
-                                    record_operation_failure(
-                                        &diagnostics,
-                                        "execute",
-                                        failure_from_error(
-                                            "execute",
-                                            "capturing pre-execution DOM snapshot",
-                                            &error,
-                                        ),
-                                        Some(client.runtime_status()),
-                                    );
-                                    emit_operation_telemetry(
-                                        "execute",
-                                        started_at,
-                                        &Err::<ExecutionReport, AegisError>(AegisError::Bridge(
-                                            error.to_string(),
-                                        )),
-                                        client.runtime_status(),
-                                    );
-                                    let _ = reply.send(Err(error));
-                                    continue;
-                                }
-                            }
-                        } else {
-                            None
-                        };
-                        if let Some(snapshot) = maybe_snapshot.as_ref() {
-                            credential_capture.capture_fields(
-                                snapshot,
-                                client.runtime().current_url(),
-                                &commands,
-                            );
-                        }
-                        let should_persist = credential_settings.auto_store
-                            && maybe_snapshot.as_ref().is_some_and(|snapshot| {
-                                credential_capture.should_persist(snapshot, &commands)
-                            });
-                        let persist_origin = if should_persist {
-                            client.runtime().current_url().map(origin_key)
-                        } else {
-                            None
-                        };
-                        let result = client.execute(&commands).and_then(|report| {
-                            if let Some(origin) = persist_origin {
-                                credential_capture.persist(
-                                    &credential_store,
-                                    &profile_store.info().profile,
-                                    &origin,
-                                )?;
-                            }
-                            Ok(report)
-                        });
-                        record_operation_finished(&diagnostics, "execute", &client, &result);
-                        emit_operation_telemetry(
-                            "execute",
-                            started_at,
-                            &result,
-                            client.runtime_status(),
-                        );
-                        let _ = reply.send(result);
-                    }
-                    ApiCommand::SnapshotDom(reply) => {
-                        let started_at = Instant::now();
-                        record_operation_started(
-                            &diagnostics,
-                            "snapshot_dom",
-                            "capturing DOM snapshot",
-                        );
-                        let result = client.snapshot_dom();
-                        record_operation_finished(&diagnostics, "snapshot_dom", &client, &result);
-                        emit_operation_telemetry(
-                            "snapshot_dom",
-                            started_at,
-                            &result,
-                            client.runtime_status(),
-                        );
-                        let _ = reply.send(result);
-                    }
-                    ApiCommand::Events(since, reply) => {
-                        let started_at = Instant::now();
-                        record_operation_started(&diagnostics, "events", "draining runtime events");
-                        let result = client.events_since(since);
-                        record_operation_finished(&diagnostics, "events", &client, &result);
-                        emit_operation_telemetry(
-                            "events",
-                            started_at,
-                            &result,
-                            client.runtime_status(),
-                        );
-                        let _ = reply.send(result);
-                    }
-                    ApiCommand::EnableTrace(path, reply) => {
-                        let started_at = Instant::now();
-                        record_operation_started(
-                            &diagnostics,
-                            "enable_trace",
-                            "enabling trace recording",
-                        );
-                        client.enable_trace_recording(path);
-                        record_operation_finished(&diagnostics, "enable_trace", &client, &Ok(()));
-                        emit_operation_telemetry(
-                            "enable_trace",
-                            started_at,
-                            &Ok(()),
-                            client.runtime_status(),
-                        );
-                        let _ = reply.send(Ok(()));
-                    }
-                    ApiCommand::Shutdown(reply) => {
-                        request_runtime_cancel(&shutdown_state);
-                        mark_operation_cancel_requested(&diagnostics);
-                        let _ = reply.send(Ok(()));
-                        break;
-                    }
-                },
-                Err(mpsc::RecvTimeoutError::Timeout) => match client.pump() {
-                    Ok(()) => record_heartbeat(&diagnostics, &client),
-                    Err(error) => {
-                        emit_telemetry(
-                            "runtime_pump_failure",
-                            json!({
-                                "error": error.to_string(),
-                                "runtime": client.runtime_status(),
-                            }),
-                        );
-                        record_operation_failure(
-                            &diagnostics,
-                            "pump",
-                            failure_from_error("pump", "pumping browser event loop", &error),
-                            Some(client.runtime_status()),
-                        );
-                        break;
-                    }
-                },
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            }
-        }
-
-        if let Ok(session) = client.snapshot_session() {
-            let _ = profile_store.save(&session);
-        }
-    });
-
-    match startup_rx.recv() {
-        Ok(Ok(_metrics)) => {}
-        Ok(Err(error)) => return Err(error),
-        Err(error) => return Err(AegisError::Bridge(error.to_string())),
+    let client_connect_started = Instant::now();
+    let client = LoadedAegisClient::connect(host_library.clone(), browser_config.clone())?;
+    emit_telemetry(
+        "serve_client_connected",
+        json!({
+            "latency_ms": client_connect_started.elapsed().as_millis() as u64,
+            "browser_mode": browser_config.mode,
+            "runtime": client.runtime_status(),
+        }),
+    );
+    if let Ok(mut shared_cancel) = cancel.lock() {
+        *shared_cancel = Some(client.cancel_handle());
     }
+    let startup_metrics = ServeStartupMetrics {
+        client_connect_ms: client_connect_started.elapsed().as_millis() as u64,
+        api_bind_ms: 0,
+        total_ready_ms: serve_started.elapsed().as_millis() as u64,
+    };
+    if let Ok(mut shared) = startup.lock() {
+        *shared = startup_metrics.clone();
+    }
+    emit_telemetry(
+        "serve_ready",
+        json!({
+            "client_connect_ms": startup_metrics.client_connect_ms,
+            "api_bind_ms": startup_metrics.api_bind_ms,
+            "total_ready_ms": startup_metrics.total_ready_ms,
+            "browser_mode": browser_config.mode,
+        }),
+    );
+    eprintln!(
+        "Aegis context ready for profile {} ({:?}, host: {})",
+        profile_store.info().profile,
+        browser_config.mode,
+        host_library.display()
+    );
 
-    Ok(ManagedContext {
-        api: state_for_thread,
-        owner_thread: Some(owner_thread),
+    Ok(MainThreadContext {
+        api: state,
+        rx,
+        client,
+        profile_store,
+        credential_settings,
+        credential_store,
+        credential_capture,
+        pending_startup_session,
+        idle_pump_interval,
+        last_pump_at: Instant::now(),
     })
 }
 
+enum ContextTickOutcome {
+    Running,
+    Stop,
+}
+
+impl MainThreadContext {
+    fn handle_startup_session(&mut self) -> Result<(), AegisError> {
+        let Some(session) = self.pending_startup_session.take() else {
+            return Ok(());
+        };
+        let started_at = Instant::now();
+        record_operation_started(
+            &self.api.diagnostics,
+            "startup_restore_session",
+            "restoring persisted startup session",
+        );
+        emit_telemetry(
+            "startup_session_restore_started",
+            json!({
+                "browser_mode": self.api.browser.mode,
+                "profile": self.profile_store.info().profile,
+            }),
+        );
+        let result = self.client.inject_session(session);
+        record_operation_finished(
+            &self.api.diagnostics,
+            "startup_restore_session",
+            &self.client,
+            &result,
+        );
+        emit_operation_telemetry(
+            "startup_restore_session",
+            started_at,
+            &result,
+            self.client.runtime_status(),
+        );
+        if let Err(error) = result {
+            emit_telemetry(
+                "startup_session_restore_failed",
+                json!({
+                    "browser_mode": self.api.browser.mode,
+                    "profile": self.profile_store.info().profile,
+                    "error": error.to_string(),
+                    "runtime": self.client.runtime_status(),
+                }),
+            );
+            return Err(error);
+        }
+        emit_telemetry(
+            "startup_session_restore_completed",
+            json!({
+                "browser_mode": self.api.browser.mode,
+                "profile": self.profile_store.info().profile,
+                "latency_ms": started_at.elapsed().as_millis() as u64,
+                "runtime": self.client.runtime_status(),
+            }),
+        );
+        Ok(())
+    }
+
+    fn tick(&mut self) -> ContextTickOutcome {
+        if let Err(error) = self.handle_startup_session() {
+            record_operation_failure(
+                &self.api.diagnostics,
+                "startup_restore_session",
+                failure_from_error(
+                    "startup_restore_session",
+                    "restoring persisted startup session",
+                    &error,
+                ),
+                Some(self.client.runtime_status()),
+            );
+            return ContextTickOutcome::Stop;
+        }
+
+        let mut processed_command = false;
+        loop {
+            match self.rx.try_recv() {
+                Ok(command) => {
+                    processed_command = true;
+                    if matches!(self.handle_command(command), ContextTickOutcome::Stop) {
+                        return ContextTickOutcome::Stop;
+                    }
+                }
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => return ContextTickOutcome::Stop,
+            }
+        }
+
+        if !processed_command && self.last_pump_at.elapsed() >= self.idle_pump_interval {
+            match self.client.pump() {
+                Ok(()) => {
+                    record_heartbeat(&self.api.diagnostics, &self.client);
+                    self.last_pump_at = Instant::now();
+                }
+                Err(error) => {
+                    emit_telemetry(
+                        "runtime_pump_failure",
+                        json!({
+                            "error": error.to_string(),
+                            "runtime": self.client.runtime_status(),
+                        }),
+                    );
+                    record_operation_failure(
+                        &self.api.diagnostics,
+                        "pump",
+                        failure_from_error("pump", "pumping browser event loop", &error),
+                        Some(self.client.runtime_status()),
+                    );
+                    return ContextTickOutcome::Stop;
+                }
+            }
+        }
+
+        ContextTickOutcome::Running
+    }
+
+    fn handle_command(&mut self, command: ApiCommand) -> ContextTickOutcome {
+        match command {
+            ApiCommand::InjectSession(session, reply) => {
+                let started_at = Instant::now();
+                record_operation_started(
+                    &self.api.diagnostics,
+                    "inject_session",
+                    "injecting session",
+                );
+                let result = self.client.inject_session(session.clone()).and_then(|_| {
+                    self.profile_store
+                        .save(&session)
+                        .map(|_| ())
+                        .map_err(AegisError::Bridge)
+                });
+                record_operation_finished(
+                    &self.api.diagnostics,
+                    "inject_session",
+                    &self.client,
+                    &result,
+                );
+                emit_operation_telemetry(
+                    "inject_session",
+                    started_at,
+                    &result,
+                    self.client.runtime_status(),
+                );
+                let _ = reply.send(result);
+            }
+            ApiCommand::SnapshotSession(reply) => {
+                let started_at = Instant::now();
+                record_operation_started(
+                    &self.api.diagnostics,
+                    "snapshot_session",
+                    "capturing session state",
+                );
+                let result = self.client.snapshot_session();
+                record_operation_finished(
+                    &self.api.diagnostics,
+                    "snapshot_session",
+                    &self.client,
+                    &result,
+                );
+                emit_operation_telemetry(
+                    "snapshot_session",
+                    started_at,
+                    &result,
+                    self.client.runtime_status(),
+                );
+                let _ = reply.send(result);
+            }
+            ApiCommand::SaveSessionProfile(reply) => {
+                let started_at = Instant::now();
+                record_operation_started(
+                    &self.api.diagnostics,
+                    "save_session_profile",
+                    "persisting session profile",
+                );
+                let result = self.client.snapshot_session().and_then(|session| {
+                    self.profile_store
+                        .save(&session)
+                        .map(|_| self.profile_store.info())
+                        .map_err(AegisError::Bridge)
+                });
+                record_operation_finished(
+                    &self.api.diagnostics,
+                    "save_session_profile",
+                    &self.client,
+                    &result,
+                );
+                emit_operation_telemetry(
+                    "save_session_profile",
+                    started_at,
+                    &result,
+                    self.client.runtime_status(),
+                );
+                let _ = reply.send(result);
+            }
+            ApiCommand::LoadSessionProfile(reply) => {
+                let started_at = Instant::now();
+                record_operation_started(
+                    &self.api.diagnostics,
+                    "load_session_profile",
+                    "loading session profile",
+                );
+                let result = self.profile_store.load().map_err(AegisError::Bridge).and_then(
+                    |maybe_session| match maybe_session {
+                        Some(session) => self.client.inject_session(session).map(|_| self.profile_store.info()),
+                        None => Ok(self.profile_store.info()),
+                    },
+                );
+                record_operation_finished(
+                    &self.api.diagnostics,
+                    "load_session_profile",
+                    &self.client,
+                    &result,
+                );
+                emit_operation_telemetry(
+                    "load_session_profile",
+                    started_at,
+                    &result,
+                    self.client.runtime_status(),
+                );
+                let _ = reply.send(result);
+            }
+            ApiCommand::Navigate(url, reply) => {
+                let started_at = Instant::now();
+                record_operation_started(
+                    &self.api.diagnostics,
+                    "navigate",
+                    &format!("navigating to {url}"),
+                );
+                self.credential_capture.reset_on_explicit_navigation(&url);
+                let result = self.client.navigate(url);
+                record_operation_finished(&self.api.diagnostics, "navigate", &self.client, &result);
+                emit_operation_telemetry(
+                    "navigate",
+                    started_at,
+                    &result,
+                    self.client.runtime_status(),
+                );
+                let _ = reply.send(result);
+            }
+            ApiCommand::Execute(commands, reply) => {
+                let started_at = Instant::now();
+                record_operation_started(
+                    &self.api.diagnostics,
+                    "execute",
+                    "executing browser command batch",
+                );
+                let maybe_snapshot = if self.credential_settings.auto_store
+                    && commands.iter().any(|command| {
+                        matches!(command, Command::SetValue { .. } | Command::Click { .. })
+                    }) {
+                    match self.client.snapshot_dom() {
+                        Ok(snapshot) => Some(snapshot),
+                        Err(error) => {
+                            record_operation_failure(
+                                &self.api.diagnostics,
+                                "execute",
+                                failure_from_error(
+                                    "execute",
+                                    "capturing pre-execution DOM snapshot",
+                                    &error,
+                                ),
+                                Some(self.client.runtime_status()),
+                            );
+                            emit_operation_telemetry(
+                                "execute",
+                                started_at,
+                                &Err::<ExecutionReport, AegisError>(AegisError::Bridge(
+                                    error.to_string(),
+                                )),
+                                self.client.runtime_status(),
+                            );
+                            let _ = reply.send(Err(error));
+                            return ContextTickOutcome::Running;
+                        }
+                    }
+                } else {
+                    None
+                };
+                if let Some(snapshot) = maybe_snapshot.as_ref() {
+                    self.credential_capture.capture_fields(
+                        snapshot,
+                        self.client.runtime().current_url(),
+                        &commands,
+                    );
+                }
+                let should_persist = self.credential_settings.auto_store
+                    && maybe_snapshot.as_ref().is_some_and(|snapshot| {
+                        self.credential_capture.should_persist(snapshot, &commands)
+                    });
+                let persist_origin = if should_persist {
+                    self.client.runtime().current_url().map(origin_key)
+                } else {
+                    None
+                };
+                let result = self.client.execute(&commands).and_then(|report| {
+                    if let Some(origin) = persist_origin {
+                        self.credential_capture.persist(
+                            &self.credential_store,
+                            &self.profile_store.info().profile,
+                            &origin,
+                        )?;
+                    }
+                    Ok(report)
+                });
+                record_operation_finished(&self.api.diagnostics, "execute", &self.client, &result);
+                emit_operation_telemetry(
+                    "execute",
+                    started_at,
+                    &result,
+                    self.client.runtime_status(),
+                );
+                let _ = reply.send(result);
+            }
+            ApiCommand::SnapshotDom(reply) => {
+                let started_at = Instant::now();
+                record_operation_started(
+                    &self.api.diagnostics,
+                    "snapshot_dom",
+                    "capturing DOM snapshot",
+                );
+                let result = self.client.snapshot_dom();
+                record_operation_finished(
+                    &self.api.diagnostics,
+                    "snapshot_dom",
+                    &self.client,
+                    &result,
+                );
+                emit_operation_telemetry(
+                    "snapshot_dom",
+                    started_at,
+                    &result,
+                    self.client.runtime_status(),
+                );
+                let _ = reply.send(result);
+            }
+            ApiCommand::Events(since, reply) => {
+                let started_at = Instant::now();
+                record_operation_started(&self.api.diagnostics, "events", "draining runtime events");
+                let result = self.client.events_since(since);
+                record_operation_finished(&self.api.diagnostics, "events", &self.client, &result);
+                emit_operation_telemetry(
+                    "events",
+                    started_at,
+                    &result,
+                    self.client.runtime_status(),
+                );
+                let _ = reply.send(result);
+            }
+            ApiCommand::EnableTrace(path, reply) => {
+                let started_at = Instant::now();
+                record_operation_started(
+                    &self.api.diagnostics,
+                    "enable_trace",
+                    "enabling trace recording",
+                );
+                self.client.enable_trace_recording(path);
+                record_operation_finished(
+                    &self.api.diagnostics,
+                    "enable_trace",
+                    &self.client,
+                    &Ok(()),
+                );
+                emit_operation_telemetry(
+                    "enable_trace",
+                    started_at,
+                    &Ok(()),
+                    self.client.runtime_status(),
+                );
+                let _ = reply.send(Ok(()));
+            }
+        }
+
+        ContextTickOutcome::Running
+    }
+
+    fn persist_session_best_effort(&mut self) {
+        if let Ok(session) = self.client.snapshot_session() {
+            let _ = self.profile_store.save(&session);
+        }
+    }
+
+    fn summary(&self, context_id: String, default: bool) -> ContextSummary {
+        let diagnostics = read_diagnostics(&self.api.diagnostics);
+        ContextSummary {
+            id: context_id,
+            default,
+            host_library: self.api.host_library.clone(),
+            browser: self.api.browser.clone(),
+            profile: self.api.profile.clone(),
+            runtime_state: serde_json::to_value(&diagnostics.state)
+                .ok()
+                .and_then(|value| value.as_str().map(ToOwned::to_owned))
+                .unwrap_or_else(|| "unknown".into()),
+            command_ready: diagnostics.command_ready,
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
 pub async fn serve(
+    addr: SocketAddr,
+    host_library: PathBuf,
+    browser_config: BrowserConfig,
+    profile_name: String,
+) -> Result<(), AegisError> {
+    let _ = (addr, host_library, browser_config, profile_name);
+    Err(AegisError::Bridge(
+        "non-macOS serve bootstrap must be reworked to the new coordinator model".into(),
+    ))
+}
+
+#[cfg(target_os = "macos")]
+pub fn serve_main_thread(
     addr: SocketAddr,
     host_library: PathBuf,
     browser_config: BrowserConfig,
@@ -715,37 +810,81 @@ pub async fn serve(
 ) -> Result<(), AegisError> {
     let default_context_id = "default".to_string();
     let default_context =
-        spawn_context_state(host_library.clone(), browser_config.clone(), profile_name)?;
+        create_context_runtime(host_library.clone(), browser_config.clone(), profile_name)?;
     if let Ok(mut startup) = default_context.api.startup.lock() {
         startup.api_bind_ms = 0;
     }
+    let (manager_tx, manager_rx) = mpsc::channel();
     let root = ServeRootState {
-        host_library,
-        browser: browser_config,
+        host_library: host_library.clone(),
+        browser: browser_config.clone(),
         default_context_id: default_context_id.clone(),
         contexts: Arc::new(Mutex::new(HashMap::from([(
-            default_context_id,
-            default_context,
+            default_context_id.clone(),
+            default_context.api.clone(),
         )]))),
+        manager_tx,
     };
+    let mut runtimes = HashMap::from([(default_context_id, default_context)]);
 
-    let bind_started = Instant::now();
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .map_err(|error| AegisError::Bridge(error.to_string()))?;
-    if let Some(default_state) = root.default_context_state() {
-        if let Ok(mut startup) = default_state.startup.lock() {
-            startup.api_bind_ms = bind_started.elapsed().as_millis() as u64;
-        }
+    let (bind_tx, bind_rx) = mpsc::channel::<Result<(), AegisError>>();
+    let (server_exit_tx, server_exit_rx) = mpsc::channel::<Result<(), AegisError>>();
+    let root_for_server = root.clone();
+    let server_thread = thread::spawn(move || {
+        let runtime = match tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                let error = AegisError::Bridge(error.to_string());
+                let _ = bind_tx.send(Err(AegisError::Bridge(error.to_string())));
+                let _ = server_exit_tx.send(Err(error));
+                return;
+            }
+        };
+
+        let server_result = runtime.block_on(async move {
+            let bind_started = Instant::now();
+            let listener = tokio::net::TcpListener::bind(addr)
+                .await
+                .map_err(|error| AegisError::Bridge(error.to_string()))?;
+            if let Some(default_state) = root_for_server.default_context_state() {
+                if let Ok(mut startup) = default_state.startup.lock() {
+                    startup.api_bind_ms = bind_started.elapsed().as_millis() as u64;
+                }
+            }
+            eprintln!("Aegis serve ready on http://{}", addr);
+            let _ = bind_tx.send(Ok(()));
+            let app = router(root_for_server.clone());
+            axum::serve(listener, app)
+                .await
+                .map_err(|error| AegisError::Bridge(error.to_string()))
+        });
+        let _ = server_exit_tx.send(server_result);
+    });
+
+    match bind_rx.recv() {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => return Err(error),
+        Err(error) => return Err(AegisError::Bridge(error.to_string())),
     }
-    eprintln!("Aegis serve ready on http://{}", addr);
-    let app = router(root.clone());
-    axum::serve(listener, app)
-        .await
-        .map_err(|error| AegisError::Bridge(error.to_string()))?;
-    shutdown_all_contexts(&root)
-        .await
-        .map_err(|error| AegisError::Bridge(error.body.error))?;
+
+    let result = run_main_thread_serve_loop(&root, &mut runtimes, manager_rx, &server_exit_rx);
+    shutdown_active_contexts(&root, &mut runtimes);
+    let server_result = match server_exit_rx.try_recv() {
+        Ok(result) => result,
+        Err(_) => match server_thread.join() {
+            Ok(()) => Ok(()),
+            Err(_) => Err(AegisError::Bridge(
+                "serve HTTP server thread panicked".into(),
+            )),
+        },
+    };
+    if let Err(error) = result {
+        return Err(error);
+    }
+    server_result?;
     Ok(())
 }
 
@@ -986,10 +1125,10 @@ impl ServeRootState {
         self.contexts
             .lock()
             .ok()
-            .and_then(|contexts| contexts.get(context_id).map(|context| context.api.clone()))
+            .and_then(|contexts| contexts.get(context_id).cloned())
     }
 
-    fn insert_context(&self, context_id: String, state: ManagedContext) -> Result<(), ApiError> {
+    fn insert_context(&self, context_id: String, state: ApiState) -> Result<(), ApiError> {
         let mut contexts = self.contexts.lock().map_err(|_| {
             ApiError::from(AegisError::Bridge("context registry lock poisoned".into()))
         })?;
@@ -997,7 +1136,7 @@ impl ServeRootState {
         Ok(())
     }
 
-    fn remove_context(&self, context_id: &str) -> Result<Option<ManagedContext>, ApiError> {
+    fn remove_context(&self, context_id: &str) -> Result<Option<ApiState>, ApiError> {
         let mut contexts = self.contexts.lock().map_err(|_| {
             ApiError::from(AegisError::Bridge("context registry lock poisoned".into()))
         })?;
@@ -1011,13 +1150,13 @@ impl ServeRootState {
         let mut items = contexts
             .iter()
             .map(|(id, state)| {
-                let diagnostics = read_diagnostics(&state.api.diagnostics);
+                let diagnostics = read_diagnostics(&state.diagnostics);
                 ContextSummary {
                     id: id.clone(),
                     default: id == &self.default_context_id,
-                    host_library: state.api.host_library.clone(),
-                    browser: state.api.browser.clone(),
-                    profile: state.api.profile.clone(),
+                    host_library: state.host_library.clone(),
+                    browser: state.browser.clone(),
+                    profile: state.profile.clone(),
                     runtime_state: serde_json::to_value(&diagnostics.state)
                         .ok()
                         .and_then(|value| value.as_str().map(ToOwned::to_owned))
@@ -1029,14 +1168,6 @@ impl ServeRootState {
         items.sort_by(|left, right| left.id.cmp(&right.id));
         Ok(items)
     }
-
-    fn drain_contexts(&self) -> Result<Vec<(String, ManagedContext)>, ApiError> {
-        let mut contexts = self.contexts.lock().map_err(|_| {
-            ApiError::from(AegisError::Bridge("context registry lock poisoned".into()))
-        })?;
-        let drained = contexts.drain().collect::<Vec<_>>();
-        Ok(drained)
-    }
 }
 
 pub fn router(state: ServeRootState) -> Router {
@@ -1046,39 +1177,39 @@ pub fn router(state: ServeRootState) -> Router {
         .route("/version", get(api_version))
         .route("/contexts", get(list_contexts).post(create_context))
         .route(
-            "/contexts/:context_id",
+            "/contexts/{context_id}",
             get(get_context).delete(delete_context),
         )
-        .route("/contexts/:context_id/healthz", get(context_health))
-        .route("/contexts/:context_id/readyz", get(context_readiness))
-        .route("/contexts/:context_id/doctor", get(context_doctor))
-        .route("/contexts/:context_id/runtime", get(context_runtime_info))
+        .route("/contexts/{context_id}/healthz", get(context_health))
+        .route("/contexts/{context_id}/readyz", get(context_readiness))
+        .route("/contexts/{context_id}/doctor", get(context_doctor))
+        .route("/contexts/{context_id}/runtime", get(context_runtime_info))
         .route(
-            "/contexts/:context_id/runtime/cancel",
+            "/contexts/{context_id}/runtime/cancel",
             post(context_cancel_runtime_operation),
         )
         .route(
-            "/contexts/:context_id/session",
+            "/contexts/{context_id}/session",
             post(context_inject_session).get(context_snapshot_session),
         )
         .route(
-            "/contexts/:context_id/session/save",
+            "/contexts/{context_id}/session/save",
             post(context_save_session_profile),
         )
         .route(
-            "/contexts/:context_id/session/load",
+            "/contexts/{context_id}/session/load",
             post(context_load_session_profile),
         )
-        .route("/contexts/:context_id/navigate", post(context_navigate))
-        .route("/contexts/:context_id/execute", post(context_execute))
-        .route("/contexts/:context_id/dom", get(context_snapshot_dom))
-        .route("/contexts/:context_id/events", get(context_events))
+        .route("/contexts/{context_id}/navigate", post(context_navigate))
+        .route("/contexts/{context_id}/execute", post(context_execute))
+        .route("/contexts/{context_id}/dom", get(context_snapshot_dom))
+        .route("/contexts/{context_id}/events", get(context_events))
         .route(
-            "/contexts/:context_id/events/live",
+            "/contexts/{context_id}/events/live",
             get(context_events_live),
         )
         .route(
-            "/contexts/:context_id/trace/enable",
+            "/contexts/{context_id}/trace/enable",
             post(context_enable_trace),
         )
         .route("/healthz", get(health))
@@ -1108,81 +1239,19 @@ fn require_context_state(root: &ServeRootState, context_id: &str) -> Result<ApiS
         .ok_or_else(|| ApiError::not_found(format!("context `{context_id}` was not found")))
 }
 
-async fn shutdown_context(context_id: &str, state: &ApiState) -> Result<(), ApiError> {
-    let (reply_tx, reply_rx) = oneshot::channel();
-    state
-        .tx
-        .send(ApiCommand::Shutdown(reply_tx))
-        .map_err(channel_error)?;
+async fn manage_context<T>(
+    root: &ServeRootState,
+    command: ManagerCommand,
+    reply_rx: oneshot::Receiver<Result<T, AegisError>>,
+    timeout_operation: &str,
+) -> Result<T, ApiError> {
+    root.manager_tx.send(command).map_err(manager_channel_error)?;
     match timeout(COMMAND_TIMEOUT, reply_rx).await {
-        Ok(Ok(Ok(()))) => Ok(()),
+        Ok(Ok(Ok(value))) => Ok(value),
         Ok(Ok(Err(error))) => Err(ApiError::from(error)),
         Ok(Err(error)) => Err(reply_error(error)),
-        Err(_) => Err(ApiError::timeout(&format!("shutdown_context:{context_id}"))),
+        Err(_) => Err(ApiError::timeout(timeout_operation)),
     }
-}
-
-fn join_context_thread(context_id: &str, mut managed: ManagedContext) -> Result<(), ApiError> {
-    let Some(owner_thread) = managed.owner_thread.take() else {
-        return Ok(());
-    };
-    owner_thread.join().map_err(|_| {
-        ApiError::from(AegisError::Bridge(format!(
-            "context `{context_id}` owner thread panicked during shutdown"
-        )))
-    })
-}
-
-async fn snapshot_context_session_state(state: &ApiState) -> Result<SessionState, ApiError> {
-    let (reply_tx, reply_rx) = oneshot::channel();
-    state
-        .tx
-        .send(ApiCommand::SnapshotSession(reply_tx))
-        .map_err(channel_error)?;
-    match timeout(COMMAND_TIMEOUT, reply_rx).await {
-        Ok(Ok(Ok(session))) => Ok(session),
-        Ok(Ok(Err(error))) => Err(ApiError::from(error)),
-        Ok(Err(error)) => Err(reply_error(error)),
-        Err(_) => Err(ApiError::timeout("snapshot_context_session_state")),
-    }
-}
-
-async fn inject_context_session_state(
-    state: &ApiState,
-    session: SessionState,
-) -> Result<(), ApiError> {
-    let (reply_tx, reply_rx) = oneshot::channel();
-    state
-        .tx
-        .send(ApiCommand::InjectSession(session, reply_tx))
-        .map_err(channel_error)?;
-    match timeout(COMMAND_TIMEOUT, reply_rx).await {
-        Ok(Ok(Ok(()))) => Ok(()),
-        Ok(Ok(Err(error))) => Err(ApiError::from(error)),
-        Ok(Err(error)) => Err(reply_error(error)),
-        Err(_) => Err(ApiError::timeout("inject_context_session_state")),
-    }
-}
-
-async fn shutdown_all_contexts(root: &ServeRootState) -> Result<(), ApiError> {
-    let contexts = root.drain_contexts()?;
-    let mut first_error = None;
-    for (context_id, managed) in contexts {
-        if let Err(error) = shutdown_context(&context_id, &managed.api).await
-            && first_error.is_none()
-        {
-            first_error = Some(error);
-        }
-        if let Err(error) = join_context_thread(&context_id, managed)
-            && first_error.is_none()
-        {
-            first_error = Some(error);
-        }
-    }
-    if let Some(error) = first_error {
-        return Err(error);
-    }
-    Ok(())
 }
 
 async fn health(State(root): State<ServeRootState>) -> Result<Json<HealthResponse>, ApiError> {
@@ -1283,87 +1352,87 @@ async fn api_manifest() -> Json<ApiManifest> {
             },
             ApiRouteDoc {
                 method: "GET",
-                path: "/contexts/:context_id",
+                path: "/contexts/{context_id}",
                 summary: "Read one browser context summary",
             },
             ApiRouteDoc {
                 method: "DELETE",
-                path: "/contexts/:context_id",
+                path: "/contexts/{context_id}",
                 summary: "Delete one non-default browser context",
             },
             ApiRouteDoc {
                 method: "GET",
-                path: "/contexts/:context_id/healthz",
+                path: "/contexts/{context_id}/healthz",
                 summary: "Context-scoped health",
             },
             ApiRouteDoc {
                 method: "GET",
-                path: "/contexts/:context_id/readyz",
+                path: "/contexts/{context_id}/readyz",
                 summary: "Context-scoped readiness",
             },
             ApiRouteDoc {
                 method: "GET",
-                path: "/contexts/:context_id/doctor",
+                path: "/contexts/{context_id}/doctor",
                 summary: "Context-scoped diagnostics",
             },
             ApiRouteDoc {
                 method: "GET",
-                path: "/contexts/:context_id/runtime",
+                path: "/contexts/{context_id}/runtime",
                 summary: "Context runtime config and live state",
             },
             ApiRouteDoc {
                 method: "POST",
-                path: "/contexts/:context_id/runtime/cancel",
+                path: "/contexts/{context_id}/runtime/cancel",
                 summary: "Cancel the active operation in one context",
             },
             ApiRouteDoc {
                 method: "GET",
-                path: "/contexts/:context_id/session",
+                path: "/contexts/{context_id}/session",
                 summary: "Snapshot one context session",
             },
             ApiRouteDoc {
                 method: "POST",
-                path: "/contexts/:context_id/session",
+                path: "/contexts/{context_id}/session",
                 summary: "Inject session state into one context",
             },
             ApiRouteDoc {
                 method: "POST",
-                path: "/contexts/:context_id/session/save",
+                path: "/contexts/{context_id}/session/save",
                 summary: "Persist one context profile session",
             },
             ApiRouteDoc {
                 method: "POST",
-                path: "/contexts/:context_id/session/load",
+                path: "/contexts/{context_id}/session/load",
                 summary: "Load one context profile session",
             },
             ApiRouteDoc {
                 method: "POST",
-                path: "/contexts/:context_id/navigate",
+                path: "/contexts/{context_id}/navigate",
                 summary: "Navigate one context",
             },
             ApiRouteDoc {
                 method: "POST",
-                path: "/contexts/:context_id/execute",
+                path: "/contexts/{context_id}/execute",
                 summary: "Execute commands in one context",
             },
             ApiRouteDoc {
                 method: "GET",
-                path: "/contexts/:context_id/dom",
+                path: "/contexts/{context_id}/dom",
                 summary: "Fetch one context DOM snapshot",
             },
             ApiRouteDoc {
                 method: "GET",
-                path: "/contexts/:context_id/events",
+                path: "/contexts/{context_id}/events",
                 summary: "Read buffered events for one context",
             },
             ApiRouteDoc {
                 method: "GET",
-                path: "/contexts/:context_id/events/live",
+                path: "/contexts/{context_id}/events/live",
                 summary: "Stream events for one context over SSE",
             },
             ApiRouteDoc {
                 method: "POST",
-                path: "/contexts/:context_id/trace/enable",
+                path: "/contexts/{context_id}/trace/enable",
                 summary: "Enable trace recording for one context",
             },
             ApiRouteDoc {
@@ -1613,30 +1682,20 @@ async fn create_context(
     if start_url.is_some() {
         browser.start_url = start_url;
     }
-    let state = spawn_context_state(root.host_library.clone(), browser, profile)?;
-    if let Some(source_context_id) = seed_from_context.as_deref() {
-        let source_state = require_context_state(&root, source_context_id)?;
-        let session = snapshot_context_session_state(&source_state).await?;
-        if let Err(error) = inject_context_session_state(&state.api, session).await {
-            let _ = shutdown_context(&context_id, &state.api).await;
-            let _ = join_context_thread(&context_id, state);
-            return Err(error);
-        }
-    }
-    let diagnostics = read_diagnostics(&state.api.diagnostics);
-    let summary = ContextSummary {
-        id: context_id.clone(),
-        default: false,
-        host_library: state.api.host_library.clone(),
-        browser: state.api.browser.clone(),
-        profile: state.api.profile.clone(),
-        runtime_state: serde_json::to_value(&diagnostics.state)
-            .ok()
-            .and_then(|value| value.as_str().map(ToOwned::to_owned))
-            .unwrap_or_else(|| "unknown".into()),
-        command_ready: diagnostics.command_ready,
-    };
-    root.insert_context(context_id, state)?;
+    let (reply_tx, reply_rx) = oneshot::channel();
+    let summary = manage_context(
+        &root,
+        ManagerCommand::CreateContext {
+            context_id: context_id.clone(),
+            profile,
+            browser,
+            seed_from_context,
+            reply: reply_tx,
+        },
+        reply_rx,
+        "create_context",
+    )
+    .await?;
     Ok((StatusCode::CREATED, Json(summary)))
 }
 
@@ -1649,16 +1708,23 @@ async fn delete_context(
             "default context cannot be deleted".into(),
         )));
     }
-    match root.remove_context(&context_id)? {
-        Some(state) => {
-            shutdown_context(&context_id, &state.api).await?;
-            join_context_thread(&context_id, state)?;
-            Ok(StatusCode::NO_CONTENT)
-        }
-        None => Err(ApiError::not_found(format!(
+    if root.context_state(&context_id).is_none() {
+        return Err(ApiError::not_found(format!(
             "context `{context_id}` was not found"
-        ))),
+        )));
     }
+    let (reply_tx, reply_rx) = oneshot::channel();
+    manage_context(
+        &root,
+        ManagerCommand::DeleteContext {
+            context_id,
+            reply: reply_tx,
+        },
+        reply_rx,
+        "delete_context",
+    )
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn context_health(
@@ -2148,6 +2214,118 @@ async fn context_enable_trace(
         .map_err(channel_error)?;
     await_command("enable_trace", &state, reply_rx).await??;
     Ok(StatusCode::NO_CONTENT)
+}
+
+fn run_main_thread_serve_loop(
+    root: &ServeRootState,
+    runtimes: &mut HashMap<String, MainThreadContext>,
+    manager_rx: mpsc::Receiver<ManagerCommand>,
+    server_exit_rx: &mpsc::Receiver<Result<(), AegisError>>,
+) -> Result<(), AegisError> {
+    loop {
+        match server_exit_rx.try_recv() {
+            Ok(result) => return result,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                return Err(AegisError::Bridge(
+                    "serve HTTP server status channel disconnected".into(),
+                ))
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+
+        loop {
+            match manager_rx.try_recv() {
+                Ok(command) => handle_manager_command(root, runtimes, command)?,
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    return Err(AegisError::Bridge(
+                        "serve manager channel disconnected".into(),
+                    ))
+                }
+            }
+        }
+
+        let context_ids = runtimes.keys().cloned().collect::<Vec<_>>();
+        let mut stopped = Vec::new();
+        for context_id in context_ids {
+            let outcome = match runtimes.get_mut(&context_id) {
+                Some(runtime) => runtime.tick(),
+                None => continue,
+            };
+            if matches!(outcome, ContextTickOutcome::Stop) {
+                stopped.push(context_id);
+            }
+        }
+        for context_id in stopped {
+            if let Some(mut runtime) = runtimes.remove(&context_id) {
+                runtime.persist_session_best_effort();
+            }
+        }
+
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
+fn handle_manager_command(
+    root: &ServeRootState,
+    runtimes: &mut HashMap<String, MainThreadContext>,
+    command: ManagerCommand,
+) -> Result<(), AegisError> {
+    match command {
+        ManagerCommand::CreateContext {
+            context_id,
+            profile,
+            browser,
+            seed_from_context,
+            reply,
+        } => {
+            let result = (|| -> Result<ContextSummary, AegisError> {
+                let mut runtime =
+                    create_context_runtime(root.host_library.clone(), browser, profile)?;
+                if let Some(source_context_id) = seed_from_context {
+                    let source = runtimes.get_mut(&source_context_id).ok_or_else(|| {
+                        AegisError::Bridge(format!(
+                            "context `{source_context_id}` is not available for seeding"
+                        ))
+                    })?;
+                    let session = source.client.snapshot_session()?;
+                    runtime.client.inject_session(session)?;
+                }
+                let summary = runtime.summary(context_id.clone(), false);
+                root.insert_context(context_id.clone(), runtime.api.clone())
+                    .map_err(|error| AegisError::Bridge(error.body.error.clone()))?;
+                runtimes.insert(context_id, runtime);
+                Ok(summary)
+            })();
+            let _ = reply.send(result);
+        }
+        ManagerCommand::DeleteContext { context_id, reply } => {
+            root.remove_context(&context_id)
+                .map_err(|error| AegisError::Bridge(error.body.error.clone()))?;
+            if let Some(mut runtime) = runtimes.remove(&context_id) {
+                runtime.persist_session_best_effort();
+            }
+            let _ = reply.send(Ok(()));
+        }
+    }
+    Ok(())
+}
+
+fn shutdown_active_contexts(
+    root: &ServeRootState,
+    runtimes: &mut HashMap<String, MainThreadContext>,
+) {
+    if let Ok(mut contexts) = root.contexts.lock() {
+        contexts.clear();
+    }
+    for (_, mut runtime) in runtimes.drain() {
+        request_runtime_cancel(&runtime.api);
+        runtime.persist_session_best_effort();
+    }
+}
+
+fn manager_channel_error(error: mpsc::SendError<ManagerCommand>) -> ApiError {
+    ApiError::from(AegisError::Bridge(error.to_string()))
 }
 
 fn channel_error(error: mpsc::SendError<ApiCommand>) -> ApiError {
@@ -2686,13 +2864,6 @@ mod tests {
         }
     }
 
-    fn dummy_managed_context(profile: &str) -> ManagedContext {
-        ManagedContext {
-            api: dummy_api_state(profile),
-            owner_thread: None,
-        }
-    }
-
     #[test]
     fn validate_context_name_rejects_invalid_characters() {
         assert!(validate_context_name("guest-1").is_ok());
@@ -2706,9 +2877,10 @@ mod tests {
             host_library: PathBuf::from("/tmp/aegis_host.dylib"),
             browser: BrowserConfig::default(),
             default_context_id: "default".into(),
+            manager_tx: mpsc::channel().0,
             contexts: Arc::new(Mutex::new(HashMap::from([
-                ("guest".into(), dummy_managed_context("guest")),
-                ("default".into(), dummy_managed_context("default")),
+                ("guest".into(), dummy_api_state("guest")),
+                ("default".into(), dummy_api_state("default")),
             ]))),
         };
 

@@ -50,6 +50,8 @@ namespace aegis {
 namespace {
 
 thread_local std::string g_last_host_error;
+std::mutex g_shared_host_lifecycle_mutex;
+std::size_t g_shared_host_count = 0;
 
 constexpr auto kStartupTimeout = std::chrono::seconds(30);
 constexpr auto kRendererTimeout = std::chrono::seconds(30);
@@ -763,13 +765,16 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
   friend class OperationScope;
   friend class AegisDevToolsObserver;
 
-  explicit AegisCefHost(BrowserOptions options, bool manage_cef_lifecycle = true)
+  explicit AegisCefHost(BrowserOptions options,
+                        bool manage_cef_lifecycle = true,
+                        bool counted_shared_lifecycle = false)
       : options_(std::move(options)),
         paths_(ResolveHostPaths()),
         runtime_session_paths_(AegisCreateRuntimeSessionPaths(
             options_.headless ? "serve-headless" : "serve-headful")),
         owner_thread_id_(std::this_thread::get_id()),
-        manage_cef_lifecycle_(manage_cef_lifecycle) {
+        manage_cef_lifecycle_(manage_cef_lifecycle),
+        counted_shared_lifecycle_(counted_shared_lifecycle) {
     if (pthread_main_np() == 0) {
       throw std::runtime_error("aegis CEF host must be created on the process main thread");
     }
@@ -782,7 +787,15 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
   }
 
   ~AegisCefHost() override {
-    Shutdown();
+    bool shutdown_cef = manage_cef_lifecycle_;
+    if (counted_shared_lifecycle_) {
+      std::lock_guard lock(g_shared_host_lifecycle_mutex);
+      if (g_shared_host_count > 0) {
+        --g_shared_host_count;
+      }
+      shutdown_cef = g_shared_host_count == 0;
+    }
+    Shutdown(shutdown_cef);
     AegisRemoveRuntimeSession(runtime_session_paths_);
   }
 
@@ -1730,10 +1743,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
     }
   }
 
-  void Shutdown() {
-    if (!manage_cef_lifecycle_) {
-      return;
-    }
+  void Shutdown(bool shutdown_cef_runtime) {
     if (!cef_initialized_) {
       return;
     }
@@ -1753,8 +1763,10 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
         PumpUntil([this]() { return browser_closed_ || browser_.get() == nullptr; }, deadline,
                   "timed out waiting for browser shutdown");
       }
-      CefShutdown();
-      cef_unload_library();
+      if (shutdown_cef_runtime) {
+        CefShutdown();
+        cef_unload_library();
+      }
       cef_initialized_ = false;
     } catch (...) {
       cef_initialized_ = false;
@@ -2438,6 +2450,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
   const AegisRuntimeSessionPaths runtime_session_paths_;
   const std::thread::id owner_thread_id_;
   const bool manage_cef_lifecycle_;
+  const bool counted_shared_lifecycle_;
 
   CefRefPtr<AegisApp> app_;
   CefRefPtr<AegisClient> client_;
@@ -2722,15 +2735,31 @@ bool RunEmbeddedHostOperation(const std::vector<std::uint8_t>& config,
 
 extern "C" AegisHostHandle aegis_create_host(const std::uint8_t* input_ptr, std::size_t input_len) {
   aegis::g_last_host_error.clear();
+  bool manage_cef_lifecycle = false;
   try {
+    {
+      std::lock_guard lock(aegis::g_shared_host_lifecycle_mutex);
+      manage_cef_lifecycle = aegis::g_shared_host_count == 0;
+      ++aegis::g_shared_host_count;
+    }
     auto host = std::make_unique<aegis::AegisCefHost>(
-        aegis::ParseBrowserOptions(aegis::CopyInput(input_ptr, input_len)));
+        aegis::ParseBrowserOptions(aegis::CopyInput(input_ptr, input_len)),
+        manage_cef_lifecycle,
+        true);
     host->WaitForReady();
     return host.release();
   } catch (const std::exception& ex) {
+    std::lock_guard lock(aegis::g_shared_host_lifecycle_mutex);
+    if (aegis::g_shared_host_count > 0) {
+      --aegis::g_shared_host_count;
+    }
     aegis::g_last_host_error = ex.what();
     return nullptr;
   } catch (...) {
+    std::lock_guard lock(aegis::g_shared_host_lifecycle_mutex);
+    if (aegis::g_shared_host_count > 0) {
+      --aegis::g_shared_host_count;
+    }
     aegis::g_last_host_error = "unknown native host startup failure";
     return nullptr;
   }
