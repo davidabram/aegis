@@ -68,6 +68,18 @@ impl AegisStatePaths {
         self.root.join("runtime")
     }
 
+    pub fn files_dir(&self) -> PathBuf {
+        self.root.join("files")
+    }
+
+    pub fn downloads_dir(&self) -> PathBuf {
+        self.files_dir().join("downloads")
+    }
+
+    pub fn uploads_dir(&self) -> PathBuf {
+        self.files_dir().join("uploads")
+    }
+
     pub fn runtime_scope_dir(&self, scope: &str) -> PathBuf {
         self.runtime_dir().join(scope)
     }
@@ -99,6 +111,9 @@ impl AegisStatePaths {
         self.ensure_dir(&self.profiles_dir())?;
         self.ensure_dir(&self.secrets_dir())?;
         self.ensure_dir(&self.secrets_dir().join("profiles"))?;
+        self.ensure_dir(&self.files_dir())?;
+        self.ensure_dir(&self.downloads_dir())?;
+        self.ensure_dir(&self.uploads_dir())?;
         self.ensure_dir(&self.runtime_instances_dir("serve-headless"))?;
         self.ensure_dir(&self.runtime_instances_dir("serve-headful"))?;
 
@@ -645,6 +660,8 @@ mod tests {
         assert!(paths.settings_file("credentials").exists());
         assert!(paths.session_file("default").exists());
         assert!(paths.profile_secrets_file("default").exists());
+        assert!(paths.downloads_dir().exists());
+        assert!(paths.uploads_dir().exists());
         assert!(paths.runtime_instances_dir("serve-headless").exists());
         assert!(paths.runtime_instances_dir("serve-headful").exists());
         unsafe {

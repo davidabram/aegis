@@ -17,6 +17,7 @@ use crate::events::stream::{EventReadWindow, EventStream, RuntimeEvent, Sequence
 use crate::runtime::scheduler::Scheduler;
 use crate::session::cookies::SessionState;
 use crate::trace::recorder::TraceRecorder;
+use crate::transfers::stage_upload_file;
 use crate::transport::bridge::{
     AegisError, BatchRequest, BatchResponse, BridgeEventEnvelope, CefBridge,
 };
@@ -674,7 +675,10 @@ impl AegisRuntime {
                     Some(DesiredAction::Type),
                 )?,
                 paths: paths.clone(),
-                files: Some(load_upload_payloads(paths)?),
+                files: Some(load_upload_payloads(
+                    paths,
+                    self.browser_config.upload_dir.as_deref(),
+                )?),
             }),
             Command::PressKey {
                 target,
@@ -1171,15 +1175,33 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
-fn load_upload_payloads(paths: &[PathBuf]) -> Result<Vec<UploadFilePayload>, CommandResult> {
-    paths.iter().map(|path| load_upload_payload(path)).collect()
+fn load_upload_payloads(
+    paths: &[PathBuf],
+    upload_dir_override: Option<&Path>,
+) -> Result<Vec<UploadFilePayload>, CommandResult> {
+    paths
+        .iter()
+        .map(|path| load_upload_payload(path, upload_dir_override))
+        .collect()
 }
 
-fn load_upload_payload(path: &Path) -> Result<UploadFilePayload, CommandResult> {
-    let bytes = fs::read(path).map_err(|error| {
+fn load_upload_payload(
+    path: &Path,
+    upload_dir_override: Option<&Path>,
+) -> Result<UploadFilePayload, CommandResult> {
+    let upload_dir = upload_dir_override
+        .map(Path::to_path_buf)
+        .or_else(|| {
+            crate::state::AegisStatePaths::detect()
+                .ok()
+                .map(|paths| paths.uploads_dir())
+        })
+        .ok_or_else(|| CommandResult::err("failed to resolve upload staging directory"))?;
+    let staged = stage_upload_file(path, &upload_dir).map_err(CommandResult::err)?;
+    let bytes = fs::read(&staged.staged_path).map_err(|error| {
         CommandResult::err(format!(
-            "failed to read upload file {}: {error}",
-            path.display()
+            "failed to read staged upload file {}: {error}",
+            staged.staged_path.display()
         ))
     })?;
     let metadata = fs::metadata(path).map_err(|error| {

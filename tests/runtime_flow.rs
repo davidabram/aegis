@@ -14,6 +14,7 @@ use aegis::{
 };
 use std::collections::HashMap;
 use std::env;
+use std::path::PathBuf;
 
 #[test]
 fn encodes_batch_request_with_stable_shape() {
@@ -422,6 +423,21 @@ fn host_runtime_state_round_trips() {
             browser_closed: false,
             cancel_requested: true,
             current_url: Some("https://example.com/login".into()),
+            download_dir: Some(PathBuf::from("/tmp/downloads")),
+            downloads: vec![aegis::transport::protocol::DownloadState {
+                id: 7,
+                url: Some("https://example.com/file.pdf".into()),
+                suggested_name: Some("file.pdf".into()),
+                target_path: Some("/tmp/downloads/file.pdf".into()),
+                mime_type: Some("application/pdf".into()),
+                state: "completed".into(),
+                received_bytes: 1024,
+                total_bytes: Some(1024),
+                percent_complete: Some(100),
+                interrupt_reason: None,
+                complete: true,
+                canceled: false,
+            }],
             active_operation: Some("navigate".into()),
             active_stage: Some("waiting for ready renderer context".into()),
         },
@@ -475,6 +491,8 @@ fn trace_recorder_persists_batches() {
         BrowserConfig {
             mode: BrowserMode::Headless,
             start_url: None,
+            download_dir: None,
+            upload_dir: None,
         },
     );
     recorder.set_initial_session(SessionState::default());
@@ -520,6 +538,8 @@ fn replay_trace_rebuilds_final_state() {
         BrowserConfig {
             mode: BrowserMode::Headful,
             start_url: Some("https://example.com".into()),
+            download_dir: None,
+            upload_dir: None,
         },
     );
     recorder.record_batch(
@@ -632,6 +652,8 @@ fn replay_trace_retains_last_non_null_snapshot() {
         BrowserConfig {
             mode: BrowserMode::Headful,
             start_url: Some("https://example.com".into()),
+            download_dir: None,
+            upload_dir: None,
         },
     );
     recorder.record_batch(
@@ -687,6 +709,8 @@ fn replay_trace_clears_snapshot_on_navigation_without_snapshot() {
         BrowserConfig {
             mode: BrowserMode::Headful,
             start_url: Some("https://example.com".into()),
+            download_dir: None,
+            upload_dir: None,
         },
     );
     recorder.record_batch(
@@ -742,6 +766,8 @@ fn browser_config_serializes_mode() {
     let json = serde_json::to_string(&BrowserConfig {
         mode: BrowserMode::Headful,
         start_url: None,
+        download_dir: None,
+        upload_dir: None,
     })
     .expect("config serializes");
 

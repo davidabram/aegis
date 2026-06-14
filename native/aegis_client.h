@@ -2,6 +2,7 @@
 #define AEGIS_NATIVE_AEGIS_CLIENT_H_
 
 #include "include/cef_client.h"
+#include "include/cef_download_handler.h"
 #include "include/cef_request_handler.h"
 #include "include/cef_resource_request_handler.h"
 #include "include/cef_render_handler.h"
@@ -34,10 +35,20 @@ class AegisClientDelegate {
                                       CefRefPtr<CefRequest> request,
                                       CefRefPtr<CefResponse> response,
                                       cef_urlrequest_status_t status) {}
+  virtual bool OnBeforeDownload(CefRefPtr<CefBrowser> browser,
+                                CefRefPtr<CefDownloadItem> download_item,
+                                const CefString& suggested_name,
+                                CefRefPtr<CefBeforeDownloadCallback> callback) {
+    return false;
+  }
+  virtual void OnDownloadUpdated(CefRefPtr<CefBrowser> browser,
+                                 CefRefPtr<CefDownloadItem> download_item,
+                                 CefRefPtr<CefDownloadItemCallback> callback) {}
 };
 
 class AegisClient : public CefClient,
                     public CefDisplayHandler,
+                    public CefDownloadHandler,
                     public CefLifeSpanHandler,
                     public CefLoadHandler,
                     public CefRequestHandler,
@@ -46,6 +57,7 @@ class AegisClient : public CefClient,
   explicit AegisClient(bool headless, AegisClientDelegate* delegate = nullptr);
 
   CefRefPtr<CefDisplayHandler> GetDisplayHandler() override { return this; }
+  CefRefPtr<CefDownloadHandler> GetDownloadHandler() override { return this; }
   CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override { return this; }
   CefRefPtr<CefLoadHandler> GetLoadHandler() override { return this; }
   CefRefPtr<CefRequestHandler> GetRequestHandler() override { return this; }
@@ -86,6 +98,13 @@ class AegisClient : public CefClient,
                    ErrorCode errorCode,
                    const CefString& errorText,
                    const CefString& failedUrl) override;
+  bool OnBeforeDownload(CefRefPtr<CefBrowser> browser,
+                        CefRefPtr<CefDownloadItem> download_item,
+                        const CefString& suggested_name,
+                        CefRefPtr<CefBeforeDownloadCallback> callback) override;
+  void OnDownloadUpdated(CefRefPtr<CefBrowser> browser,
+                         CefRefPtr<CefDownloadItem> download_item,
+                         CefRefPtr<CefDownloadItemCallback> callback) override;
 
   void GetViewRect(CefRefPtr<CefBrowser> browser, CefRect& rect) override;
   void OnPaint(CefRefPtr<CefBrowser> browser,

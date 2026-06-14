@@ -16,6 +16,41 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+fn deserialize_u64ish<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    if let Some(integer) = value.as_u64() {
+        return Ok(integer);
+    }
+    if let Some(float) = value.as_f64()
+        && float.is_finite() && float >= 0.0
+    {
+        return Ok(float as u64);
+    }
+    Err(serde::de::Error::custom("expected unsigned integer"))
+}
+
+fn deserialize_option_u64ish<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if let Some(integer) = value.as_u64() {
+        return Ok(Some(integer));
+    }
+    if let Some(float) = value.as_f64()
+        && float.is_finite() && float >= 0.0
+    {
+        return Ok(Some(float as u64));
+    }
+    Err(serde::de::Error::custom("expected optional unsigned integer"))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u16)]
 pub enum MessageKind {
@@ -84,6 +119,37 @@ pub struct EventsResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct DownloadState {
+    pub id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggested_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    #[serde(default)]
+    pub state: String,
+    #[serde(default, deserialize_with = "deserialize_u64ish")]
+    pub received_bytes: u64,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_option_u64ish"
+    )]
+    pub total_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub percent_complete: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interrupt_reason: Option<String>,
+    #[serde(default)]
+    pub complete: bool,
+    #[serde(default)]
+    pub canceled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct HostRuntimeState {
     pub startup_complete: bool,
     pub browser_available: bool,
@@ -110,6 +176,10 @@ pub struct HostRuntimeState {
     pub browser_closed: bool,
     pub cancel_requested: bool,
     pub current_url: Option<String>,
+    #[serde(default)]
+    pub download_dir: Option<std::path::PathBuf>,
+    #[serde(default)]
+    pub downloads: Vec<DownloadState>,
     pub active_operation: Option<String>,
     pub active_stage: Option<String>,
 }

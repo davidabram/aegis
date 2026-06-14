@@ -185,6 +185,26 @@ void AegisClient::OnLoadError(CefRefPtr<CefBrowser>,
   frame->LoadURL(DataUri(html.str()));
 }
 
+bool AegisClient::OnBeforeDownload(CefRefPtr<CefBrowser> browser,
+                                   CefRefPtr<CefDownloadItem> download_item,
+                                   const CefString& suggested_name,
+                                   CefRefPtr<CefBeforeDownloadCallback> callback) {
+  CEF_REQUIRE_UI_THREAD();
+  if (delegate_) {
+    return delegate_->OnBeforeDownload(browser, download_item, suggested_name, callback);
+  }
+  return false;
+}
+
+void AegisClient::OnDownloadUpdated(CefRefPtr<CefBrowser> browser,
+                                    CefRefPtr<CefDownloadItem> download_item,
+                                    CefRefPtr<CefDownloadItemCallback> callback) {
+  CEF_REQUIRE_UI_THREAD();
+  if (delegate_) {
+    delegate_->OnDownloadUpdated(browser, download_item, callback);
+  }
+}
+
 void AegisClient::GetViewRect(CefRefPtr<CefBrowser>, CefRect& rect) {
   rect = CefRect(0, 0, 1280, 800);
 }

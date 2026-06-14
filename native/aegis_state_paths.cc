@@ -50,6 +50,12 @@ void EnsureDirectory(const std::filesystem::path& path) {
 
 std::filesystem::path AegisStateRoot() { return ExpandStateRoot(); }
 
+std::filesystem::path AegisFilesRoot() { return AegisStateRoot() / "files"; }
+
+std::filesystem::path AegisDownloadsRoot() { return AegisFilesRoot() / "downloads"; }
+
+std::filesystem::path AegisUploadsRoot() { return AegisFilesRoot() / "uploads"; }
+
 std::filesystem::path AegisRuntimeRoot() { return AegisStateRoot() / "runtime"; }
 
 void AegisCleanupStaleRuntimeSessions(const std::string& scope) {

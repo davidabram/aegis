@@ -35,7 +35,7 @@ use crate::runtime::executor::{ExecutionReport, PageBootstrapDiagnostics, Runtim
 use crate::session::cookies::SessionState;
 use crate::session::profile::{SessionProfileInfo, SessionProfileStore};
 use crate::transport::bridge::AegisError;
-use crate::transport::protocol::PROTOCOL_VERSION;
+use crate::transport::protocol::{DownloadState, PROTOCOL_VERSION};
 
 const HEADLESS_IDLE_PUMP_INTERVAL: Duration = Duration::from_millis(10);
 const HEADFUL_IDLE_PUMP_INTERVAL: Duration = Duration::from_millis(2);
@@ -137,6 +137,10 @@ pub struct CreateContextBody {
     pub mode: Option<crate::browser::BrowserMode>,
     #[serde(default)]
     pub start_url: Option<String>,
+    #[serde(default)]
+    pub download_dir: Option<PathBuf>,
+    #[serde(default)]
+    pub upload_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -270,6 +274,12 @@ struct RuntimeDiagnosticsResponse {
     successful_operations: u64,
     timed_out_operations: u64,
     runtime: RuntimeStatus,
+}
+
+#[derive(Debug, Serialize)]
+struct DownloadsResponse {
+    download_dir: Option<PathBuf>,
+    downloads: Vec<DownloadState>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1234,6 +1244,7 @@ pub fn router(state: ServeRootState) -> Router {
         .route("/contexts/{context_id}/execute", post(context_execute))
         .route("/contexts/{context_id}/dom", get(context_snapshot_dom))
         .route("/contexts/{context_id}/events", get(context_events))
+        .route("/contexts/{context_id}/downloads", get(context_downloads))
         .route(
             "/contexts/{context_id}/events/live",
             get(context_events_live),
@@ -1254,6 +1265,7 @@ pub fn router(state: ServeRootState) -> Router {
         .route("/execute", post(execute))
         .route("/dom", get(snapshot_dom))
         .route("/events", get(events))
+        .route("/downloads", get(downloads))
         .route("/events/live", get(events_live))
         .route("/trace/enable", post(enable_trace))
         .with_state(state)
@@ -1490,6 +1502,11 @@ async fn api_manifest(State(root): State<ServeRootState>) -> Json<ApiManifest> {
             },
             ApiRouteDoc {
                 method: "GET",
+                path: "/contexts/{context_id}/downloads",
+                summary: "List browser-triggered downloads for one context",
+            },
+            ApiRouteDoc {
+                method: "GET",
                 path: "/contexts/{context_id}/events/live",
                 summary: "Stream events for one context over SSE",
             },
@@ -1545,6 +1562,11 @@ async fn api_manifest(State(root): State<ServeRootState>) -> Json<ApiManifest> {
             },
             ApiRouteDoc {
                 method: "GET",
+                path: "/downloads",
+                summary: "List browser-triggered downloads for the active context",
+            },
+            ApiRouteDoc {
+                method: "GET",
                 path: "/events/live",
                 summary: "Stream runtime events over SSE",
             },
@@ -1579,6 +1601,7 @@ async fn api_manifest(State(root): State<ServeRootState>) -> Json<ApiManifest> {
             "event_stream",
             "network_event_capture",
             "first_class_file_upload",
+            "first_class_file_download",
             "media_diagnostics",
             "embedded_audio_playback",
             "named_multi_context_control_plane",
@@ -1632,7 +1655,19 @@ async fn api_manifest(State(root): State<ServeRootState>) -> Json<ApiManifest> {
                 },
                 runtime_validated,
                 validated_by: "/readyz + /execute(set_files)",
-                details: "File upload is validated against the active runtime and supports hidden file inputs.",
+                details: "File uploads are staged into the Aegis-owned upload area before injection and support hidden file inputs.",
+            },
+            ApiCapabilityStatusDoc {
+                name: "first_class_file_download",
+                supported: true,
+                status: if runtime_validated {
+                    "validated"
+                } else {
+                    "supported"
+                },
+                runtime_validated,
+                validated_by: "/readyz + /downloads",
+                details: "Browser-triggered downloads are saved into the configured download directory and surfaced through runtime diagnostics and events.",
             },
             ApiCapabilityStatusDoc {
                 name: "media_diagnostics",
@@ -1723,7 +1758,7 @@ async fn api_manifest(State(root): State<ServeRootState>) -> Json<ApiManifest> {
                     name: "paths",
                     kind: "string[]",
                     required: true,
-                    description: "Absolute local file paths to attach",
+                    description: "Absolute local file paths to stage into Aegis and attach",
                 }],
             },
             ApiCommandDoc {
@@ -1833,6 +1868,8 @@ async fn create_context(
         seed_from_context,
         mode,
         start_url,
+        download_dir,
+        upload_dir,
     } = body;
     let existing = root.list_contexts()?;
     let next_index = existing.len() + 1;
@@ -1853,6 +1890,12 @@ async fn create_context(
     }
     if start_url.is_some() {
         browser.start_url = start_url;
+    }
+    if download_dir.is_some() {
+        browser.download_dir = download_dir;
+    }
+    if upload_dir.is_some() {
+        browser.upload_dir = upload_dir;
     }
     let (reply_tx, reply_rx) = oneshot::channel();
     let summary = manage_context(
@@ -2077,6 +2120,13 @@ async fn events(
         .send(ApiCommand::Events(query.since, reply_tx))
         .map_err(channel_error)?;
     Ok(Json(await_command("events", &state, reply_rx).await??))
+}
+
+async fn downloads(
+    State(root): State<ServeRootState>,
+) -> Result<Json<DownloadsResponse>, ApiError> {
+    let state = require_default_context_state(&root)?;
+    Ok(Json(downloads_response(&state)))
 }
 
 async fn events_live(
@@ -2320,6 +2370,14 @@ async fn context_events(
         .send(ApiCommand::Events(query.since, reply_tx))
         .map_err(channel_error)?;
     Ok(Json(await_command("events", &state, reply_rx).await??))
+}
+
+async fn context_downloads(
+    State(root): State<ServeRootState>,
+    Path(context_id): Path<String>,
+) -> Result<Json<DownloadsResponse>, ApiError> {
+    let state = require_context_state(&root, &context_id)?;
+    Ok(Json(downloads_response(&state)))
 }
 
 async fn context_events_live(
@@ -2800,6 +2858,14 @@ fn read_diagnostics(diagnostics: &Arc<Mutex<ServeDiagnostics>>) -> RuntimeDiagno
         .lock()
         .map(|diagnostics| diagnostics.snapshot())
         .unwrap_or_else(|_| ServeDiagnostics::new(default_runtime_status()).snapshot())
+}
+
+fn downloads_response(state: &ApiState) -> DownloadsResponse {
+    let diagnostics = read_diagnostics(&state.diagnostics);
+    DownloadsResponse {
+        download_dir: diagnostics.runtime.host.download_dir.clone(),
+        downloads: diagnostics.runtime.host.downloads.clone(),
+    }
 }
 
 fn default_runtime_status() -> RuntimeStatus {

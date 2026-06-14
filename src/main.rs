@@ -15,7 +15,7 @@ use aegis::transport::protocol::PROTOCOL_VERSION;
 use aegis::{
     AegisConfigStore, AegisSecretStore, BrowserConfig, BrowserMode, CredentialInput,
     NativeConfiguration, app_executable, build_native, canonical_install_host_library,
-    configure_native, ensure_workspace_serve_runtime, native, replay_trace,
+    configure_native, ensure_workspace_serve_runtime, native, replay_trace, resolve_transfer_paths,
 };
 use clap::{Parser, Subcommand};
 
@@ -58,6 +58,20 @@ struct Cli {
     )]
     #[arg(long, global = true)]
     start_url: Option<String>,
+    #[arg(
+        long,
+        global = true,
+        help = "Directory where browser-triggered downloads should be saved. Defaults to ~/.aegis/files/downloads."
+    )]
+    #[arg(long, global = true)]
+    download_dir: Option<PathBuf>,
+    #[arg(
+        long,
+        global = true,
+        help = "Directory where Aegis stages uploaded files before injection. Defaults to ~/.aegis/files/uploads."
+    )]
+    #[arg(long, global = true)]
+    upload_dir: Option<PathBuf>,
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -213,6 +227,9 @@ Quick starts:
   aegis --mode headless serve --detach --addr 127.0.0.1:7878
       Start a background runtime, wait for readiness, and print pid/log-path JSON.
 
+  aegis --mode headless --download-dir /tmp/downloads --upload-dir /tmp/uploads serve
+      Override the canonical transfer directories for one runtime.
+
   aegis config get credentials
       Inspect credential auto-capture settings.
 
@@ -261,6 +278,7 @@ Start a headless runtime:
 Start a detached headless runtime with an Aegis-managed background launcher:
   aegis --mode headless serve --detach --addr 127.0.0.1:7878
   aegis --mode headless serve --detach --addr 127.0.0.1:7878 --log-path /tmp/aegis.log
+  aegis --mode headless --download-dir /tmp/downloads --upload-dir /tmp/uploads serve
 
 Inspect local config:
   aegis config get agent
@@ -287,12 +305,15 @@ Inspect native paths:
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let command = resolved_command(&cli);
+    let transfer_paths = resolve_transfer_paths(cli.download_dir.clone(), cli.upload_dir.clone())?;
     let browser_config = BrowserConfig {
         mode: match effective_mode(&cli) {
             BrowserModeArg::Headless => BrowserMode::Headless,
             BrowserModeArg::Headful => BrowserMode::Headful,
         },
         start_url: cli.start_url.clone(),
+        download_dir: Some(transfer_paths.download_dir),
+        upload_dir: Some(transfer_paths.upload_dir),
     };
 
     match &command {
@@ -528,6 +549,14 @@ fn detached_serve_child_args(cli: &Cli, addr: SocketAddr, host_lib: &Path) -> Ve
     if let Some(start_url) = cli.start_url.as_ref() {
         args.push("--start-url".to_string());
         args.push(start_url.clone());
+    }
+    if let Some(download_dir) = cli.download_dir.as_ref() {
+        args.push("--download-dir".to_string());
+        args.push(download_dir.display().to_string());
+    }
+    if let Some(upload_dir) = cli.upload_dir.as_ref() {
+        args.push("--upload-dir".to_string());
+        args.push(upload_dir.display().to_string());
     }
     args.push("serve".to_string());
     args.push("--addr".to_string());
@@ -999,6 +1028,10 @@ mod tests {
             "work",
             "--start-url",
             "http://127.0.0.1:3000",
+            "--download-dir",
+            "/tmp/downloads",
+            "--upload-dir",
+            "/tmp/uploads",
             "serve",
             "--detach",
             "--addr",
@@ -1020,6 +1053,10 @@ mod tests {
                 "/tmp/libaegis_host.dylib".to_string(),
                 "--start-url".to_string(),
                 "http://127.0.0.1:3000".to_string(),
+                "--download-dir".to_string(),
+                "/tmp/downloads".to_string(),
+                "--upload-dir".to_string(),
+                "/tmp/uploads".to_string(),
                 "serve".to_string(),
                 "--addr".to_string(),
                 "127.0.0.1:7900".to_string(),

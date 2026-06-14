@@ -121,12 +121,33 @@ void ApplyBooleanPreference(CefRefPtr<CefPreferenceManager> manager,
   }
 }
 
-void ApplyAegisProductionPreferences(CefRefPtr<CefPreferenceManager> manager) {
+void ApplyStringPreference(CefRefPtr<CefPreferenceManager> manager,
+                           const char* name,
+                           const std::string& value) {
+  if (!manager.get() || !manager->HasPreference(name) ||
+      !manager->CanSetPreference(name)) {
+    return;
+  }
+
+  auto pref_value = CefValue::Create();
+  pref_value->SetString(value);
+  CefString error;
+  if (!manager->SetPreference(name, pref_value, error)) {
+    AppendDebugLog(std::string("host: failed_to_set_preference ") + name + " " +
+                   error.ToString());
+  }
+}
+
+void ApplyAegisProductionPreferences(CefRefPtr<CefPreferenceManager> manager,
+                                     const std::string& download_dir) {
   ApplyBooleanPreference(manager, "credentials_enable_service", true);
   ApplyBooleanPreference(manager, "profile.password_manager_enabled", true);
   ApplyBooleanPreference(manager, "profile.password_manager_leak_detection", true);
   ApplyBooleanPreference(manager, "autofill.profile_enabled", true);
   ApplyBooleanPreference(manager, "autofill.credit_card_enabled", true);
+  if (!download_dir.empty()) {
+    ApplyStringPreference(manager, "download.default_directory", download_dir);
+  }
 }
 
 void AppendDebugLog(const std::string& message) {
@@ -307,6 +328,49 @@ CefRefPtr<CefValue> NetworkEventValue(const std::string& request_id,
   return WrapEvent(body);
 }
 
+CefRefPtr<CefValue> DownloadEventValue(std::uint32_t id,
+                                       const std::string& url,
+                                       const std::string& suggested_name,
+                                       const std::string& target_path,
+                                       const std::string& mime_type,
+                                       const std::string& state,
+                                       std::uint64_t received_bytes,
+                                       const std::optional<std::uint64_t>& total_bytes,
+                                       const std::optional<int>& percent_complete,
+                                       const std::optional<std::string>& interrupt_reason,
+                                       bool complete,
+                                       bool canceled) {
+  auto body = CefDictionaryValue::Create();
+  body->SetString("type", "download");
+  body->SetInt("id", static_cast<int>(id));
+  if (!url.empty()) {
+    body->SetString("url", url);
+  }
+  if (!suggested_name.empty()) {
+    body->SetString("suggested_name", suggested_name);
+  }
+  if (!target_path.empty()) {
+    body->SetString("target_path", target_path);
+  }
+  if (!mime_type.empty()) {
+    body->SetString("mime_type", mime_type);
+  }
+  body->SetString("state", state);
+  body->SetDouble("received_bytes", static_cast<double>(received_bytes));
+  if (total_bytes.has_value()) {
+    body->SetDouble("total_bytes", static_cast<double>(*total_bytes));
+  }
+  if (percent_complete.has_value()) {
+    body->SetInt("percent_complete", *percent_complete);
+  }
+  if (interrupt_reason.has_value()) {
+    body->SetString("interrupt_reason", *interrupt_reason);
+  }
+  body->SetBool("complete", complete);
+  body->SetBool("canceled", canceled);
+  return WrapEvent(body);
+}
+
 CefRefPtr<CefValue> WebSocketOpenEventValue(const std::string& request_id,
                                             const std::string& url) {
   auto body = CefDictionaryValue::Create();
@@ -400,6 +464,44 @@ std::string TrimAscii(std::string value) {
   return value;
 }
 
+std::string SanitizePathComponent(const std::string& value) {
+  std::string output;
+  output.reserve(value.size());
+  for (char ch : value) {
+    const auto byte = static_cast<unsigned char>(ch);
+    if (std::isalnum(byte) != 0 || ch == '.' || ch == '-' || ch == '_') {
+      output.push_back(ch);
+    } else {
+      output.push_back('_');
+    }
+  }
+  output = TrimAscii(output);
+  if (output.empty()) {
+    return "download.bin";
+  }
+  return output;
+}
+
+std::filesystem::path UniqueDownloadTarget(const std::filesystem::path& directory,
+                                           const std::string& suggested_name) {
+  const auto safe_name = SanitizePathComponent(suggested_name.empty() ? "download.bin"
+                                                                      : suggested_name);
+  auto candidate = directory / safe_name;
+  if (!std::filesystem::exists(candidate)) {
+    return candidate;
+  }
+
+  const auto stem = candidate.stem().string();
+  const auto extension = candidate.extension().string();
+  for (std::size_t index = 1; index < 10'000; ++index) {
+    candidate = directory / (stem + "-" + std::to_string(index) + extension);
+    if (!std::filesystem::exists(candidate)) {
+      return candidate;
+    }
+  }
+  throw std::runtime_error("failed to allocate a unique download target path");
+}
+
 bool CaseEqualAscii(const std::string& left, const std::string& right) {
   if (left.size() != right.size()) {
     return false;
@@ -472,6 +574,7 @@ HostPaths ResolveHostPaths() {
 struct BrowserOptions {
   bool headless = true;
   std::string start_url = kBootstrapUrl;
+  std::string download_dir;
 };
 
 BrowserOptions ParseBrowserOptions(const std::vector<std::uint8_t>& bytes) {
@@ -576,6 +679,8 @@ BrowserOptions ParseBrowserOptions(const std::vector<std::uint8_t>& bytes) {
         if (!value.empty()) {
           options.start_url = value;
         }
+      } else if (key == "download_dir") {
+        options.download_dir = value;
       }
     } else if (json.compare(index, 4, "null") == 0) {
       index += 4;
@@ -713,6 +818,21 @@ struct RendererReply {
   std::string body;
 };
 
+struct DownloadRecord {
+  std::uint32_t id = 0;
+  std::string url;
+  std::string suggested_name;
+  std::string target_path;
+  std::string mime_type;
+  std::string state = "pending";
+  std::uint64_t received_bytes = 0;
+  std::optional<std::uint64_t> total_bytes;
+  std::optional<int> percent_complete;
+  std::optional<std::string> interrupt_reason;
+  bool complete = false;
+  bool canceled = false;
+};
+
 struct BrowserContextState {
   std::string context_id = "primary";
   int browser_id = 0;
@@ -729,6 +849,8 @@ struct BrowserContextState {
   std::map<std::string, std::string> request_urls;
   std::map<std::string, std::string> websocket_urls;
   std::map<int, RendererReply> renderer_replies;
+  std::map<std::uint32_t, DownloadRecord> downloads;
+  std::vector<std::uint32_t> download_order;
 
   void AttachBrowser(CefRefPtr<CefBrowser> browser) {
     browser_id = browser ? browser->GetIdentifier() : 0;
@@ -783,6 +905,19 @@ struct BrowserContextState {
     request_urls.clear();
     websocket_urls.clear();
     renderer_replies.clear();
+  }
+
+  void UpsertDownload(const DownloadRecord& record) {
+    downloads[record.id] = record;
+    if (std::find(download_order.begin(), download_order.end(), record.id) ==
+        download_order.end()) {
+      download_order.push_back(record.id);
+    }
+    while (download_order.size() > 64) {
+      const auto removed = download_order.front();
+      download_order.erase(download_order.begin());
+      downloads.erase(removed);
+    }
   }
 };
 
@@ -843,6 +978,10 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
                         bool manage_cef_lifecycle = true,
                         bool counted_shared_lifecycle = false)
       : options_(std::move(options)),
+        download_dir_(
+            options_.download_dir.empty()
+                ? AegisDownloadsRoot()
+                : std::filesystem::path(options_.download_dir)),
         paths_(ResolveHostPaths()),
         runtime_session_paths_(AegisCreateRuntimeSessionPaths(
             options_.headless ? "serve-headless" : "serve-headful")),
@@ -851,6 +990,12 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
         counted_shared_lifecycle_(counted_shared_lifecycle) {
     if (pthread_main_np() == 0) {
       throw std::runtime_error("aegis CEF host must be created on the process main thread");
+    }
+    std::error_code error;
+    std::filesystem::create_directories(download_dir_, error);
+    if (error) {
+      throw std::runtime_error("failed to create download directory: " +
+                               download_dir_.string());
     }
     AppendDebugLog("host: constructed");
     if (manage_cef_lifecycle_) {
@@ -1114,6 +1259,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       state->SetBool("load_in_progress", primary_context_.load_in_progress);
       state->SetBool("browser_closed", primary_context_.browser_closed);
       state->SetBool("cancel_requested", cancel_requested_.load());
+      state->SetString("download_dir", download_dir_.string());
       if (!primary_context_.current_url.empty()) {
         state->SetString("current_url", primary_context_.current_url);
       }
@@ -1133,6 +1279,44 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       }
       state->SetList("attached_browser_ids", attached_browser_ids);
       state->SetList("known_context_ids", known_context_ids);
+      auto downloads = CefListValue::Create();
+      int download_index = 0;
+      for (const auto download_id : primary_context_.download_order) {
+        const auto it = primary_context_.downloads.find(download_id);
+        if (it == primary_context_.downloads.end()) {
+          continue;
+        }
+        const auto& record = it->second;
+        auto entry = CefDictionaryValue::Create();
+        entry->SetInt("id", static_cast<int>(record.id));
+        if (!record.url.empty()) {
+          entry->SetString("url", record.url);
+        }
+        if (!record.suggested_name.empty()) {
+          entry->SetString("suggested_name", record.suggested_name);
+        }
+        if (!record.target_path.empty()) {
+          entry->SetString("target_path", record.target_path);
+        }
+        if (!record.mime_type.empty()) {
+          entry->SetString("mime_type", record.mime_type);
+        }
+        entry->SetString("state", record.state);
+        entry->SetDouble("received_bytes", static_cast<double>(record.received_bytes));
+        if (record.total_bytes.has_value()) {
+          entry->SetDouble("total_bytes", static_cast<double>(*record.total_bytes));
+        }
+        if (record.percent_complete.has_value()) {
+          entry->SetInt("percent_complete", *record.percent_complete);
+        }
+        if (record.interrupt_reason.has_value()) {
+          entry->SetString("interrupt_reason", *record.interrupt_reason);
+        }
+        entry->SetBool("complete", record.complete);
+        entry->SetBool("canceled", record.canceled);
+        downloads->SetDictionary(download_index++, entry);
+      }
+      state->SetList("downloads", downloads);
     }
     return EncodeEnvelope(MessageKind::SnapshotHostState, state);
   }
@@ -1305,6 +1489,124 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
                               CefRefPtr<CefResponse> response,
                               cef_urlrequest_status_t) override {
     CaptureResponseCookies(request, response);
+  }
+
+  bool OnBeforeDownload(CefRefPtr<CefBrowser> browser,
+                        CefRefPtr<CefDownloadItem> download_item,
+                        const CefString& suggested_name,
+                        CefRefPtr<CefBeforeDownloadCallback> callback) override {
+    if (!download_item.get() || !callback.get()) {
+      return false;
+    }
+
+    std::filesystem::path target_path;
+    DownloadRecord record;
+    {
+      std::lock_guard lock(mutex_);
+      const auto directory = download_dir_;
+      std::error_code error;
+      std::filesystem::create_directories(directory, error);
+      if (error) {
+        throw std::runtime_error("failed to create download directory: " +
+                                 directory.string());
+      }
+      target_path = UniqueDownloadTarget(directory, suggested_name.ToString());
+      record.id = download_item->GetId();
+      record.url = download_item->GetURL().ToString();
+      record.suggested_name = suggested_name.ToString();
+      record.target_path = target_path.string();
+      record.mime_type = download_item->GetMimeType().ToString();
+      record.state = "starting";
+      record.received_bytes = static_cast<std::uint64_t>(download_item->GetReceivedBytes());
+      if (download_item->GetTotalBytes() >= 0) {
+        record.total_bytes =
+            static_cast<std::uint64_t>(download_item->GetTotalBytes());
+      }
+      if (download_item->GetPercentComplete() >= 0) {
+        record.percent_complete = download_item->GetPercentComplete();
+      }
+      primary_context_.UpsertDownload(record);
+      SyncPrimaryContextToRegistryLocked();
+    }
+
+    PushLocalEvent(DownloadEventValue(record.id, record.url, record.suggested_name,
+                                      record.target_path, record.mime_type, record.state,
+                                      record.received_bytes, record.total_bytes,
+                                      record.percent_complete, record.interrupt_reason,
+                                      record.complete, record.canceled));
+    callback->Continue(target_path.string(), false);
+    if (!options_.headless && browser.get()) {
+      AegisSetBrowserHostAddress(browser->GetMainFrame()->GetURL().ToString());
+    }
+    return true;
+  }
+
+  void OnDownloadUpdated(CefRefPtr<CefBrowser>,
+                         CefRefPtr<CefDownloadItem> download_item,
+                         CefRefPtr<CefDownloadItemCallback>) override {
+    if (!download_item.get()) {
+      return;
+    }
+
+    DownloadRecord record;
+    {
+      std::lock_guard lock(mutex_);
+      const auto id = download_item->GetId();
+      auto existing = primary_context_.downloads.find(id);
+      if (existing != primary_context_.downloads.end()) {
+        record = existing->second;
+      }
+      record.id = id;
+      record.url = download_item->GetURL().ToString();
+      if (record.suggested_name.empty()) {
+        record.suggested_name = download_item->GetSuggestedFileName().ToString();
+      }
+      const auto full_path = download_item->GetFullPath().ToString();
+      if (!full_path.empty()) {
+        record.target_path = full_path;
+      }
+      const auto mime_type = download_item->GetMimeType().ToString();
+      if (!mime_type.empty()) {
+        record.mime_type = mime_type;
+      }
+      record.received_bytes =
+          static_cast<std::uint64_t>(download_item->GetReceivedBytes());
+      if (download_item->GetTotalBytes() >= 0) {
+        record.total_bytes =
+            static_cast<std::uint64_t>(download_item->GetTotalBytes());
+      }
+      if (download_item->GetPercentComplete() >= 0) {
+        record.percent_complete = download_item->GetPercentComplete();
+      } else {
+        record.percent_complete.reset();
+      }
+      const auto interrupt_reason =
+          static_cast<int>(download_item->GetInterruptReason());
+      if (interrupt_reason != 0) {
+        record.interrupt_reason = std::to_string(interrupt_reason);
+      }
+      record.complete = download_item->IsComplete();
+      record.canceled = download_item->IsCanceled();
+      if (record.complete) {
+        record.state = "completed";
+      } else if (record.canceled) {
+        record.state = "canceled";
+      } else if (record.interrupt_reason.has_value()) {
+        record.state = "interrupted";
+      } else if (download_item->IsInProgress()) {
+        record.state = "in_progress";
+      } else {
+        record.state = "pending";
+      }
+      primary_context_.UpsertDownload(record);
+      SyncPrimaryContextToRegistryLocked();
+    }
+
+    PushLocalEvent(DownloadEventValue(record.id, record.url, record.suggested_name,
+                                      record.target_path, record.mime_type, record.state,
+                                      record.received_bytes, record.total_bytes,
+                                      record.percent_complete, record.interrupt_reason,
+                                      record.complete, record.canceled));
   }
 
   bool HandleBrowserProcessMessage(CefRefPtr<CefBrowser>,
@@ -1877,7 +2179,8 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
             initialize_error.empty() ? "canonical cef bootstrap failed" : initialize_error);
       }
       cef_initialized_ = true;
-      ApplyAegisProductionPreferences(CefPreferenceManager::GetGlobalPreferenceManager());
+      ApplyAegisProductionPreferences(CefPreferenceManager::GetGlobalPreferenceManager(),
+                                     download_dir_.string());
       AppendDebugLog("host: cef initialized");
 
       CreateBrowserOnUiThread();
@@ -1987,7 +2290,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
         if (!request_context_.get()) {
           throw std::runtime_error("failed to create request context");
         }
-        ApplyAegisProductionPreferences(request_context_);
+        ApplyAegisProductionPreferences(request_context_, download_dir_.string());
         CefWindowInfo window_info;
         window_info.SetAsWindowless(kNullWindowHandle);
         window_info.runtime_style = CEF_RUNTIME_STYLE_ALLOY;
@@ -2020,7 +2323,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       if (!request_context_.get()) {
         throw std::runtime_error("failed to create request context");
       }
-      ApplyAegisProductionPreferences(request_context_);
+      ApplyAegisProductionPreferences(request_context_, download_dir_.string());
       CefWindowInfo window_info;
       if (AegisUseExternalBrowserHostWindow()) {
         if (external_host_view == kNullWindowHandle) {
@@ -2607,6 +2910,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
   }
 
   const BrowserOptions options_;
+  const std::filesystem::path download_dir_;
   const HostPaths paths_;
   const AegisRuntimeSessionPaths runtime_session_paths_;
   const std::thread::id owner_thread_id_;

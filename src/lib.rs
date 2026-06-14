@@ -11,6 +11,7 @@ pub mod runtime;
 pub mod session;
 pub mod state;
 pub mod trace;
+pub mod transfers;
 pub mod transport;
 
 pub use api::server;
@@ -39,6 +40,9 @@ pub use session::storage::{NetworkOverride, StorageArea};
 pub use state::AegisStatePaths;
 pub use trace::recorder::TraceRecorder;
 pub use trace::replayer::{ReplayState, replay_trace};
+pub use transfers::{
+    ResolvedTransferPaths, StagedUploadFile, resolve_transfer_paths, stage_upload_file,
+};
 pub use transport::bridge::{
     AegisError, BatchRequest, BatchResponse, BridgeEventEnvelope, CefBridge, HostApi, HostBuffer,
     HostFunctionTable, HostHandle, HostStatus,

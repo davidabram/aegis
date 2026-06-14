@@ -9,6 +9,9 @@ struct AegisRuntimeSessionPaths {
 };
 
 std::filesystem::path AegisStateRoot();
+std::filesystem::path AegisFilesRoot();
+std::filesystem::path AegisDownloadsRoot();
+std::filesystem::path AegisUploadsRoot();
 std::filesystem::path AegisRuntimeRoot();
 AegisRuntimeSessionPaths AegisCreateRuntimeSessionPaths(const std::string& scope);
 void AegisCleanupStaleRuntimeSessions(const std::string& scope);

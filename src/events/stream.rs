@@ -7,11 +7,28 @@ use crate::dom::diff::DomMutation;
 
 const DEFAULT_MAX_RETAINED_EVENTS: usize = 10_000;
 
+fn u64_from_value<E: serde::de::Error>(value: &Value) -> Result<u64, E> {
+    if let Some(integer) = value.as_u64() {
+        return Ok(integer);
+    }
+    if let Some(float) = value.as_f64()
+        && float.is_finite() && float >= 0.0
+    {
+        return Ok(float as u64);
+    }
+    Err(E::custom("expected unsigned integer"))
+}
+
+fn optional_u64_from_value<E: serde::de::Error>(value: Option<&Value>) -> Result<Option<u64>, E> {
+    value.map(u64_from_value).transpose()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventType {
     DomMutation,
     Navigation,
     Network,
+    Download,
     WebSocket,
     Log,
 }
@@ -51,6 +68,20 @@ pub enum RuntimeEvent {
         mime_type: Option<String>,
         from_cache: Option<bool>,
         error_text: Option<String>,
+    },
+    Download {
+        id: u64,
+        url: Option<String>,
+        suggested_name: Option<String>,
+        target_path: Option<String>,
+        mime_type: Option<String>,
+        state: String,
+        received_bytes: u64,
+        total_bytes: Option<u64>,
+        percent_complete: Option<i32>,
+        interrupt_reason: Option<String>,
+        complete: bool,
+        canceled: bool,
     },
     WebSocketOpen {
         request_id: String,
@@ -122,6 +153,34 @@ impl Serialize for RuntimeEvent {
                 "mime_type": mime_type,
                 "from_cache": from_cache,
                 "error_text": error_text,
+            }),
+            RuntimeEvent::Download {
+                id,
+                url,
+                suggested_name,
+                target_path,
+                mime_type,
+                state,
+                received_bytes,
+                total_bytes,
+                percent_complete,
+                interrupt_reason,
+                complete,
+                canceled,
+            } => serde_json::json!({
+                "type": "download",
+                "id": id,
+                "url": url,
+                "suggested_name": suggested_name,
+                "target_path": target_path,
+                "mime_type": mime_type,
+                "state": state,
+                "received_bytes": received_bytes,
+                "total_bytes": total_bytes,
+                "percent_complete": percent_complete,
+                "interrupt_reason": interrupt_reason,
+                "complete": complete,
+                "canceled": canceled,
             }),
             RuntimeEvent::WebSocketOpen { request_id, url } => {
                 serde_json::json!({ "type": "websocket_open", "request_id": request_id, "url": url })
@@ -242,6 +301,38 @@ impl<'de> Deserialize<'de> for RuntimeEvent {
                     error_text: value.error_text,
                 })
             }
+            "download" => {
+                #[derive(Deserialize)]
+                struct DownloadEvent {
+                    id: u64,
+                    url: Option<String>,
+                    suggested_name: Option<String>,
+                    target_path: Option<String>,
+                    mime_type: Option<String>,
+                    state: String,
+                    received_bytes: Value,
+                    total_bytes: Option<Value>,
+                    percent_complete: Option<i32>,
+                    interrupt_reason: Option<String>,
+                    complete: bool,
+                    canceled: bool,
+                }
+                let value: DownloadEvent = from_value(&payload)?;
+                Ok(RuntimeEvent::Download {
+                    id: value.id,
+                    url: value.url,
+                    suggested_name: value.suggested_name,
+                    target_path: value.target_path,
+                    mime_type: value.mime_type,
+                    state: value.state,
+                    received_bytes: u64_from_value(&value.received_bytes)?,
+                    total_bytes: optional_u64_from_value(value.total_bytes.as_ref())?,
+                    percent_complete: value.percent_complete,
+                    interrupt_reason: value.interrupt_reason,
+                    complete: value.complete,
+                    canceled: value.canceled,
+                })
+            }
             "websocket_open" => {
                 #[derive(Deserialize)]
                 struct WebSocketOpenEvent {
@@ -334,6 +425,7 @@ impl RuntimeEvent {
             RuntimeEvent::DomMutation { .. } => EventType::DomMutation,
             RuntimeEvent::Navigation { .. } => EventType::Navigation,
             RuntimeEvent::Network { .. } => EventType::Network,
+            RuntimeEvent::Download { .. } => EventType::Download,
             RuntimeEvent::WebSocketOpen { .. }
             | RuntimeEvent::WebSocketHandshake { .. }
             | RuntimeEvent::WebSocketFrame { .. }
