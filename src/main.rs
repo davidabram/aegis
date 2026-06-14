@@ -1,6 +1,14 @@
+use std::fs::{self, OpenOptions};
+use std::io::{Read, Write};
 use std::net::SocketAddr;
+use std::net::TcpStream;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::path::PathBuf;
+use std::process::{Child, Command as ProcessCommand, Stdio};
+use std::thread::sleep;
+use std::time::{Duration, Instant};
 
 use aegis::api::server;
 use aegis::transport::protocol::PROTOCOL_VERSION;
@@ -75,6 +83,17 @@ enum Commands {
         )]
         #[arg(long, default_value = "127.0.0.1:7878")]
         addr: SocketAddr,
+        #[arg(
+            long,
+            help = "Start serve in a detached background process, wait for /version, then print pid/log-path JSON."
+        )]
+        detach: bool,
+        #[arg(
+            long,
+            requires = "detach",
+            help = "Path to the detached serve log file. Defaults to ~/.aegis/logs/serve-<profile>-<addr>.log."
+        )]
+        log_path: Option<PathBuf>,
     },
     #[command(about = "Show practical usage guidance for the production CLI workflow")]
     Usage,
@@ -191,6 +210,9 @@ Quick starts:
   aegis --mode headful serve --addr 127.0.0.1:7878
       Start the visible browser runtime plus local HTTP API.
 
+  aegis --mode headless serve --detach --addr 127.0.0.1:7878
+      Start a background runtime, wait for readiness, and print pid/log-path JSON.
+
   aegis config get credentials
       Inspect credential auto-capture settings.
 
@@ -210,6 +232,7 @@ Aegis production usage
 3. Start the persistent automation runtime:
    aegis --mode headless serve --addr 127.0.0.1:7878
    aegis --mode headful serve --addr 127.0.0.1:7878
+   aegis --mode headless serve --detach --addr 127.0.0.1:7878
 
 4. Manage Aegis-owned state:
    aegis config get agent
@@ -234,6 +257,10 @@ Start a visible runtime for agent debugging:
 
 Start a headless runtime:
   aegis --mode headless serve --addr 127.0.0.1:7878
+
+Start a detached headless runtime with an Aegis-managed background launcher:
+  aegis --mode headless serve --detach --addr 127.0.0.1:7878
+  aegis --mode headless serve --detach --addr 127.0.0.1:7878 --log-path /tmp/aegis.log
 
 Inspect local config:
   aegis config get agent
@@ -344,7 +371,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     match command {
-        Commands::Serve { addr } => {
+        Commands::Serve {
+            addr,
+            detach,
+            log_path,
+        } => {
             let host_lib = if let Some(path) = cli.host_lib.clone() {
                 path
             } else {
@@ -356,6 +387,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return Err(help
                     .replace("{path}", &host_lib.display().to_string())
                     .into());
+            }
+            if detach {
+                let current_exe = std::env::current_exe()?;
+                launch_detached_serve(&current_exe, &cli, addr, host_lib, log_path)?;
+                return Ok(());
             }
             #[cfg(target_os = "macos")]
             {
@@ -431,6 +467,155 @@ fn default_serve_runtime_source(current_exe: &Path) -> ServeRuntimeSource {
     ServeRuntimeSource::MissingInstalled
 }
 
+fn launch_detached_serve(
+    current_exe: &Path,
+    cli: &Cli,
+    addr: SocketAddr,
+    host_lib: PathBuf,
+    log_path_override: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let log_path = detach_log_path(&cli.profile, addr, log_path_override);
+    if let Some(parent) = log_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let stdout = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)?;
+    let stderr = stdout.try_clone()?;
+
+    let mut child = ProcessCommand::new(current_exe);
+    child.args(detached_serve_child_args(cli, addr, &host_lib));
+    child.stdin(Stdio::null());
+    child.stdout(Stdio::from(stdout));
+    child.stderr(Stdio::from(stderr));
+    #[cfg(unix)]
+    unsafe {
+        child.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+
+    let mut child = child.spawn()?;
+    wait_for_detached_serve(addr, &mut child, &log_path)?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "mode": "detached_serve",
+            "pid": child.id(),
+            "addr": addr,
+            "profile": cli.profile,
+            "log_path": log_path,
+            "runtime_executable": current_exe,
+        }))?
+    );
+    Ok(())
+}
+
+fn detached_serve_child_args(cli: &Cli, addr: SocketAddr, host_lib: &Path) -> Vec<String> {
+    let mut args = vec![
+        "--mode".to_string(),
+        effective_mode(cli).as_cli_value().to_string(),
+        "--profile".to_string(),
+        cli.profile.clone(),
+        "--host-lib".to_string(),
+        host_lib.display().to_string(),
+    ];
+    if let Some(start_url) = cli.start_url.as_ref() {
+        args.push("--start-url".to_string());
+        args.push(start_url.clone());
+    }
+    args.push("serve".to_string());
+    args.push("--addr".to_string());
+    args.push(addr.to_string());
+    args
+}
+
+fn detach_log_path(profile: &str, addr: SocketAddr, override_path: Option<PathBuf>) -> PathBuf {
+    if let Some(path) = override_path {
+        return path;
+    }
+    let base = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join(".aegis").join("logs"))
+        .unwrap_or_else(std::env::temp_dir);
+    let addr_slug = addr.to_string().replace([':', '.'], "_");
+    base.join(format!("serve-{profile}-{addr_slug}.log"))
+}
+
+fn wait_for_detached_serve(
+    addr: SocketAddr,
+    child: &mut Child,
+    log_path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if let Some(status) = child.try_wait()? {
+            let tail = read_log_tail(log_path);
+            return Err(format!(
+                "detached Aegis serve exited before it became reachable (status: {status}). Log: {}{}",
+                log_path.display(),
+                if tail.is_empty() {
+                    String::new()
+                } else {
+                    format!("\n{tail}")
+                }
+            )
+            .into());
+        }
+        if detached_control_plane_ready(addr) {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            let tail = read_log_tail(log_path);
+            return Err(format!(
+                "detached Aegis serve did not become reachable at http://{addr} within 15s. Log: {}{}",
+                log_path.display(),
+                if tail.is_empty() {
+                    String::new()
+                } else {
+                    format!("\n{tail}")
+                }
+            )
+            .into());
+        }
+        sleep(Duration::from_millis(100));
+    }
+}
+
+fn detached_control_plane_ready(addr: SocketAddr) -> bool {
+    let mut stream = match TcpStream::connect_timeout(&addr, Duration::from_millis(250)) {
+        Ok(stream) => stream,
+        Err(_) => return false,
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(250)));
+    let request = format!("GET /version HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+    if stream.write_all(request.as_bytes()).is_err() {
+        return false;
+    }
+    let mut buffer = [0_u8; 128];
+    match stream.read(&mut buffer) {
+        Ok(read) if read > 0 => std::str::from_utf8(&buffer[..read])
+            .ok()
+            .is_some_and(|text| text.contains("HTTP/1.1")),
+        _ => false,
+    }
+}
+
+fn read_log_tail(log_path: &Path) -> String {
+    let Ok(contents) = fs::read_to_string(log_path) else {
+        return String::new();
+    };
+    let lines = contents.lines().collect::<Vec<_>>();
+    let tail = lines.iter().rev().take(12).copied().collect::<Vec<_>>();
+    tail.into_iter().rev().collect::<Vec<_>>().join("\n")
+}
+
 fn resolve_workspace_root(current_exe: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
     if let Some(root) = std::env::var_os("AEGIS_WORKSPACE_ROOT") {
         return Ok(PathBuf::from(root));
@@ -471,6 +656,8 @@ fn resolved_command_for_shortcut(cli: &Cli, default_open_shortcut: bool) -> Comm
     }
     cli.command.clone().unwrap_or(Commands::Serve {
         addr: SocketAddr::from(([127, 0, 0, 1], 7878)),
+        detach: false,
+        log_path: None,
     })
 }
 
@@ -479,6 +666,15 @@ fn effective_mode(cli: &Cli) -> BrowserModeArg {
         return BrowserModeArg::Headful;
     }
     cli.mode.clone()
+}
+
+impl BrowserModeArg {
+    fn as_cli_value(&self) -> &'static str {
+        match self {
+            Self::Headless => "headless",
+            Self::Headful => "headful",
+        }
+    }
 }
 
 fn default_open_shortcut_requested() -> bool {
@@ -703,6 +899,34 @@ mod tests {
     }
 
     #[test]
+    fn detached_serve_flag_is_parsed() {
+        let cli = parse_cli(&[
+            "aegis",
+            "--mode",
+            "headless",
+            "--profile",
+            "work",
+            "serve",
+            "--detach",
+            "--addr",
+            "127.0.0.1:7900",
+            "--log-path",
+            "/tmp/aegis.log",
+        ]);
+        let Commands::Serve {
+            addr,
+            detach,
+            log_path,
+        } = resolved_command(&cli)
+        else {
+            panic!("serve command should be resolved");
+        };
+        assert!(detach);
+        assert_eq!(addr, SocketAddr::from(([127, 0, 0, 1], 7900)));
+        assert_eq!(log_path, Some(PathBuf::from("/tmp/aegis.log")));
+    }
+
+    #[test]
     fn runtime_flags_without_subcommand_default_to_serve() {
         let cli = parse_cli(&["aegis", "--mode", "headless"]);
         assert!(matches!(
@@ -762,6 +986,44 @@ mod tests {
         assert_eq!(
             default_serve_runtime_source(&non_workspace_binary),
             ServeRuntimeSource::Installed(installed_host)
+        );
+    }
+
+    #[test]
+    fn detached_serve_child_args_preserve_runtime_flags() {
+        let cli = parse_cli(&[
+            "aegis",
+            "--mode",
+            "headful",
+            "--profile",
+            "work",
+            "--start-url",
+            "http://127.0.0.1:3000",
+            "serve",
+            "--detach",
+            "--addr",
+            "127.0.0.1:7900",
+        ]);
+        let args = detached_serve_child_args(
+            &cli,
+            SocketAddr::from(([127, 0, 0, 1], 7900)),
+            Path::new("/tmp/libaegis_host.dylib"),
+        );
+        assert_eq!(
+            args,
+            vec![
+                "--mode".to_string(),
+                "headful".to_string(),
+                "--profile".to_string(),
+                "work".to_string(),
+                "--host-lib".to_string(),
+                "/tmp/libaegis_host.dylib".to_string(),
+                "--start-url".to_string(),
+                "http://127.0.0.1:3000".to_string(),
+                "serve".to_string(),
+                "--addr".to_string(),
+                "127.0.0.1:7900".to_string(),
+            ]
         );
     }
 }
