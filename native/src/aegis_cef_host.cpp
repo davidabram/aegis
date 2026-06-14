@@ -842,6 +842,7 @@ struct BrowserContextState {
   bool browser_closed = false;
   bool load_in_progress = false;
   std::string current_url = "about:blank";
+  std::string last_committed_url = "about:blank";
   std::vector<std::pair<std::string, std::string>> network_overrides;
   std::vector<ManagedCookie> cookie_jar;
   std::vector<std::string> local_events;
@@ -861,6 +862,9 @@ struct BrowserContextState {
     load_in_progress = browser ? browser->IsLoading() : false;
     if (browser && browser->GetMainFrame()) {
       current_url = browser->GetMainFrame()->GetURL().ToString();
+      if (!current_url.empty()) {
+        last_committed_url = current_url;
+      }
     }
   }
 
@@ -877,6 +881,9 @@ struct BrowserContextState {
     load_in_progress = is_loading;
     if (!url.empty()) {
       current_url = url;
+      if (!is_loading) {
+        last_committed_url = url;
+      }
     }
   }
 
@@ -885,6 +892,16 @@ struct BrowserContextState {
     runtime_ready = true;
     if (!url.empty()) {
       current_url = url;
+    }
+  }
+
+  void RestoreAfterDownload() {
+    page_ready = true;
+    renderer_ready = true;
+    runtime_ready = true;
+    load_in_progress = false;
+    if (!last_committed_url.empty()) {
+      current_url = last_committed_url;
     }
   }
 
@@ -1422,6 +1439,9 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       return;
     }
     primary_context_.current_url = frame->GetURL().ToString();
+    if (!primary_context_.current_url.empty()) {
+      primary_context_.last_committed_url = primary_context_.current_url;
+    }
     SyncPrimaryContextToRegistryLocked();
   }
 
@@ -1525,8 +1545,10 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       if (download_item->GetPercentComplete() >= 0) {
         record.percent_complete = download_item->GetPercentComplete();
       }
+      primary_context_.RestoreAfterDownload();
       primary_context_.UpsertDownload(record);
       SyncPrimaryContextToRegistryLocked();
+      cv_.notify_all();
     }
 
     PushLocalEvent(DownloadEventValue(record.id, record.url, record.suggested_name,
