@@ -179,6 +179,10 @@ impl LoadedAegisClient {
         self.client.runtime_mut().snapshot_host_state()
     }
 
+    pub fn activate_browser(&mut self, browser_id: i32) -> Result<HostRuntimeState, AegisError> {
+        self.client.runtime_mut().activate_browser(browser_id)
+    }
+
     pub fn request_cancel(&self) {
         self.cancel_handle.request_cancel();
     }

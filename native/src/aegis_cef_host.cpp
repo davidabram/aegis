@@ -449,6 +449,7 @@ struct ManagedCookie {
   std::optional<std::uint64_t> expires_unix;
   bool secure = false;
   bool http_only = false;
+  std::optional<std::string> same_site;
 };
 
 
@@ -716,6 +717,60 @@ std::string CookieUrl(const CefRefPtr<CefDictionaryValue>& cookie) {
   return (secure ? "https://" : "http://") + domain + (path.empty() ? "/" : path);
 }
 
+std::optional<std::string> CookieSameSiteName(cef_cookie_same_site_t value) {
+  switch (value) {
+    case CEF_COOKIE_SAME_SITE_NO_RESTRICTION:
+      return std::string("none");
+    case CEF_COOKIE_SAME_SITE_LAX_MODE:
+      return std::string("lax");
+    case CEF_COOKIE_SAME_SITE_STRICT_MODE:
+      return std::string("strict");
+    case CEF_COOKIE_SAME_SITE_UNSPECIFIED:
+    case CEF_COOKIE_SAME_SITE_NUM_VALUES:
+      return std::nullopt;
+  }
+  return std::nullopt;
+}
+
+cef_cookie_same_site_t ParseCookieSameSite(const std::string& value) {
+  if (CaseEqualAscii(value, "none")) {
+    return CEF_COOKIE_SAME_SITE_NO_RESTRICTION;
+  }
+  if (CaseEqualAscii(value, "lax")) {
+    return CEF_COOKIE_SAME_SITE_LAX_MODE;
+  }
+  if (CaseEqualAscii(value, "strict")) {
+    return CEF_COOKIE_SAME_SITE_STRICT_MODE;
+  }
+  return CEF_COOKIE_SAME_SITE_UNSPECIFIED;
+}
+
+ManagedCookie ManagedCookieFromCef(const CefCookie& cookie) {
+  const auto name = CefString(&cookie.name).ToString();
+  const auto value = CefString(&cookie.value).ToString();
+  const auto domain = CefString(&cookie.domain).ToString();
+  const auto path = CefString(&cookie.path).ToString();
+  ManagedCookie managed{
+      .name = name,
+      .value = value,
+      .domain = domain,
+      .path = path.empty() ? std::string("/") : path,
+      .expires_unix = std::nullopt,
+      .secure = cookie.secure != 0,
+      .http_only = cookie.httponly != 0,
+      .same_site = CookieSameSiteName(cookie.same_site),
+  };
+  if (cookie.has_expires != 0) {
+    time_t expires = 0;
+    cef_time_t expires_cef{};
+    cef_time_from_basetime(cookie.expires, &expires_cef);
+    if (cef_time_to_timet(&expires_cef, &expires) == 0) {
+      managed.expires_unix = static_cast<std::uint64_t>(expires);
+    }
+  }
+  return managed;
+}
+
 class CompletionSignal : public CefCompletionCallback {
  public:
   explicit CompletionSignal(CefRefPtr<CefWaitableEvent> event) : event_(event) {}
@@ -852,8 +907,11 @@ struct BrowserContextState {
   std::map<int, RendererReply> renderer_replies;
   std::map<std::uint32_t, DownloadRecord> downloads;
   std::vector<std::uint32_t> download_order;
+  CefRefPtr<CefBrowser> browser;
+  CefRefPtr<CefRequestContext> request_context;
 
   void AttachBrowser(CefRefPtr<CefBrowser> browser) {
+    this->browser = browser;
     browser_id = browser ? browser->GetIdentifier() : 0;
     browser_closed = false;
     page_ready = false;
@@ -866,6 +924,8 @@ struct BrowserContextState {
         last_committed_url = current_url;
       }
     }
+    request_context =
+        browser && browser->GetHost() ? browser->GetHost()->GetRequestContext() : nullptr;
   }
 
   void BeginNavigation(const std::string& url) {
@@ -913,6 +973,8 @@ struct BrowserContextState {
   }
 
   void DetachBrowser() {
+    browser = nullptr;
+    request_context = nullptr;
     browser_id = 0;
     page_ready = false;
     renderer_ready = false;
@@ -1262,23 +1324,25 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
     auto state = CefDictionaryValue::Create();
     {
       std::lock_guard lock(mutex_);
+      const auto* active_context =
+          ActiveContextStateLocked() != nullptr ? ActiveContextStateLocked() : &primary_context_;
       state->SetBool("startup_complete", startup_complete_);
       state->SetBool("browser_available", browser_.get() != nullptr);
-      state->SetString("active_context_id", primary_context_.context_id);
+      state->SetString("active_context_id", active_context->context_id);
       state->SetInt("active_browser_id", active_browser_id_);
-      state->SetString("context_id", primary_context_.context_id);
-      state->SetInt("browser_id", primary_context_.browser_id);
-      state->SetBool("request_context_available", request_context_.get() != nullptr);
-      state->SetBool("page_ready", primary_context_.page_ready);
-      state->SetBool("renderer_ready", primary_context_.renderer_ready);
-      state->SetBool("runtime_installed", primary_context_.renderer_ready);
-      state->SetBool("runtime_ready", primary_context_.runtime_ready);
-      state->SetBool("load_in_progress", primary_context_.load_in_progress);
-      state->SetBool("browser_closed", primary_context_.browser_closed);
+      state->SetString("context_id", active_context->context_id);
+      state->SetInt("browser_id", active_context->browser_id);
+      state->SetBool("request_context_available", active_context->request_context.get() != nullptr);
+      state->SetBool("page_ready", active_context->page_ready);
+      state->SetBool("renderer_ready", active_context->renderer_ready);
+      state->SetBool("runtime_installed", active_context->renderer_ready);
+      state->SetBool("runtime_ready", active_context->runtime_ready);
+      state->SetBool("load_in_progress", active_context->load_in_progress);
+      state->SetBool("browser_closed", active_context->browser_closed);
       state->SetBool("cancel_requested", cancel_requested_.load());
       state->SetString("download_dir", download_dir_.string());
-      if (!primary_context_.current_url.empty()) {
-        state->SetString("current_url", primary_context_.current_url);
+      if (!active_context->current_url.empty()) {
+        state->SetString("current_url", active_context->current_url);
       }
       if (!current_operation_name_.empty()) {
         state->SetString("active_operation", current_operation_name_);
@@ -1298,9 +1362,9 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       state->SetList("known_context_ids", known_context_ids);
       auto downloads = CefListValue::Create();
       int download_index = 0;
-      for (const auto download_id : primary_context_.download_order) {
-        const auto it = primary_context_.downloads.find(download_id);
-        if (it == primary_context_.downloads.end()) {
+      for (const auto download_id : active_context->download_order) {
+        const auto it = active_context->downloads.find(download_id);
+        if (it == active_context->downloads.end()) {
           continue;
         }
         const auto& record = it->second;
@@ -1338,6 +1402,26 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
     return EncodeEnvelope(MessageKind::SnapshotHostState, state);
   }
 
+  std::vector<std::uint8_t> ActivateBrowser(const std::vector<std::uint8_t>& request) override {
+    OperationScope scope(this, "activate_browser");
+    try {
+      SetOperationStage("decoding browser activation request");
+      auto payload = RequireDictionary(
+          DecodeEnvelope(MessageKind::ActivateBrowser, request),
+          "activate browser request must be a dictionary");
+      if (!payload->HasKey("browser_id")) {
+        throw std::runtime_error("activate browser request must include browser_id");
+      }
+      const auto browser_id = payload->GetInt("browser_id");
+      SetOperationStage("switching active browser");
+      ActivateAttachedBrowser(browser_id);
+      SetOperationStage("capturing activated browser state");
+      return SnapshotHostState({});
+    } catch (const std::exception& error) {
+      throw std::runtime_error(WrapOperationError(error.what()));
+    }
+  }
+
   std::vector<std::uint8_t> Pump(const std::vector<std::uint8_t>& request) override {
     static_cast<void>(request);
     RequireOwnerThread();
@@ -1359,10 +1443,14 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
     AppendDebugLog("host: on_browser_created");
     {
       std::lock_guard lock(mutex_);
-      browser_ = browser;
-      request_context_ = browser->GetHost()->GetRequestContext();
-      primary_context_.AttachBrowser(browser);
-      SyncPrimaryContextToRegistryLocked();
+      auto& context = EnsureContextStateLocked(browser);
+      context.AttachBrowser(browser);
+      if (!browser_.get()) {
+        browser_ = browser;
+        request_context_ = context.request_context;
+        primary_context_ = context;
+        SyncPrimaryContextToRegistryLocked();
+      }
       cv_.notify_all();
     }
     AppendTelemetry("primary_browser_created",
@@ -1386,22 +1474,23 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
                       CefRefPtr<CefRequest> request) override {
     AppendDebugLog("host: on_before_browse");
     std::lock_guard lock(mutex_);
-    if (browser_.get() && browser.get() && !browser->IsSame(browser_)) {
-      return;
-    }
     if (!frame.get() || !frame->IsMain()) {
       return;
     }
-    primary_context_.page_ready = false;
-    primary_context_.renderer_ready = false;
-    primary_context_.runtime_ready = false;
-    primary_context_.load_in_progress = true;
+    auto& context = EnsureContextStateLocked(browser);
+    context.page_ready = false;
+    context.renderer_ready = false;
+    context.runtime_ready = false;
+    context.load_in_progress = true;
     if (request.get()) {
-      primary_context_.current_url = request->GetURL().ToString();
+      context.current_url = request->GetURL().ToString();
     } else if (frame.get()) {
-      primary_context_.current_url = frame->GetURL().ToString();
+      context.current_url = frame->GetURL().ToString();
     }
-    SyncPrimaryContextToRegistryLocked();
+    if (browser_.get() && browser.get() && browser->IsSame(browser_)) {
+      primary_context_ = context;
+      SyncPrimaryContextToRegistryLocked();
+    }
   }
 
   void OnLoadingStateChange(CefRefPtr<CefBrowser> browser, bool is_loading) override {
@@ -1409,15 +1498,19 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
                    (is_loading ? "true" : "false"));
     {
       std::lock_guard lock(mutex_);
-      if (!browser_.get() || !browser->IsSame(browser_)) {
+      auto* context = ContextStateForBrowserLocked(browser);
+      if (context == nullptr) {
         return;
       }
-      primary_context_.page_ready = !is_loading;
-      primary_context_.load_in_progress = is_loading;
+      context->page_ready = !is_loading;
+      context->load_in_progress = is_loading;
       if (!is_loading) {
-        primary_context_.current_url = browser->GetMainFrame()->GetURL().ToString();
+        context->current_url = browser->GetMainFrame()->GetURL().ToString();
       }
-      SyncPrimaryContextToRegistryLocked();
+      if (browser_.get() && browser->IsSame(browser_)) {
+        primary_context_ = *context;
+        SyncPrimaryContextToRegistryLocked();
+      }
       cv_.notify_all();
     }
     if (!options_.headless && browser) {
@@ -1435,14 +1528,18 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       return;
     }
     std::lock_guard lock(mutex_);
-    if (!browser_.get() || !browser->IsSame(browser_)) {
+    auto* context = ContextStateForBrowserLocked(browser);
+    if (context == nullptr) {
       return;
     }
-    primary_context_.current_url = frame->GetURL().ToString();
-    if (!primary_context_.current_url.empty()) {
-      primary_context_.last_committed_url = primary_context_.current_url;
+    context->current_url = frame->GetURL().ToString();
+    if (!context->current_url.empty()) {
+      context->last_committed_url = context->current_url;
     }
-    SyncPrimaryContextToRegistryLocked();
+    if (browser_.get() && browser->IsSame(browser_)) {
+      primary_context_ = *context;
+      SyncPrimaryContextToRegistryLocked();
+    }
   }
 
   void OnAddressChange(CefRefPtr<CefBrowser>,
@@ -1523,6 +1620,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
     DownloadRecord record;
     {
       std::lock_guard lock(mutex_);
+      auto& context = EnsureContextStateLocked(browser);
       const auto directory = download_dir_;
       std::error_code error;
       std::filesystem::create_directories(directory, error);
@@ -1545,9 +1643,12 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       if (download_item->GetPercentComplete() >= 0) {
         record.percent_complete = download_item->GetPercentComplete();
       }
-      primary_context_.RestoreAfterDownload();
-      primary_context_.UpsertDownload(record);
-      SyncPrimaryContextToRegistryLocked();
+      context.RestoreAfterDownload();
+      context.UpsertDownload(record);
+      if (browser_.get() && browser.get() && browser->IsSame(browser_)) {
+        primary_context_ = context;
+        SyncPrimaryContextToRegistryLocked();
+      }
       cv_.notify_all();
     }
 
@@ -1563,7 +1664,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
     return true;
   }
 
-  void OnDownloadUpdated(CefRefPtr<CefBrowser>,
+  void OnDownloadUpdated(CefRefPtr<CefBrowser> browser,
                          CefRefPtr<CefDownloadItem> download_item,
                          CefRefPtr<CefDownloadItemCallback>) override {
     if (!download_item.get()) {
@@ -1573,9 +1674,13 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
     DownloadRecord record;
     {
       std::lock_guard lock(mutex_);
+      auto* context = ContextStateForBrowserLocked(browser);
+      if (context == nullptr) {
+        return;
+      }
       const auto id = download_item->GetId();
-      auto existing = primary_context_.downloads.find(id);
-      if (existing != primary_context_.downloads.end()) {
+      auto existing = context->downloads.find(id);
+      if (existing != context->downloads.end()) {
         record = existing->second;
       }
       record.id = id;
@@ -1620,8 +1725,11 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       } else {
         record.state = "pending";
       }
-      primary_context_.UpsertDownload(record);
-      SyncPrimaryContextToRegistryLocked();
+      context->UpsertDownload(record);
+      if (browser_.get() && browser.get() && browser->IsSame(browser_)) {
+        primary_context_ = *context;
+        SyncPrimaryContextToRegistryLocked();
+      }
     }
 
     PushLocalEvent(DownloadEventValue(record.id, record.url, record.suggested_name,
@@ -1631,7 +1739,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
                                       record.complete, record.canceled));
   }
 
-  bool HandleBrowserProcessMessage(CefRefPtr<CefBrowser>,
+  bool HandleBrowserProcessMessage(CefRefPtr<CefBrowser> browser,
                                    CefRefPtr<CefFrame> frame,
                                    CefProcessId source_process,
                                    CefRefPtr<CefProcessMessage> message) {
@@ -1650,8 +1758,12 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
         AppendDebugLog("host: lifecycle context_ready");
         {
           std::lock_guard lock(mutex_);
-          primary_context_.MarkLifecycleReady(args->GetString(1).ToString());
-          SyncPrimaryContextToRegistryLocked();
+          auto& context = EnsureContextStateLocked(browser);
+          context.MarkLifecycleReady(args->GetString(1).ToString());
+          if (browser_.get() && browser.get() && browser->IsSame(browser_)) {
+            primary_context_ = context;
+            SyncPrimaryContextToRegistryLocked();
+          }
           cv_.notify_all();
         }
         return true;
@@ -1730,6 +1842,12 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
     if (inserted) {
       it->second.context_id = context_id;
     }
+    if (browser.get()) {
+      it->second.browser = browser;
+      it->second.request_context =
+          browser->GetHost() ? browser->GetHost()->GetRequestContext() : nullptr;
+      it->second.browser_id = browser_id;
+    }
     return it->second;
   }
 
@@ -1762,6 +1880,25 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
   bool IsManagedBrowser(CefRefPtr<CefBrowser> browser) const {
     std::lock_guard lock(mutex_);
     return ContextStateForBrowserLocked(browser) != nullptr;
+  }
+
+  void ActivateAttachedBrowser(int browser_id) {
+    RequireOwnerThread();
+    std::lock_guard lock(mutex_);
+    auto found = browser_contexts_.find(browser_id);
+    if (found == browser_contexts_.end()) {
+      throw std::runtime_error("attached browser was not found");
+    }
+    if (!found->second.browser.get()) {
+      throw std::runtime_error("attached browser is no longer available");
+    }
+    primary_context_ = found->second;
+    browser_ = found->second.browser;
+    request_context_ = found->second.request_context;
+    active_browser_id_ = browser_id;
+    devtools_registration_ = nullptr;
+    devtools_network_enabled_ = false;
+    cv_.notify_all();
   }
 
   void EnsureDevToolsObserver(CefRefPtr<CefBrowser> browser) {
@@ -2711,6 +2848,10 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
             .secure = cookie_value->HasKey("secure") && cookie_value->GetBool("secure"),
             .http_only =
                 cookie_value->HasKey("http_only") && cookie_value->GetBool("http_only"),
+            .same_site = cookie_value->HasKey("same_site")
+                             ? std::optional<std::string>(
+                                   cookie_value->GetString("same_site").ToString())
+                             : std::nullopt,
         };
         jar.push_back(std::move(cookie));
       }
@@ -2764,6 +2905,14 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
         cookie.secure = true;
       } else if (CaseEqualAscii(key, "httponly")) {
         cookie.http_only = true;
+      } else if (CaseEqualAscii(key, "samesite")) {
+        if (CaseEqualAscii(value, "none")) {
+          cookie.same_site = "none";
+        } else if (CaseEqualAscii(value, "lax")) {
+          cookie.same_site = "lax";
+        } else if (CaseEqualAscii(value, "strict")) {
+          cookie.same_site = "strict";
+        }
       } else if (CaseEqualAscii(key, "max-age")) {
         try {
           if (std::stoll(value) <= 0) {
@@ -2880,6 +3029,10 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       cookie.secure = cookie_value->HasKey("secure") && cookie_value->GetBool("secure");
       cookie.httponly =
           cookie_value->HasKey("http_only") && cookie_value->GetBool("http_only");
+      if (cookie_value->HasKey("same_site")) {
+        cookie.same_site =
+            ParseCookieSameSite(cookie_value->GetString("same_site").ToString());
+      }
 
       if (cookie_value->HasKey("expires_unix")) {
         cookie.has_expires = true;
@@ -2897,13 +3050,34 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
     auto flush_event = CefWaitableEvent::CreateWaitableEvent(true, false);
     manager->FlushStore(new CompletionSignal(flush_event));
     flush_event->Wait();
+    SnapshotCookies();
   }
 
   CefRefPtr<CefListValue> SnapshotCookies() {
     auto list = CefListValue::Create();
-    std::lock_guard lock(mutex_);
-    for (std::size_t index = 0; index < primary_context_.cookie_jar.size(); ++index) {
-      const auto& cookie = primary_context_.cookie_jar[index];
+    auto manager = request_context_ ? request_context_->GetCookieManager(nullptr) : nullptr;
+    std::vector<ManagedCookie> managed;
+    if (manager.get()) {
+      std::vector<CefCookie> cookies;
+      auto done = CefWaitableEvent::CreateWaitableEvent(true, false);
+      manager->VisitAllCookies(new CookieCollector(&cookies, done));
+      done->Wait();
+      managed.reserve(cookies.size());
+      for (const auto& cookie : cookies) {
+        managed.push_back(ManagedCookieFromCef(cookie));
+      }
+      {
+        std::lock_guard lock(mutex_);
+        primary_context_.cookie_jar = managed;
+        SyncPrimaryContextToRegistryLocked();
+      }
+    } else {
+      std::lock_guard lock(mutex_);
+      managed = primary_context_.cookie_jar;
+    }
+
+    for (std::size_t index = 0; index < managed.size(); ++index) {
+      const auto& cookie = managed[index];
       auto entry = CefDictionaryValue::Create();
       entry->SetString("name", cookie.name);
       entry->SetString("value", cookie.value);
@@ -2913,6 +3087,9 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       entry->SetBool("http_only", cookie.http_only);
       if (cookie.expires_unix.has_value()) {
         entry->SetDouble("expires_unix", static_cast<double>(*cookie.expires_unix));
+      }
+      if (cookie.same_site.has_value()) {
+        entry->SetString("same_site", *cookie.same_site);
       }
       list->SetDictionary(static_cast<int>(index), entry);
     }
@@ -3099,6 +3276,14 @@ AegisHostStatus SnapshotHostState(
   return Dispatch(ctx, input_ptr, input_len, output, &CefHost::SnapshotHostState);
 }
 
+AegisHostStatus ActivateBrowser(
+    AegisHostHandle ctx,
+    const std::uint8_t* input_ptr,
+    std::size_t input_len,
+    AegisHostBuffer* output) {
+  return Dispatch(ctx, input_ptr, input_len, output, &CefHost::ActivateBrowser);
+}
+
 AegisHostStatus Pump(
     AegisHostHandle ctx,
     const std::uint8_t* input_ptr,
@@ -3132,6 +3317,7 @@ AegisHostFunctionTable ExportFunctionTable() {
       .drain_events = DrainEvents,
       .navigate = Navigate,
       .snapshot_host_state = SnapshotHostState,
+      .activate_browser = ActivateBrowser,
       .pump = Pump,
       .request_cancel = RequestCancel,
       .free_buffer = FreeBuffer,
@@ -3194,6 +3380,12 @@ bool RunEmbeddedHostOperation(const std::vector<std::uint8_t>& config,
         break;
       case EmbeddedHostOperation::Navigate:
         *response = host.Navigate(request);
+        break;
+      case EmbeddedHostOperation::SnapshotHostState:
+        *response = host.SnapshotHostState(request);
+        break;
+      case EmbeddedHostOperation::ActivateBrowser:
+        *response = host.ActivateBrowser(request);
         break;
       default:
         throw std::runtime_error("unsupported embedded host operation");

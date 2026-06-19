@@ -23,7 +23,7 @@ use tokio::sync::oneshot;
 use tokio::time::{sleep, timeout};
 
 use crate::browser::BrowserConfig;
-use crate::commands::command::{Command, CommandTarget};
+use crate::commands::command::{Command, CommandMatcher, CommandTarget};
 use crate::commands::matcher::resolve_command_target as resolve_snapshot_target;
 use crate::config_store::{
     AegisConfigStore, AegisSecretStore, CredentialInput, CredentialsSettings,
@@ -35,7 +35,7 @@ use crate::runtime::executor::{ExecutionReport, PageBootstrapDiagnostics, Runtim
 use crate::session::cookies::SessionState;
 use crate::session::profile::{SessionProfileInfo, SessionProfileStore};
 use crate::transport::bridge::AegisError;
-use crate::transport::protocol::{DownloadState, PROTOCOL_VERSION};
+use crate::transport::protocol::{DownloadState, HostRuntimeState, PROTOCOL_VERSION};
 
 const HEADLESS_IDLE_PUMP_INTERVAL: Duration = Duration::from_millis(10);
 const HEADFUL_IDLE_PUMP_INTERVAL: Duration = Duration::from_millis(2);
@@ -167,6 +167,7 @@ enum ApiCommand {
     SnapshotSession(oneshot::Sender<Result<SessionState, AegisError>>),
     SaveSessionProfile(oneshot::Sender<Result<SessionProfileInfo, AegisError>>),
     LoadSessionProfile(oneshot::Sender<Result<SessionProfileInfo, AegisError>>),
+    ActivateBrowser(i32, oneshot::Sender<Result<HostRuntimeState, AegisError>>),
     Navigate(
         String,
         oneshot::Sender<Result<Vec<SequencedEvent>, AegisError>>,
@@ -633,6 +634,28 @@ impl MainThreadContext {
                 );
                 let _ = reply.send(result);
             }
+            ApiCommand::ActivateBrowser(browser_id, reply) => {
+                let started_at = Instant::now();
+                record_operation_started(
+                    &self.api.diagnostics,
+                    "activate_browser",
+                    &format!("activating attached browser {browser_id}"),
+                );
+                let result = self.client.activate_browser(browser_id);
+                record_operation_finished(
+                    &self.api.diagnostics,
+                    "activate_browser",
+                    &self.client,
+                    &result,
+                );
+                emit_operation_telemetry(
+                    "activate_browser",
+                    started_at,
+                    &result,
+                    self.client.runtime_status(),
+                );
+                let _ = reply.send(result);
+            }
             ApiCommand::Navigate(url, reply) => {
                 let started_at = Instant::now();
                 record_operation_started(
@@ -973,12 +996,9 @@ impl AutoCredentialCapture {
     fn should_persist(&self, snapshot: &DomSnapshot, commands: &[Command]) -> bool {
         self.username.is_some()
             && self.password.is_some()
-            && commands.iter().any(|command| {
-                let Command::Click { target } = command else {
-                    return false;
-                };
-                resolve_command_target(snapshot, target).is_some_and(is_submit_like_node)
-            })
+            && commands
+                .iter()
+                .any(|command| command_requests_credential_submit(snapshot, command, self))
     }
 
     fn persist(
@@ -1082,6 +1102,133 @@ fn is_submit_like_node(node: &DomNode) -> bool {
         || text.contains("login")
         || text.contains("continue")
         || text.contains("submit")
+}
+
+fn command_requests_credential_submit(
+    snapshot: &DomSnapshot,
+    command: &Command,
+    capture: &AutoCredentialCapture,
+) -> bool {
+    match command {
+        Command::Click { target } => submit_target_matches(snapshot, target),
+        Command::PressKey {
+            target, key, code, ..
+        } => {
+            is_submit_key(key, code.as_deref())
+                && match target.as_ref() {
+                    Some(target) => {
+                        submit_target_matches(snapshot, target)
+                            || command_target_matches_password_field(snapshot, target)
+                    }
+                    None => capture.password.is_some(),
+                }
+        }
+        _ => false,
+    }
+}
+
+fn is_submit_key(key: &str, code: Option<&str>) -> bool {
+    matches!(
+        normalize_text(key).as_str(),
+        "enter" | "return" | "numpadenter"
+    ) || code
+        .map(normalize_text)
+        .is_some_and(|code| matches!(code.as_str(), "enter" | "return" | "numpadenter"))
+}
+
+fn submit_target_matches(snapshot: &DomSnapshot, target: &CommandTarget) -> bool {
+    resolve_command_target(snapshot, target).is_some_and(is_submit_like_node)
+        || command_target_submit_hint(target)
+        || snapshot_has_single_submit_candidate(snapshot)
+}
+
+fn command_target_submit_hint(target: &CommandTarget) -> bool {
+    match target {
+        CommandTarget::Id { .. } => false,
+        CommandTarget::Match { matcher } => matcher_submit_hint(matcher),
+    }
+}
+
+fn matcher_submit_hint(matcher: &CommandMatcher) -> bool {
+    matcher
+        .role
+        .as_deref()
+        .is_some_and(|value| normalize_text(value) == "button")
+        || matcher
+            .control_type
+            .as_deref()
+            .is_some_and(|value| matches!(normalize_text(value).as_str(), "button" | "submit"))
+        || matcher
+            .tag
+            .as_deref()
+            .is_some_and(|value| matches!(normalize_text(value).as_str(), "button" | "input"))
+        || [
+            matcher.selector.as_deref(),
+            matcher.name.as_deref(),
+            matcher.label.as_deref(),
+            matcher.text.as_deref(),
+            matcher.test_id.as_deref(),
+            matcher.placeholder.as_deref(),
+            matcher.href_contains.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(is_submit_hint_text)
+}
+
+fn command_target_matches_password_field(snapshot: &DomSnapshot, target: &CommandTarget) -> bool {
+    resolve_command_target(snapshot, target)
+        .and_then(classify_credential_field)
+        .is_some_and(|kind| kind == CredentialFieldKind::Password)
+        || matches!(
+            target,
+            CommandTarget::Match { matcher }
+                if matcher_matches_password_hint(matcher)
+        )
+}
+
+fn matcher_matches_password_hint(matcher: &CommandMatcher) -> bool {
+    [
+        matcher.selector.as_deref(),
+        matcher.name.as_deref(),
+        matcher.label.as_deref(),
+        matcher.text.as_deref(),
+        matcher.placeholder.as_deref(),
+        matcher.test_id.as_deref(),
+        matcher.control_type.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(is_password_hint_text)
+}
+
+fn snapshot_has_single_submit_candidate(snapshot: &DomSnapshot) -> bool {
+    snapshot
+        .nodes
+        .iter()
+        .filter(|node| is_submit_like_node(node))
+        .take(2)
+        .count()
+        == 1
+}
+
+fn is_submit_hint_text(value: &str) -> bool {
+    let text = normalize_text(value);
+    text.contains("sign in")
+        || text.contains("signin")
+        || text.contains("log in")
+        || text.contains("login")
+        || text.contains("continue")
+        || text.contains("submit")
+        || text.contains("password-next")
+        || text.contains("type=submit")
+        || text.contains("[type=submit]")
+        || text.contains("button[type=submit]")
+}
+
+fn is_password_hint_text(value: &str) -> bool {
+    let text = normalize_text(value);
+    text.contains("password") || text.contains("passcode") || text.contains("current-password")
 }
 
 fn credential_hint_text(node: &DomNode) -> String {
@@ -1229,6 +1376,10 @@ pub fn router(state: ServeRootState) -> Router {
             post(context_cancel_runtime_operation),
         )
         .route(
+            "/contexts/{context_id}/browsers/{browser_id}/activate",
+            post(context_activate_browser),
+        )
+        .route(
             "/contexts/{context_id}/session",
             post(context_inject_session).get(context_snapshot_session),
         )
@@ -1258,6 +1409,7 @@ pub fn router(state: ServeRootState) -> Router {
         .route("/doctor", get(doctor))
         .route("/runtime", get(runtime_info))
         .route("/runtime/cancel", post(cancel_runtime_operation))
+        .route("/browsers/{browser_id}/activate", post(activate_browser))
         .route("/session", post(inject_session).get(snapshot_session))
         .route("/session/save", post(save_session_profile))
         .route("/session/load", post(load_session_profile))
@@ -1461,6 +1613,11 @@ async fn api_manifest(State(root): State<ServeRootState>) -> Json<ApiManifest> {
                 summary: "Cancel the active operation in one context",
             },
             ApiRouteDoc {
+                method: "POST",
+                path: "/contexts/{context_id}/browsers/{browser_id}/activate",
+                summary: "Activate one attached browser inside a context",
+            },
+            ApiRouteDoc {
                 method: "GET",
                 path: "/contexts/{context_id}/session",
                 summary: "Snapshot one context session",
@@ -1539,6 +1696,11 @@ async fn api_manifest(State(root): State<ServeRootState>) -> Json<ApiManifest> {
                 method: "POST",
                 path: "/runtime/cancel",
                 summary: "Cancel the active runtime operation",
+            },
+            ApiRouteDoc {
+                method: "POST",
+                path: "/browsers/{browser_id}/activate",
+                summary: "Activate one attached browser in the default context",
             },
             ApiRouteDoc {
                 method: "POST",
@@ -2017,6 +2179,20 @@ async fn cancel_runtime_operation(
     Ok(Json(read_diagnostics(&state.diagnostics)))
 }
 
+async fn activate_browser(
+    State(root): State<ServeRootState>,
+    Path(browser_id): Path<i32>,
+) -> Result<Json<RuntimeDiagnosticsResponse>, ApiError> {
+    let state = require_default_context_state(&root)?;
+    let (reply_tx, reply_rx) = oneshot::channel();
+    state
+        .tx
+        .send(ApiCommand::ActivateBrowser(browser_id, reply_tx))
+        .map_err(channel_error)?;
+    await_command("activate_browser", &state, reply_rx).await??;
+    Ok(Json(read_diagnostics(&state.diagnostics)))
+}
+
 async fn save_session_profile(
     State(root): State<ServeRootState>,
 ) -> Result<Json<SessionProfileInfo>, ApiError> {
@@ -2254,6 +2430,20 @@ async fn context_cancel_runtime_operation(
     let state = require_context_state(&root, &context_id)?;
     request_runtime_cancel(&state);
     mark_operation_cancel_requested(&state.diagnostics);
+    Ok(Json(read_diagnostics(&state.diagnostics)))
+}
+
+async fn context_activate_browser(
+    State(root): State<ServeRootState>,
+    Path((context_id, browser_id)): Path<(String, i32)>,
+) -> Result<Json<RuntimeDiagnosticsResponse>, ApiError> {
+    let state = require_context_state(&root, &context_id)?;
+    let (reply_tx, reply_rx) = oneshot::channel();
+    state
+        .tx
+        .send(ApiCommand::ActivateBrowser(browser_id, reply_tx))
+        .map_err(channel_error)?;
+    await_command("activate_browser", &state, reply_rx).await??;
     Ok(Json(read_diagnostics(&state.diagnostics)))
 }
 
@@ -3135,6 +3325,9 @@ fn runtime_identity() -> RuntimeIdentity {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::command::{CommandMatcher, CommandTarget};
+    use crate::dom::node::{DomNode, DomNodeSemantics, DomSnapshot};
+    use std::collections::HashMap;
 
     fn dummy_api_state(profile: &str) -> ApiState {
         let (tx, _rx) = mpsc::channel();
@@ -3236,5 +3429,112 @@ mod tests {
             "runtime is attached, but the page is not yet inspectable"
         );
         assert_eq!(error.body.stage.as_deref(), Some("awaiting_page_bootstrap"));
+    }
+
+    fn password_node(id: u64) -> DomNode {
+        DomNode {
+            id,
+            tag: "input".into(),
+            attrs: HashMap::from([
+                ("type".into(), "password".into()),
+                ("name".into(), "password".into()),
+                ("autocomplete".into(), "current-password".into()),
+            ]),
+            text: None,
+            semantic: Some(DomNodeSemantics {
+                role: Some("textbox".into()),
+                name: Some("Password".into()),
+                label: Some("Password".into()),
+                control_type: Some("password".into()),
+                actionable: true,
+                visible: true,
+                ..Default::default()
+            }),
+            children: Vec::new(),
+        }
+    }
+
+    fn submit_node(id: u64) -> DomNode {
+        DomNode {
+            id,
+            tag: "button".into(),
+            attrs: HashMap::from([("type".into(), "submit".into())]),
+            text: Some("Log in".into()),
+            semantic: Some(DomNodeSemantics {
+                role: Some("button".into()),
+                name: Some("Log in".into()),
+                label: Some("Log in".into()),
+                control_type: Some("button".into()),
+                actionable: true,
+                visible: true,
+                actions: vec!["click".into(), "submit".into()],
+                ..Default::default()
+            }),
+            children: Vec::new(),
+        }
+    }
+
+    fn captured_credentials() -> AutoCredentialCapture {
+        AutoCredentialCapture {
+            username: Some(CapturedCredentialField {
+                value: "saint@example.com".into(),
+                field_name: Some("email".into()),
+                label: Some("Email".into()),
+            }),
+            password: Some(CapturedCredentialField {
+                value: "super-secret".into(),
+                field_name: Some("password".into()),
+                label: Some("Password".into()),
+            }),
+            origin: Some("https://accounts.shopify.com".into()),
+        }
+    }
+
+    #[test]
+    fn credential_submit_detection_accepts_selector_login_clicks() {
+        let snapshot = DomSnapshot {
+            nodes: vec![password_node(1), submit_node(2)],
+        };
+        let capture = captured_credentials();
+        let commands = vec![Command::Click {
+            target: CommandTarget::Match {
+                matcher: CommandMatcher {
+                    selector: Some("#login".into()),
+                    test_id: None,
+                    role: None,
+                    name: None,
+                    label: None,
+                    control_type: None,
+                    tag: None,
+                    text: None,
+                    placeholder: None,
+                    href_contains: None,
+                    actionable: None,
+                    disabled: None,
+                    exact: None,
+                },
+            },
+        }];
+
+        assert!(capture.should_persist(&snapshot, &commands));
+    }
+
+    #[test]
+    fn credential_submit_detection_accepts_enter_on_password_field() {
+        let snapshot = DomSnapshot {
+            nodes: vec![password_node(1), submit_node(2)],
+        };
+        let capture = captured_credentials();
+        let commands = vec![Command::PressKey {
+            target: Some(CommandTarget::Id { id: 1 }),
+            key: "Enter".into(),
+            code: Some("Enter".into()),
+            alt_key: false,
+            ctrl_key: false,
+            meta_key: false,
+            shift_key: false,
+        }];
+
+        assert!(capture.should_persist(&snapshot, &commands));
     }
 }

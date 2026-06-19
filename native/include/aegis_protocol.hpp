@@ -19,6 +19,7 @@ enum class MessageKind : std::uint16_t {
   DrainEvents = 7,
   Navigate = 8,
   SnapshotHostState = 9,
+  ActivateBrowser = 10,
 };
 
 class ProtocolError : public std::runtime_error {

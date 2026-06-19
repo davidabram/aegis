@@ -25,7 +25,8 @@ where
         return Ok(integer);
     }
     if let Some(float) = value.as_f64()
-        && float.is_finite() && float >= 0.0
+        && float.is_finite()
+        && float >= 0.0
     {
         return Ok(float as u64);
     }
@@ -44,11 +45,14 @@ where
         return Ok(Some(integer));
     }
     if let Some(float) = value.as_f64()
-        && float.is_finite() && float >= 0.0
+        && float.is_finite()
+        && float >= 0.0
     {
         return Ok(Some(float as u64));
     }
-    Err(serde::de::Error::custom("expected optional unsigned integer"))
+    Err(serde::de::Error::custom(
+        "expected optional unsigned integer",
+    ))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,6 +67,7 @@ pub enum MessageKind {
     DrainEvents = 7,
     Navigate = 8,
     SnapshotHostState = 9,
+    ActivateBrowser = 10,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -86,6 +91,11 @@ pub struct NavigateRequest {
     pub url: String,
     #[serde(default, skip_serializing_if = "is_false")]
     pub capture_network_events: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ActivateBrowserRequest {
+    pub browser_id: i32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]

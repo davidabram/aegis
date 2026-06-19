@@ -447,6 +447,17 @@ impl AegisRuntime {
         Ok(self.host_state.clone())
     }
 
+    pub fn activate_browser(&mut self, browser_id: i32) -> Result<HostRuntimeState, AegisError> {
+        self.ensure_runtime_bootstrapped(false)?;
+        self.host_state = self.bridge.activate_browser(browser_id)?;
+        if let Some(url) = self.host_state.current_url.clone() {
+            self.current_url = Some(url);
+        }
+        self.mark_successful_bridge_roundtrip();
+        let _ = self.refresh_live_state(true);
+        Ok(self.host_state.clone())
+    }
+
     pub fn request_cancel(&self) {
         self.bridge.request_cancel();
     }

@@ -53,6 +53,8 @@ const char* MessageKindName(MessageKind kind) {
       return "Navigate";
     case MessageKind::SnapshotHostState:
       return "SnapshotHostState";
+    case MessageKind::ActivateBrowser:
+      return "ActivateBrowser";
   }
 
   throw ProtocolError("unsupported message kind");
@@ -95,6 +97,9 @@ MessageKind ParseMessageKind(CefRefPtr<CefDictionaryValue> envelope) {
     }
     if (kind == "SnapshotHostState") {
       return MessageKind::SnapshotHostState;
+    }
+    if (kind == "ActivateBrowser") {
+      return MessageKind::ActivateBrowser;
     }
   }
 

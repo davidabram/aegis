@@ -375,7 +375,7 @@ fn default_credentials_settings_payload() -> serde_json::Value {
 
 fn default_session_payload() -> serde_json::Value {
     json!({
-        "version": STATE_VERSION,
+        "version": 2,
         "session": {
             "cookies": [],
             "local_storage": {},

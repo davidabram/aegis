@@ -24,6 +24,7 @@ class CefHost {
   virtual std::vector<std::uint8_t> DrainEvents(const std::vector<std::uint8_t>& request) = 0;
   virtual std::vector<std::uint8_t> Navigate(const std::vector<std::uint8_t>& request) = 0;
   virtual std::vector<std::uint8_t> SnapshotHostState(const std::vector<std::uint8_t>& request) = 0;
+  virtual std::vector<std::uint8_t> ActivateBrowser(const std::vector<std::uint8_t>& request) = 0;
   virtual std::vector<std::uint8_t> Pump(const std::vector<std::uint8_t>& request) = 0;
   virtual void RequestCancel() = 0;
 };
@@ -40,6 +41,7 @@ enum class EmbeddedHostOperation : std::uint16_t {
   DrainEvents = 7,
   Navigate = 8,
   SnapshotHostState = 9,
+  ActivateBrowser = 10,
 };
 
 bool RunEmbeddedHostOperation(const std::vector<std::uint8_t>& config,

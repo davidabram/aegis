@@ -34,7 +34,7 @@ pub use native::{
     ensure_workspace_serve_runtime,
 };
 pub use runtime::executor::{AegisRuntime, ExecutionReport};
-pub use session::cookies::{Cookie, SessionState};
+pub use session::cookies::{Cookie, CookieSameSite, SessionState};
 pub use session::profile::{SessionProfileInfo, SessionProfileStore};
 pub use session::storage::{NetworkOverride, StorageArea};
 pub use state::AegisStatePaths;

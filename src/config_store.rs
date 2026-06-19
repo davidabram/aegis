@@ -123,6 +123,7 @@ impl AegisSecretStore {
 
     pub fn load_profile_secrets(&self, profile: &str) -> Result<Value, String> {
         validate_name(profile, "profile")?;
+        self.paths.ensure_profile_layout(profile)?;
         let path = self.paths.profile_secrets_file(profile);
         if !path.exists() {
             return Ok(Value::Object(Default::default()));
@@ -132,6 +133,7 @@ impl AegisSecretStore {
 
     pub fn save_profile_secrets(&self, profile: &str, secrets: &Value) -> Result<PathBuf, String> {
         validate_name(profile, "profile")?;
+        self.paths.ensure_profile_layout(profile)?;
         let path = self.paths.profile_secrets_file(profile);
         let payload = serde_json::to_vec_pretty(&StoredProfileSecrets {
             version: 1,
@@ -156,6 +158,7 @@ impl AegisSecretStore {
         input: CredentialInput,
     ) -> Result<(PathBuf, StoredCredentialEntry), String> {
         validate_credential_input(&input)?;
+        self.paths.ensure_profile_layout(profile)?;
         let path = self.paths.profile_secrets_file(profile);
         with_state_file_lock(&path, || {
             let mut secrets = if path.exists() {
@@ -207,6 +210,7 @@ impl AegisSecretStore {
         origin: &str,
         username: &str,
     ) -> Result<(PathBuf, bool), String> {
+        self.paths.ensure_profile_layout(profile)?;
         let path = self.paths.profile_secrets_file(profile);
         with_state_file_lock(&path, || {
             let mut secrets = if path.exists() {
@@ -233,6 +237,7 @@ impl AegisSecretStore {
     }
 
     pub fn clear_profile_credentials(&self, profile: &str) -> Result<PathBuf, String> {
+        self.paths.ensure_profile_layout(profile)?;
         let path = self.paths.profile_secrets_file(profile);
         with_state_file_lock(&path, || {
             let mut secrets = if path.exists() {
@@ -536,6 +541,29 @@ mod tests {
                 .expect("credentials should load after removal")
                 .is_empty()
         );
+        unsafe {
+            std::env::remove_var("AEGIS_HOME");
+        }
+    }
+
+    #[test]
+    fn secret_store_bootstraps_non_default_profile_layout_before_locking() {
+        let _guard = aegis_test_env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let temp = tempfile::tempdir().expect("temporary state dir should be created");
+        unsafe {
+            std::env::set_var("AEGIS_HOME", temp.path());
+        }
+        let store = AegisSecretStore::detect().expect("secret store should initialize");
+        let path = store
+            .save_profile_secrets("shopify-clean", &serde_json::json!({}))
+            .expect("profile layout should be created before locking");
+        assert!(path.exists());
+        assert!(temp
+            .path()
+            .join("secrets/profiles/shopify-clean")
+            .is_dir());
         unsafe {
             std::env::remove_var("AEGIS_HOME");
         }

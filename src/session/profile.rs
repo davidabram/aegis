@@ -7,7 +7,7 @@ use crate::state::{
     AegisStatePaths, replace_corrupt_state_file, with_state_file_lock, write_state_file,
 };
 
-const PROFILE_VERSION: u32 = 1;
+const PROFILE_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StoredSessionProfile {
@@ -124,7 +124,9 @@ fn validate_profile_name(profile: &str) -> Result<(), String> {
 }
 
 fn profile_path(profile: &str) -> Result<PathBuf, String> {
-    Ok(AegisStatePaths::detect()?.session_file(profile))
+    let paths = AegisStatePaths::detect()?;
+    paths.ensure_profile_layout(profile)?;
+    Ok(paths.session_file(profile))
 }
 
 fn default_session_payload() -> serde_json::Value {
@@ -176,6 +178,32 @@ mod tests {
         .filter(|name| name.starts_with("session.json.corrupt."))
         .count();
         assert_eq!(backups, 1);
+        unsafe {
+            std::env::remove_var("AEGIS_HOME");
+        }
+    }
+
+    #[test]
+    fn load_resets_legacy_session_profile_versions() {
+        let _guard = aegis_test_env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let temp = tempfile::tempdir().expect("temporary state dir should be created");
+        unsafe {
+            std::env::set_var("AEGIS_HOME", temp.path());
+        }
+        let store =
+            SessionProfileStore::new("brave-import").expect("session profile store should initialize");
+        fs::write(
+            store.info().path.clone(),
+            br#"{"version":1,"session":{"cookies":[{"name":"shopify","value":"bad","domain":"accounts.shopify.com"}],"local_storage":{},"session_storage":{},"network_overrides":[]}}"#,
+        )
+        .expect("legacy session fixture should be written");
+        let session = store
+            .load()
+            .expect("legacy session should be reset")
+            .expect("default session should be returned");
+        assert!(session.cookies.is_empty());
         unsafe {
             std::env::remove_var("AEGIS_HOME");
         }

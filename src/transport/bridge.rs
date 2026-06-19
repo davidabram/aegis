@@ -10,9 +10,9 @@ use crate::dom::node::DomSnapshot;
 use crate::events::stream::RuntimeEvent;
 use crate::session::cookies::SessionState;
 use crate::transport::protocol::{
-    BatchWireResponse, DrainEventsRequest, EvalJsRequest, EvalJsResponse, EventsResponse,
-    HostRuntimeState, MessageKind, NavigateRequest, NavigateResponse, decode_message,
-    encode_message,
+    ActivateBrowserRequest, BatchWireResponse, DrainEventsRequest, EvalJsRequest, EvalJsResponse,
+    EventsResponse, HostRuntimeState, MessageKind, NavigateRequest, NavigateResponse,
+    decode_message, encode_message,
 };
 
 const MAX_HOST_BUFFER_LEN: usize = 64 * 1024 * 1024;
@@ -81,6 +81,7 @@ pub struct HostFunctionTable {
     pub drain_events: HostApi,
     pub navigate: HostApi,
     pub snapshot_host_state: HostApi,
+    pub activate_browser: HostApi,
     pub pump: HostApi,
     pub request_cancel: unsafe extern "C" fn(ctx: HostHandle),
     pub free_buffer: HostFree,
@@ -236,6 +237,15 @@ impl CefBridge {
         decode_message(MessageKind::SnapshotHostState, &response)
     }
 
+    pub fn activate_browser(&mut self, browser_id: i32) -> Result<HostRuntimeState, AegisError> {
+        let payload = encode_message(
+            MessageKind::ActivateBrowser,
+            &ActivateBrowserRequest { browser_id },
+        )?;
+        let response = self.invoke_message(MessageKind::ActivateBrowser, &payload)?;
+        decode_message(MessageKind::ActivateBrowser, &response)
+    }
+
     pub fn request_cancel(&self) {
         match &self.backend {
             BridgeBackend::Dynamic { host, fns } => unsafe { (fns.request_cancel)(host.as_ptr()) },
@@ -264,6 +274,7 @@ impl CefBridge {
                     MessageKind::DrainEvents => fns.drain_events,
                     MessageKind::Navigate => fns.navigate,
                     MessageKind::SnapshotHostState => fns.snapshot_host_state,
+                    MessageKind::ActivateBrowser => fns.activate_browser,
                 };
                 Self::invoke_raw(*host, *fns, function, input)
             }

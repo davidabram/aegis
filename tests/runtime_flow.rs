@@ -8,8 +8,8 @@ use aegis::{
     },
     replay_trace,
     transport::protocol::{
-        BatchWireResponse, EvalJsRequest, HostRuntimeState, MessageKind, NavigateResponse,
-        TraceFile, decode_message, encode_message,
+        ActivateBrowserRequest, BatchWireResponse, EvalJsRequest, HostRuntimeState, MessageKind,
+        NavigateResponse, TraceFile, decode_message, encode_message,
     },
 };
 use std::collections::HashMap;
@@ -188,6 +188,19 @@ fn encodes_batch_request_with_stable_shape() {
 }
 
 #[test]
+fn activate_browser_request_round_trips() {
+    let frame = encode_message(
+        MessageKind::ActivateBrowser,
+        &ActivateBrowserRequest { browser_id: 17 },
+    )
+    .expect("frame encodes");
+
+    let payload: ActivateBrowserRequest =
+        decode_message(MessageKind::ActivateBrowser, &frame).expect("frame decodes");
+    assert_eq!(payload.browser_id, 17);
+}
+
+#[test]
 fn diffs_snapshots_for_attribute_changes() {
     let before = DomSnapshot {
         nodes: vec![DomNode {
@@ -240,6 +253,7 @@ fn validates_session_state() {
         expires_unix: None,
         secure: true,
         http_only: true,
+        same_site: None,
     });
 
     assert!(session.validate().is_ok());

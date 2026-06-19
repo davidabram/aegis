@@ -5,6 +5,15 @@ use serde::{Deserialize, Serialize};
 use crate::session::storage::{NetworkOverride, StorageArea};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CookieSameSite {
+    Unspecified,
+    None,
+    Lax,
+    Strict,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cookie {
     pub name: String,
     pub value: String,
@@ -17,6 +26,8 @@ pub struct Cookie {
     pub secure: bool,
     #[serde(default)]
     pub http_only: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub same_site: Option<CookieSameSite>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
