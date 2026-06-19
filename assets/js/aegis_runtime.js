@@ -1387,10 +1387,147 @@
     };
   }
 
+  function closestForm(el) {
+    if (!el) {
+      return null;
+    }
+    if (el.form instanceof HTMLFormElement) {
+      return el.form;
+    }
+    return typeof el.closest === "function" ? el.closest("form") : null;
+  }
+
+  function invalidControlDiagnostics(form) {
+    if (!(form instanceof HTMLFormElement)) {
+      return [];
+    }
+    return Array.from(form.elements || [])
+      .filter((control) => control && typeof control.checkValidity === "function" && !control.checkValidity())
+      .slice(0, 8)
+      .map((control) => ({
+        tag: control.tagName ? control.tagName.toLowerCase() : null,
+        type: typeof control.getAttribute === "function" ? (control.getAttribute("type") || "").toLowerCase() || null : null,
+        name: typeof control.getAttribute === "function" ? control.getAttribute("name") || null : null,
+        id: typeof control.getAttribute === "function" ? control.getAttribute("id") || null : null,
+        label: typeof control.getAttribute === "function" ? control.getAttribute("aria-label") || null : null,
+        validation_message: control.validationMessage || null
+      }));
+  }
+
+  function formDiagnostics(form) {
+    if (!(form instanceof HTMLFormElement)) {
+      return null;
+    }
+    return {
+      present: true,
+      action: form.action || null,
+      method: (form.method || "get").toLowerCase(),
+      no_validate: !!form.noValidate,
+      check_validity: typeof form.checkValidity === "function" ? form.checkValidity() : null,
+      invalid_controls: invalidControlDiagnostics(form)
+    };
+  }
+
+  function detectAuthDiagnostics() {
+    const body = document.body;
+    const visibleText = normalizeText(body ? (body.innerText || "") : "");
+    const rawText = normalizeText(body ? (body.textContent || "") : "");
+    const signals = [];
+    const notes = [];
+    const pushSignal = (kind, message) => {
+      if (!signals.some((signal) => signal.kind === kind)) {
+        signals.push({ kind, message });
+      }
+      if (message && !notes.includes(message)) {
+        notes.push(message);
+      }
+    };
+
+    if (visibleText.includes("incorrect password") || visibleText.includes("invalid password")) {
+      pushSignal("credentials_rejected", "Incorrect password");
+    }
+    if (rawText.includes("captcha couldn't load") || rawText.includes("captcha could not load")) {
+      pushSignal("captcha_blocked", "Captcha couldn't load. Refresh the page and try again.");
+    } else if (rawText.includes("hcaptcha") || rawText.includes("recaptcha")) {
+      pushSignal("captcha_present", "Captcha elements detected in page state.");
+    }
+    if (visibleText.includes("redirected you too many times") || visibleText.includes("too many redirects")) {
+      pushSignal("redirect_loop", "The page reported too many redirects.");
+    }
+    if (visibleText.includes("upstream connect error") || visibleText.includes("connection termination")) {
+      pushSignal("upstream_failure", "The page reported an upstream connection termination.");
+    }
+
+    return {
+      signals,
+      notes
+    };
+  }
+
+  function isSubmitIntentElement(el) {
+    if (!el) {
+      return false;
+    }
+    if (el instanceof HTMLButtonElement) {
+      return (el.getAttribute("type") || "submit").toLowerCase() === "submit";
+    }
+    if (el instanceof HTMLInputElement) {
+      return ["submit", "image"].includes((el.getAttribute("type") || "").toLowerCase());
+    }
+    return false;
+  }
+
+  function trackFormSubmission(form, submitter, performAction) {
+    const beforeForm = formDiagnostics(form);
+    const submitEvent = {
+      fired: false,
+      default_prevented: false,
+      submitter_tag: submitter && submitter.tagName ? submitter.tagName.toLowerCase() : null,
+      submitter_type: submitter && typeof submitter.getAttribute === "function"
+        ? (submitter.getAttribute("type") || "").toLowerCase() || null
+        : null
+    };
+    if (!(form instanceof HTMLFormElement)) {
+      performAction();
+      return {
+        form_present: false,
+        form_before: beforeForm,
+        form_after: null,
+        submit_event: submitEvent
+      };
+    }
+
+    const submitListener = (event) => {
+      submitEvent.fired = true;
+      submitEvent.default_prevented = !!event.defaultPrevented;
+      if (event.submitter && event.submitter.tagName) {
+        submitEvent.submitter_tag = event.submitter.tagName.toLowerCase();
+        submitEvent.submitter_type = typeof event.submitter.getAttribute === "function"
+          ? (event.submitter.getAttribute("type") || "").toLowerCase() || null
+          : null;
+      }
+    };
+
+    form.addEventListener("submit", submitListener, true);
+    try {
+      performAction();
+    } finally {
+      form.removeEventListener("submit", submitListener, true);
+    }
+
+    return {
+      form_present: true,
+      form_before: beforeForm,
+      form_after: formDiagnostics(form),
+      submit_event: submitEvent
+    };
+  }
+
   function click(target) {
     const before = currentPageState();
     const resolved = resolveTarget(target, "click");
     const el = resolveActionTarget(resolved.node, "click");
+    const form = closestForm(el);
     const rect = el.getBoundingClientRect();
     const point = centerPoint(rect);
     const event_debug = [];
@@ -1407,19 +1544,27 @@
     const type = el instanceof HTMLInputElement || el instanceof HTMLButtonElement
       ? (el.getAttribute("type") || "").toLowerCase()
       : "";
-    if (el instanceof HTMLLabelElement && typeof el.click === "function") {
-      el.click();
-    } else if ((el instanceof HTMLButtonElement || el instanceof HTMLInputElement) &&
-        (type === "submit" || type === "image") &&
-        el.form &&
-        typeof el.form.requestSubmit === "function") {
-      el.form.requestSubmit(el);
-    } else if (typeof el.click === "function") {
-      el.click();
-    } else {
-      dispatchMouseLikeEvent(el, "click");
-    }
+    let default_action = "dispatch_click";
+    const submit_tracking = trackFormSubmission(form, el, () => {
+      if (el instanceof HTMLLabelElement && typeof el.click === "function") {
+        default_action = "label_click";
+        el.click();
+      } else if ((el instanceof HTMLButtonElement || el instanceof HTMLInputElement) &&
+          (type === "submit" || type === "image") &&
+          el.form &&
+          typeof el.form.requestSubmit === "function") {
+        default_action = "request_submit";
+        el.form.requestSubmit(el);
+      } else if (typeof el.click === "function") {
+        default_action = "native_click";
+        el.click();
+      } else {
+        default_action = "dispatched_mouse_click";
+        dispatchMouseLikeEvent(el, "click");
+      }
+    });
     const after = currentPageState();
+    const auth_diagnostics = detectAuthDiagnostics();
     queue.push({
       event: {
         type: "log",
@@ -1431,7 +1576,9 @@
           before_url: before.url,
           after_url: after.url,
           navigation_changed: before.url !== after.url,
-          title_changed: before.title !== after.title
+          title_changed: before.title !== after.title,
+          submit_tracking,
+          auth_diagnostics
         }
       }
     });
@@ -1439,6 +1586,10 @@
       clicked: resolved.targetId,
       geometry_after: elementGeometry(el),
       event_debug,
+      submit_intent: isSubmitIntentElement(el),
+      default_action,
+      submit_tracking,
+      auth_diagnostics,
       ...baseActionResult(resolved, el, before, after)
     };
   }
@@ -1761,27 +1912,43 @@
       metaKey: !!(options && options.metaKey),
       shiftKey: !!(options && options.shiftKey)
     };
+    const form = closestForm(el);
 
     const event_debug = [];
     const keydown = dispatchKeyEvent(el, "keydown", eventOptions);
     event_debug.push(keydown);
     const keypress = dispatchKeyEvent(el, "keypress", eventOptions);
     event_debug.push(keypress);
-    const default_action = keydown.accepted && keypress.accepted
-      ? pressKeyDefaultAction(el, key, eventOptions)
-      : {
-          triggered_click: false,
-          triggered_submit: false,
-          media_toggled: false,
-          modifiers: {
-            alt: !!eventOptions.altKey,
-            ctrl: !!eventOptions.ctrlKey,
-            meta: !!eventOptions.metaKey,
-            shift: !!eventOptions.shiftKey
-          }
-        };
+    let default_action = {
+      triggered_click: false,
+      triggered_submit: false,
+      media_toggled: false,
+      modifiers: {
+        alt: !!eventOptions.altKey,
+        ctrl: !!eventOptions.ctrlKey,
+        meta: !!eventOptions.metaKey,
+        shift: !!eventOptions.shiftKey
+      }
+    };
+    let submit_tracking = {
+      form_present: false,
+      form_before: formDiagnostics(form),
+      form_after: null,
+      submit_event: {
+        fired: false,
+        default_prevented: false,
+        submitter_tag: null,
+        submitter_type: null
+      }
+    };
+    if (keydown.accepted && keypress.accepted) {
+      submit_tracking = trackFormSubmission(form, el, () => {
+        default_action = pressKeyDefaultAction(el, key, eventOptions);
+      });
+    }
     event_debug.push(dispatchKeyEvent(el, "keyup", eventOptions));
     const after = currentPageState();
+    const auth_diagnostics = detectAuthDiagnostics();
     queue.push({
       event: {
         type: "log",
@@ -1793,7 +1960,9 @@
           node_id: resolved ? resolved.targetId : assignId(el),
           navigation_changed: before.url !== after.url,
           title_changed: before.title !== after.title,
-          default_action
+          default_action,
+          submit_tracking,
+          auth_diagnostics
         }
       }
     });
@@ -1807,6 +1976,9 @@
       matcher_debug: resolved ? resolved.debug : null,
       event_debug,
       default_action,
+      submit_intent: key === "Enter" && !!form,
+      submit_tracking,
+      auth_diagnostics,
       page_before: before,
       page_after: after,
       navigation_changed: before.url !== after.url,

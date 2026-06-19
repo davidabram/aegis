@@ -1,7 +1,7 @@
 use crate::browser::BrowserConfig;
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -227,6 +227,9 @@ impl AegisRuntime {
     }
 
     pub fn execute(&mut self, commands: &[Command]) -> Result<ExecutionReport, AegisError> {
+        if commands_need_interaction_diagnostics(commands) {
+            self.network_event_capture_enabled = true;
+        }
         self.ensure_runtime_bootstrapped(self.commands_require_dom_snapshot(commands))?;
         let batch_id = self.scheduler.next_batch_id();
         let request = BatchRequest {
@@ -607,9 +610,16 @@ impl AegisRuntime {
             let response = self
                 .bridge
                 .send_batch(&request, self.network_event_capture_enabled)?;
-            results.extend(response.results.clone());
+            let response_results = response.results.clone();
             final_snapshot = response.snapshot.clone().or(final_snapshot);
             let emitted_events = self.apply_response(response)?;
+            let annotated_results = response_results
+                .into_iter()
+                .map(|result| {
+                    self.annotate_command_result(command, result, &all_events, &emitted_events)
+                })
+                .collect::<Vec<_>>();
+            results.extend(annotated_results);
             all_events.extend(emitted_events);
             let _ = self.refresh_live_state(true);
         }
@@ -1165,6 +1175,192 @@ impl AegisRuntime {
         self.last_successful_bridge_roundtrip_at_ms = Some(now);
         self.last_successful_command_at_ms = Some(now);
     }
+
+    fn annotate_command_result(
+        &self,
+        command: &Command,
+        mut result: CommandResult,
+        prior_events: &[SequencedEvent],
+        emitted_events: &[SequencedEvent],
+    ) -> CommandResult {
+        if !result.ok {
+            return result;
+        }
+        let Some(Value::Object(value)) = result.value.take() else {
+            return result;
+        };
+        let enriched = match command {
+            Command::Click { .. } | Command::PressKey { .. } => {
+                annotate_interaction_value(value, prior_events, emitted_events)
+            }
+            _ => Value::Object(value),
+        };
+        result.value = Some(enriched);
+        result
+    }
+}
+
+fn annotate_interaction_value(
+    mut value: Map<String, Value>,
+    prior_events: &[SequencedEvent],
+    emitted_events: &[SequencedEvent],
+) -> Value {
+    let submit_intent = value
+        .get("submit_intent")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let navigation_changed = value
+        .get("navigation_changed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let title_changed = value
+        .get("title_changed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let submit_event_fired = value
+        .get("submit_tracking")
+        .and_then(|tracking| tracking.get("submit_event"))
+        .and_then(|event| event.get("fired"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let submit_default_prevented = value
+        .get("submit_tracking")
+        .and_then(|tracking| tracking.get("submit_event"))
+        .and_then(|event| event.get("default_prevented"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let invalid_controls = value
+        .get("submit_tracking")
+        .and_then(|tracking| tracking.get("form_after"))
+        .and_then(|form| form.get("invalid_controls"))
+        .and_then(Value::as_array)
+        .map(|controls| controls.len())
+        .unwrap_or(0);
+    let auth_signals = value
+        .get("auth_diagnostics")
+        .and_then(|auth| auth.get("signals"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let signal_kinds = auth_signals
+        .iter()
+        .filter_map(|signal| signal.get("kind").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+
+    let network_events = emitted_events
+        .iter()
+        .filter_map(|entry| match &entry.event {
+            RuntimeEvent::Network {
+                url,
+                phase,
+                status,
+                error_text,
+                ..
+            } => Some(json!({
+                "url": url,
+                "phase": phase,
+                "status": status,
+                "error_text": error_text,
+            })),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let websocket_events = emitted_events
+        .iter()
+        .filter(|entry| matches!(entry.event, RuntimeEvent::WebSocketFrame { .. }))
+        .count();
+    let network_requests = emitted_events
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry.event,
+                RuntimeEvent::Network {
+                    phase: Some(crate::events::stream::NetworkResourcePhase::Request),
+                    ..
+                }
+            )
+        })
+        .count();
+    let network_responses = emitted_events
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry.event,
+                RuntimeEvent::Network {
+                    phase: Some(crate::events::stream::NetworkResourcePhase::Response)
+                        | Some(crate::events::stream::NetworkResourcePhase::Finished),
+                    ..
+                }
+            )
+        })
+        .count();
+    let network_failures = emitted_events
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry.event,
+                RuntimeEvent::Network {
+                    phase: Some(crate::events::stream::NetworkResourcePhase::Failed),
+                    ..
+                }
+            )
+        })
+        .count();
+
+    let outcome = if signal_kinds.contains(&"redirect_loop") {
+        "redirect_loop"
+    } else if signal_kinds.contains(&"upstream_failure") {
+        "upstream_failure"
+    } else if signal_kinds.contains(&"captcha_blocked") {
+        "captcha_blocked"
+    } else if signal_kinds.contains(&"credentials_rejected") {
+        "credentials_rejected"
+    } else if submit_default_prevented {
+        "submit_prevented"
+    } else if invalid_controls > 0 {
+        "validation_blocked"
+    } else if navigation_changed || title_changed {
+        "navigation_observed"
+    } else if network_failures > 0 {
+        "network_request_failed"
+    } else if network_requests > 0 || network_responses > 0 {
+        "request_attempted_same_page"
+    } else if submit_intent && !submit_event_fired {
+        "submit_not_observed"
+    } else if submit_intent {
+        "submit_dispatched_without_progress"
+    } else {
+        "interaction_only"
+    };
+
+    value.insert(
+        "interaction_diagnostics".into(),
+        json!({
+            "outcome": outcome,
+            "submit_intent": submit_intent,
+            "submit_event_fired": submit_event_fired,
+            "submit_default_prevented": submit_default_prevented,
+            "invalid_control_count": invalid_controls,
+            "network_request_count": network_requests,
+            "network_response_count": network_responses,
+            "network_failure_count": network_failures,
+            "network_events": network_events,
+            "websocket_frame_count": websocket_events,
+            "auth_signal_kinds": signal_kinds,
+            "emitted_event_count": emitted_events.len(),
+            "prior_event_sequence": prior_events.last().map(|event| event.sequence),
+        }),
+    );
+    Value::Object(value)
+}
+
+fn commands_need_interaction_diagnostics(commands: &[Command]) -> bool {
+    commands.iter().any(|command| {
+        matches!(
+            command,
+            Command::Click { .. } | Command::PressKey { .. } | Command::SetValue { .. }
+        )
+    })
 }
 
 fn includes_normalized(haystack: &str, needle: &str) -> bool {

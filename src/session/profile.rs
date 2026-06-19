@@ -7,7 +7,7 @@ use crate::state::{
     AegisStatePaths, replace_corrupt_state_file, with_state_file_lock, write_state_file,
 };
 
-const PROFILE_VERSION: u32 = 2;
+const PROFILE_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StoredSessionProfile {
@@ -88,17 +88,27 @@ impl SessionProfileStore {
                 )?;
                 return Ok(Some(SessionState::default()));
             }
-            Ok(Some(stored.session))
+            let normalized = stored.session.normalized();
+            if normalized != stored.session {
+                let payload = serde_json::to_vec_pretty(&StoredSessionProfile {
+                    version: PROFILE_VERSION,
+                    session: normalized.clone(),
+                })
+                .map_err(|error| format!("failed to encode normalized session profile: {error}"))?;
+                write_state_file(&self.info.path, &payload)?;
+            }
+            Ok(Some(normalized))
         })
     }
 
     pub fn save(&self, session: &SessionState) -> Result<PathBuf, String> {
-        session
+        let normalized = session.normalized();
+        normalized
             .validate()
             .map_err(|error| format!("invalid session profile data: {error}"))?;
         let payload = serde_json::to_vec_pretty(&StoredSessionProfile {
             version: PROFILE_VERSION,
-            session: session.clone(),
+            session: normalized,
         })
         .map_err(|error| format!("failed to encode session profile: {error}"))?;
         with_state_file_lock(&self.info.path, || {
@@ -192,8 +202,8 @@ mod tests {
         unsafe {
             std::env::set_var("AEGIS_HOME", temp.path());
         }
-        let store =
-            SessionProfileStore::new("brave-import").expect("session profile store should initialize");
+        let store = SessionProfileStore::new("brave-import")
+            .expect("session profile store should initialize");
         fs::write(
             store.info().path.clone(),
             br#"{"version":1,"session":{"cookies":[{"name":"shopify","value":"bad","domain":"accounts.shopify.com"}],"local_storage":{},"session_storage":{},"network_overrides":[]}}"#,
@@ -204,6 +214,37 @@ mod tests {
             .expect("legacy session should be reset")
             .expect("default session should be returned");
         assert!(session.cookies.is_empty());
+        unsafe {
+            std::env::remove_var("AEGIS_HOME");
+        }
+    }
+
+    #[test]
+    fn load_rewrites_noncanonical_cookie_profiles() {
+        let _guard = aegis_test_env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let temp = tempfile::tempdir().expect("temporary state dir should be created");
+        unsafe {
+            std::env::set_var("AEGIS_HOME", temp.path());
+        }
+        let store = SessionProfileStore::new("shopify-clean")
+            .expect("session profile store should initialize");
+        fs::write(
+            store.info().path.clone(),
+            br#"{"version":3,"session":{"cookies":[{"name":"sid","value":"first","domain":".accounts.shopify.com","path":"","secure":true,"http_only":true},{"name":"sid","value":"latest","domain":"accounts.shopify.com","path":"/","secure":true,"http_only":true}],"local_storage":{},"session_storage":{},"network_overrides":[]}}"#,
+        )
+        .expect("session fixture should be written");
+        let session = store
+            .load()
+            .expect("session profile should load")
+            .expect("normalized session should be returned");
+        assert_eq!(session.cookies.len(), 1);
+        assert_eq!(session.cookies[0].value, "latest");
+        let rewritten = fs::read_to_string(store.info().path.clone())
+            .expect("normalized session profile should be readable");
+        assert!(rewritten.contains("\"domain\": \"accounts.shopify.com\""));
+        assert!(rewritten.contains("\"path\": \"/\""));
         unsafe {
             std::env::remove_var("AEGIS_HOME");
         }

@@ -375,7 +375,7 @@ fn default_credentials_settings_payload() -> serde_json::Value {
 
 fn default_session_payload() -> serde_json::Value {
     json!({
-        "version": 2,
+        "version": 3,
         "session": {
             "cookies": [],
             "local_storage": {},
@@ -541,6 +541,14 @@ struct StateFileLock {
 
 impl StateFileLock {
     fn acquire(path: &Path) -> Result<Self, String> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                format!(
+                    "failed to create state lock directory {}: {error}",
+                    parent.display()
+                )
+            })?;
+        }
         let lock_path = lock_file_path(path);
         let file = OpenOptions::new()
             .create(true)
@@ -776,5 +784,27 @@ mod tests {
         unsafe {
             std::env::remove_var("AEGIS_HOME");
         }
+    }
+
+    #[test]
+    fn state_lock_bootstraps_missing_profile_secret_directory() {
+        let _guard = aegis_test_env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let temp = tempfile::tempdir().expect("temporary state dir should be created");
+        let missing_path = temp
+            .path()
+            .join("secrets")
+            .join("profiles")
+            .join("shopify-clean")
+            .join("secrets.json");
+        super::with_state_file_lock(&missing_path, || Ok::<_, String>(()))
+            .expect("lock acquisition should create missing parent directories");
+        assert!(
+            missing_path
+                .parent()
+                .expect("secret file has parent")
+                .exists()
+        );
     }
 }
