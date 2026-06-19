@@ -5,6 +5,7 @@ use std::io::Write;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -29,7 +30,7 @@ use crate::config_store::{
     AegisConfigStore, AegisSecretStore, CredentialInput, CredentialsSettings,
 };
 use crate::dom::node::{DomNode, DomSnapshot};
-use crate::events::stream::{EventReadWindow, SequencedEvent};
+use crate::events::stream::{EventReadWindow, EventType, RuntimeEvent, SequencedEvent};
 use crate::host::{LoadedAegisClient, RuntimeCancelHandle};
 use crate::runtime::executor::{ExecutionReport, PageBootstrapDiagnostics, RuntimeStatus};
 use crate::session::cookies::SessionState;
@@ -45,6 +46,7 @@ const MIN_EVENT_STREAM_POLL_INTERVAL_MS: u64 = 25;
 const MAX_EVENT_STREAM_POLL_INTERVAL_MS: u64 = 1_000;
 static TELEMETRY_START: OnceLock<Instant> = OnceLock::new();
 static PROCESS_STARTED_AT_MS: OnceLock<u64> = OnceLock::new();
+static API_ERROR_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone)]
 pub struct ApiState {
@@ -152,14 +154,101 @@ pub struct TraceBody {
 pub struct EventQuery {
     #[serde(default)]
     pub since: u64,
+    #[serde(default, rename = "type")]
+    pub event_types: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct EventStreamQuery {
     #[serde(default)]
     pub since: u64,
+    #[serde(default, rename = "type")]
+    pub event_types: Vec<String>,
     #[serde(default)]
     pub poll_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+struct EventFilter {
+    matchers: Vec<EventMatcher>,
+}
+
+#[derive(Debug, Clone)]
+enum EventMatcher {
+    Category(EventType),
+    Exact(String),
+}
+
+impl EventFilter {
+    fn from_query(raw_filters: &[String]) -> Result<Option<Self>, ApiError> {
+        let mut matchers = Vec::new();
+        for raw in raw_filters {
+            for token in raw.split(',') {
+                let normalized = normalize_text(token);
+                if normalized.is_empty() {
+                    continue;
+                }
+                let matcher = match normalized.as_str() {
+                    "dom" | "dom_mutation" => EventMatcher::Category(EventType::DomMutation),
+                    "navigation" | "navigate" => EventMatcher::Category(EventType::Navigation),
+                    "network" => EventMatcher::Category(EventType::Network),
+                    "download" | "downloads" => EventMatcher::Category(EventType::Download),
+                    "websocket" | "ws" => EventMatcher::Category(EventType::WebSocket),
+                    "log" | "logs" => EventMatcher::Category(EventType::Log),
+                    "websocket_open"
+                    | "websocket_handshake"
+                    | "websocket_frame"
+                    | "websocket_close"
+                    | "unknown" => EventMatcher::Exact(normalized),
+                    other => {
+                        return Err(ApiError::bad_request(
+                            "invalid_event_filter",
+                            format!(
+                                "unsupported event filter `{other}`; use dom_mutation, navigation, network, download, websocket, log, websocket_open, websocket_handshake, websocket_frame, websocket_close, or unknown"
+                            ),
+                            Some("filter the request with documented event types from /manifest or omit the type query entirely".into()),
+                        ));
+                    }
+                };
+                matchers.push(matcher);
+            }
+        }
+        if matchers.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(Self { matchers }))
+        }
+    }
+
+    fn matches(&self, event: &RuntimeEvent) -> bool {
+        self.matchers.iter().any(|matcher| match matcher {
+            EventMatcher::Category(category) => event.event_type() == *category,
+            EventMatcher::Exact(name) => {
+                if name == "unknown" {
+                    matches!(event, RuntimeEvent::Unknown { .. })
+                } else {
+                    event.event_name() == name
+                }
+            }
+        })
+    }
+}
+
+fn filter_event_window(window: EventReadWindow, filter: Option<&EventFilter>) -> EventReadWindow {
+    let Some(filter) = filter else {
+        return window;
+    };
+    EventReadWindow {
+        requested_since: window.requested_since,
+        oldest_available_sequence: window.oldest_available_sequence,
+        latest_sequence: window.latest_sequence,
+        gap_detected: window.gap_detected,
+        events: window
+            .events
+            .into_iter()
+            .filter(|entry| filter.matches(&entry.event))
+            .collect(),
+    }
 }
 
 enum ApiCommand {
@@ -2290,12 +2379,14 @@ async fn events(
     Query(query): Query<EventQuery>,
 ) -> Result<Json<EventReadWindow>, ApiError> {
     let state = require_default_context_state(&root)?;
+    let filter = EventFilter::from_query(&query.event_types)?;
     let (reply_tx, reply_rx) = oneshot::channel();
     state
         .tx
         .send(ApiCommand::Events(query.since, reply_tx))
         .map_err(channel_error)?;
-    Ok(Json(await_command("events", &state, reply_rx).await??))
+    let window = await_command("events", &state, reply_rx).await??;
+    Ok(Json(filter_event_window(window, filter.as_ref())))
 }
 
 async fn downloads(
@@ -2310,6 +2401,7 @@ async fn events_live(
     Query(query): Query<EventStreamQuery>,
 ) -> Result<Sse<impl futures_core::Stream<Item = Result<Event, Infallible>>>, ApiError> {
     let state = require_default_context_state(&root)?;
+    let filter = EventFilter::from_query(&query.event_types)?;
     let poll_ms = query
         .poll_ms
         .unwrap_or(DEFAULT_EVENT_STREAM_POLL_INTERVAL.as_millis() as u64)
@@ -2351,8 +2443,9 @@ async fn events_live(
             };
 
             since = window.latest_sequence;
-            if !window.events.is_empty() || window.gap_detected {
-                yield Ok(Event::default().event("runtime_events").json_data(&window).unwrap_or_else(|_| {
+            let filtered = filter_event_window(window, filter.as_ref());
+            if !filtered.events.is_empty() || filtered.gap_detected {
+                yield Ok(Event::default().event("runtime_events").json_data(&filtered).unwrap_or_else(|_| {
                     Event::default().event("runtime_events").data("serialization_error")
                 }));
             }
@@ -2554,12 +2647,14 @@ async fn context_events(
     Query(query): Query<EventQuery>,
 ) -> Result<Json<EventReadWindow>, ApiError> {
     let state = require_context_state(&root, &context_id)?;
+    let filter = EventFilter::from_query(&query.event_types)?;
     let (reply_tx, reply_rx) = oneshot::channel();
     state
         .tx
         .send(ApiCommand::Events(query.since, reply_tx))
         .map_err(channel_error)?;
-    Ok(Json(await_command("events", &state, reply_rx).await??))
+    let window = await_command("events", &state, reply_rx).await??;
+    Ok(Json(filter_event_window(window, filter.as_ref())))
 }
 
 async fn context_downloads(
@@ -2576,6 +2671,7 @@ async fn context_events_live(
     Query(query): Query<EventStreamQuery>,
 ) -> Result<Sse<impl futures_core::Stream<Item = Result<Event, Infallible>>>, ApiError> {
     let state = require_context_state(&root, &context_id)?;
+    let filter = EventFilter::from_query(&query.event_types)?;
     let poll_ms = query
         .poll_ms
         .unwrap_or(DEFAULT_EVENT_STREAM_POLL_INTERVAL.as_millis() as u64)
@@ -2617,8 +2713,9 @@ async fn context_events_live(
             };
 
             since = window.latest_sequence;
-            if !window.events.is_empty() || window.gap_detected {
-                yield Ok(Event::default().event("runtime_events").json_data(&window).unwrap_or_else(|_| {
+            let filtered = filter_event_window(window, filter.as_ref());
+            if !filtered.events.is_empty() || filtered.gap_detected {
+                yield Ok(Event::default().event("runtime_events").json_data(&filtered).unwrap_or_else(|_| {
                     Event::default().event("runtime_events").data("serialization_error")
                 }));
             }
@@ -2767,35 +2864,39 @@ struct ApiError {
 }
 
 impl ApiError {
+    fn bad_request(code: &str, message: String, suggested_action: Option<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            body: ApiErrorBody::new(code, message)
+                .with_retriable(false)
+                .with_suggested_action(suggested_action),
+        }
+    }
+
     fn not_found(message: String) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
-            body: ApiErrorBody {
-                error: message,
-                code: "not_found".into(),
-                operation: None,
-                stage: None,
-                elapsed_ms: None,
-                timed_out: false,
-                restart_recommended: false,
-            },
+            body: ApiErrorBody::new("not_found", message).with_retriable(false),
         }
     }
 
     fn timeout(operation: &str) -> Self {
         Self {
             status: StatusCode::GATEWAY_TIMEOUT,
-            body: ApiErrorBody {
-                error: format!(
+            body: ApiErrorBody::new(
+                "operation_cancel_requested",
+                format!(
                     "operation `{operation}` exceeded the server timeout and a runtime cancellation request was sent"
                 ),
-                code: "operation_cancel_requested".into(),
-                operation: Some(operation.to_string()),
-                stage: Some("awaiting_control_plane_reply".into()),
-                elapsed_ms: Some(COMMAND_TIMEOUT.as_millis() as u64),
-                timed_out: true,
-                restart_recommended: false,
-            },
+            )
+            .with_operation(operation)
+            .with_stage("awaiting_control_plane_reply")
+            .with_elapsed_ms(COMMAND_TIMEOUT.as_millis() as u64)
+            .with_timed_out(true)
+            .with_retriable(true)
+            .with_suggested_action(Some(
+                "retry the request after the cancellation settles; if repeated timeouts occur, inspect /doctor or restart the runtime".into(),
+            )),
         }
     }
 
@@ -2807,22 +2908,28 @@ impl ApiError {
                     && !diagnostics.inspectable_dom_ready));
         Self {
             status: StatusCode::SERVICE_UNAVAILABLE,
-            body: ApiErrorBody {
-                error: if not_inspectable {
+            body: ApiErrorBody::new(
+                "not_ready",
+                if not_inspectable {
                     if diagnostics.synthetic_shell_active {
-                        "runtime is attached, but is still on the synthetic bootstrap shell".into()
+                        String::from(
+                            "runtime is attached, but is still on the synthetic bootstrap shell",
+                        )
                     } else {
-                        "runtime is attached, but the page is not yet inspectable".into()
+                        String::from("runtime is attached, but the page is not yet inspectable")
                     }
                 } else {
-                    "runtime is not command-ready".into()
+                    String::from("runtime is not command-ready")
                 },
-                code: "not_ready".into(),
-                operation: diagnostics
+            )
+            .with_operation_option(
+                diagnostics
                     .active_operation
                     .as_ref()
                     .map(|op| op.name.clone()),
-                stage: diagnostics
+            )
+            .with_stage_option(
+                diagnostics
                     .active_operation
                     .as_ref()
                     .map(|op| op.stage.clone())
@@ -2837,19 +2944,29 @@ impl ApiError {
                             None
                         }
                     }),
-                elapsed_ms: diagnostics
+            )
+            .with_elapsed_ms_option(
+                diagnostics
                     .active_operation
                     .as_ref()
                     .map(|op| op.elapsed_ms),
-                timed_out: diagnostics
+            )
+            .with_timed_out(
+                diagnostics
                     .active_operation
                     .as_ref()
                     .is_some_and(|op| op.timed_out),
-                restart_recommended: diagnostics
+            )
+            .with_restart_recommended(
+                diagnostics
                     .last_failure
                     .as_ref()
                     .is_some_and(|failure| failure.restart_recommended),
-            },
+            )
+            .with_retriable(true)
+            .with_suggested_action(Some(
+                "wait for /readyz to succeed, or inspect /doctor and /runtime if readiness does not recover".into(),
+            )),
         }
     }
 }
@@ -2864,15 +2981,20 @@ impl From<AegisError> for ApiError {
                 } else {
                     StatusCode::BAD_GATEWAY
                 },
-                body: ApiErrorBody {
-                    error: native.message,
-                    code: "native_operation_error".into(),
-                    operation: Some(native.operation),
-                    stage: Some(native.stage),
-                    elapsed_ms: Some(native.elapsed_ms),
-                    timed_out: native.timed_out,
-                    restart_recommended: native.restart_recommended,
-                },
+                body: ApiErrorBody::new("native_operation_error", native.message)
+                    .with_operation(native.operation)
+                    .with_stage(native.stage)
+                    .with_elapsed_ms(native.elapsed_ms)
+                    .with_timed_out(native.timed_out)
+                    .with_restart_recommended(native.restart_recommended)
+                    .with_retriable(true)
+                    .with_suggested_action(Some(if native.restart_recommended {
+                        "restart the runtime before retrying this request".into()
+                    } else if native.timed_out {
+                        "retry the request once the runtime finishes cancelling the timed out operation".into()
+                    } else {
+                        "inspect /doctor for the last runtime failure details, then retry if the browser state is still healthy".into()
+                    })),
             };
         }
 
@@ -2885,17 +3007,41 @@ impl From<AegisError> for ApiError {
             | AegisError::Protocol(_)
             | AegisError::Bridge(_) => StatusCode::BAD_GATEWAY,
         };
+        let (retriable, suggested_action) = match value {
+            AegisError::InvalidSession(_) => (
+                false,
+                Some("fix the session payload and retry the request".into()),
+            ),
+            AegisError::Serialize(_) | AegisError::Deserialize(_) | AegisError::Protocol(_) => (
+                false,
+                Some(
+                    "check the request and response schema against /manifest before retrying"
+                        .into(),
+                ),
+            ),
+            AegisError::Io(_) => (
+                true,
+                Some("verify local filesystem access, then retry the request".into()),
+            ),
+            AegisError::Utf8(_) => (
+                false,
+                Some(
+                    "inspect the runtime payload for invalid text encoding before retrying".into(),
+                ),
+            ),
+            AegisError::Bridge(_) => (
+                true,
+                Some(
+                    "inspect /doctor for bridge health and retry once the runtime is healthy"
+                        .into(),
+                ),
+            ),
+        };
         Self {
             status,
-            body: ApiErrorBody {
-                error: message,
-                code: "aegis_error".into(),
-                operation: None,
-                stage: None,
-                elapsed_ms: None,
-                timed_out: false,
-                restart_recommended: false,
-            },
+            body: ApiErrorBody::new("aegis_error", message)
+                .with_retriable(retriable)
+                .with_suggested_action(suggested_action),
         }
     }
 }
@@ -2908,6 +3054,7 @@ impl IntoResponse for ApiError {
 
 #[derive(Debug, Serialize)]
 pub struct ApiErrorBody {
+    pub request_id: String,
     pub error: String,
     pub code: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2918,6 +3065,76 @@ pub struct ApiErrorBody {
     pub elapsed_ms: Option<u64>,
     pub timed_out: bool,
     pub restart_recommended: bool,
+    pub retriable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suggested_action: Option<String>,
+}
+
+impl ApiErrorBody {
+    fn new(code: impl Into<String>, error: impl Into<String>) -> Self {
+        Self {
+            request_id: next_api_request_id(),
+            error: error.into(),
+            code: code.into(),
+            operation: None,
+            stage: None,
+            elapsed_ms: None,
+            timed_out: false,
+            restart_recommended: false,
+            retriable: false,
+            suggested_action: None,
+        }
+    }
+
+    fn with_operation(mut self, operation: impl Into<String>) -> Self {
+        self.operation = Some(operation.into());
+        self
+    }
+
+    fn with_operation_option(mut self, operation: Option<String>) -> Self {
+        self.operation = operation;
+        self
+    }
+
+    fn with_stage(mut self, stage: impl Into<String>) -> Self {
+        self.stage = Some(stage.into());
+        self
+    }
+
+    fn with_stage_option(mut self, stage: Option<String>) -> Self {
+        self.stage = stage;
+        self
+    }
+
+    fn with_elapsed_ms(mut self, elapsed_ms: u64) -> Self {
+        self.elapsed_ms = Some(elapsed_ms);
+        self
+    }
+
+    fn with_elapsed_ms_option(mut self, elapsed_ms: Option<u64>) -> Self {
+        self.elapsed_ms = elapsed_ms;
+        self
+    }
+
+    fn with_timed_out(mut self, timed_out: bool) -> Self {
+        self.timed_out = timed_out;
+        self
+    }
+
+    fn with_restart_recommended(mut self, restart_recommended: bool) -> Self {
+        self.restart_recommended = restart_recommended;
+        self
+    }
+
+    fn with_retriable(mut self, retriable: bool) -> Self {
+        self.retriable = retriable;
+        self
+    }
+
+    fn with_suggested_action(mut self, suggested_action: Option<String>) -> Self {
+        self.suggested_action = suggested_action;
+        self
+    }
 }
 
 async fn await_command<T>(
@@ -3308,6 +3525,11 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
+fn next_api_request_id() -> String {
+    let ordinal = API_ERROR_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("aegis-{}-{ordinal}", now_ms())
+}
+
 fn process_started_at_ms() -> u64 {
     *PROCESS_STARTED_AT_MS.get_or_init(now_ms)
 }
@@ -3327,6 +3549,8 @@ mod tests {
     use super::*;
     use crate::commands::command::{CommandMatcher, CommandTarget};
     use crate::dom::node::{DomNode, DomNodeSemantics, DomSnapshot};
+    use crate::events::stream::SequencedEvent;
+    use serde_json::json;
     use std::collections::HashMap;
 
     fn dummy_api_state(profile: &str) -> ApiState {
@@ -3429,6 +3653,104 @@ mod tests {
             "runtime is attached, but the page is not yet inspectable"
         );
         assert_eq!(error.body.stage.as_deref(), Some("awaiting_page_bootstrap"));
+    }
+
+    #[test]
+    fn bad_request_errors_include_correlation_and_recovery_guidance() {
+        let error = ApiError::bad_request(
+            "invalid_event_filter",
+            "unsupported event filter `bogus`".into(),
+            Some("use a documented type query".into()),
+        );
+
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error.body.code, "invalid_event_filter");
+        assert!(error.body.request_id.starts_with("aegis-"));
+        assert!(!error.body.retriable);
+        assert_eq!(
+            error.body.suggested_action.as_deref(),
+            Some("use a documented type query")
+        );
+    }
+
+    #[test]
+    fn event_filter_matches_categories_and_exact_wire_types() {
+        let filter = EventFilter::from_query(&[
+            "network".into(),
+            "websocket_frame".into(),
+            "unknown".into(),
+        ])
+        .expect("filter parses")
+        .expect("filter exists");
+        let filtered = filter_event_window(
+            EventReadWindow {
+                requested_since: 0,
+                oldest_available_sequence: Some(1),
+                latest_sequence: 4,
+                gap_detected: false,
+                events: vec![
+                    SequencedEvent {
+                        sequence: 1,
+                        timestamp_ms: 1,
+                        event: RuntimeEvent::Navigation {
+                            url: "https://example.com".into(),
+                        },
+                    },
+                    SequencedEvent {
+                        sequence: 2,
+                        timestamp_ms: 2,
+                        event: RuntimeEvent::Network {
+                            request_id: "req-1".into(),
+                            url: "https://example.com/api".into(),
+                            method: Some("GET".into()),
+                            resource_type: None,
+                            phase: None,
+                            status: Some(200),
+                            status_text: None,
+                            mime_type: None,
+                            from_cache: None,
+                            error_text: None,
+                        },
+                    },
+                    SequencedEvent {
+                        sequence: 3,
+                        timestamp_ms: 3,
+                        event: RuntimeEvent::WebSocketFrame {
+                            request_id: "ws-1".into(),
+                            url: "wss://example.com/socket".into(),
+                            direction: crate::events::stream::WebSocketFrameDirection::Received,
+                            opcode: Some(1),
+                            mask: Some(false),
+                            payload_preview: "hello".into(),
+                            payload_length: 5,
+                            truncated: false,
+                        },
+                    },
+                    SequencedEvent {
+                        sequence: 4,
+                        timestamp_ms: 4,
+                        event: RuntimeEvent::Unknown {
+                            event_type: "service_worker".into(),
+                            payload: json!({"type":"service_worker","scope":"https://example.com"}),
+                        },
+                    },
+                ],
+            },
+            Some(&filter),
+        );
+
+        assert_eq!(filtered.latest_sequence, 4);
+        assert_eq!(filtered.events.len(), 3);
+        assert_eq!(filtered.events[0].event.event_name(), "network");
+        assert_eq!(filtered.events[1].event.event_name(), "websocket_frame");
+        assert_eq!(filtered.events[2].event.event_name(), "service_worker");
+    }
+
+    #[test]
+    fn event_filter_rejects_unknown_filter_names() {
+        let error = EventFilter::from_query(&["bogus".into()]).expect_err("filter should fail");
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error.body.code, "invalid_event_filter");
     }
 
     fn password_node(id: u64) -> DomNode {

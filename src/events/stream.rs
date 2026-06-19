@@ -12,7 +12,8 @@ fn u64_from_value<E: serde::de::Error>(value: &Value) -> Result<u64, E> {
         return Ok(integer);
     }
     if let Some(float) = value.as_f64()
-        && float.is_finite() && float >= 0.0
+        && float.is_finite()
+        && float >= 0.0
     {
         return Ok(float as u64);
     }
@@ -432,6 +433,21 @@ impl RuntimeEvent {
             | RuntimeEvent::WebSocketClose { .. } => EventType::WebSocket,
             RuntimeEvent::Log { .. } => EventType::Log,
             RuntimeEvent::Unknown { .. } => EventType::Log,
+        }
+    }
+
+    pub fn event_name(&self) -> &str {
+        match self {
+            RuntimeEvent::DomMutation { .. } => "dom_mutation",
+            RuntimeEvent::Navigation { .. } => "navigation",
+            RuntimeEvent::Network { .. } => "network",
+            RuntimeEvent::Download { .. } => "download",
+            RuntimeEvent::WebSocketOpen { .. } => "websocket_open",
+            RuntimeEvent::WebSocketHandshake { .. } => "websocket_handshake",
+            RuntimeEvent::WebSocketFrame { .. } => "websocket_frame",
+            RuntimeEvent::WebSocketClose { .. } => "websocket_close",
+            RuntimeEvent::Log { .. } => "log",
+            RuntimeEvent::Unknown { event_type, .. } => event_type.as_str(),
         }
     }
 }
