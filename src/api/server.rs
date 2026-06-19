@@ -1575,6 +1575,14 @@ struct ApiRouteDoc {
     method: &'static str,
     path: &'static str,
     summary: &'static str,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    params: Vec<ApiParameterDoc>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    query: Vec<ApiParameterDoc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_body: Option<ApiRequestBodyDoc>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    responses: Vec<ApiResponseDoc>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1604,6 +1612,35 @@ struct ApiSchemaFieldDoc {
 }
 
 #[derive(Debug, Serialize)]
+struct ApiParameterDoc {
+    name: &'static str,
+    location: &'static str,
+    kind: &'static str,
+    required: bool,
+    description: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct ApiRequestBodyDoc {
+    content_type: &'static str,
+    schema: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct ApiResponseDoc {
+    status: u16,
+    description: &'static str,
+    schema: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct ApiNamedSchemaDoc {
+    name: &'static str,
+    kind: &'static str,
+    fields: Vec<ApiSchemaFieldDoc>,
+}
+
+#[derive(Debug, Serialize)]
 struct ApiCommandDoc {
     name: &'static str,
     summary: &'static str,
@@ -1621,7 +1658,10 @@ struct ApiManifest {
     routes: Vec<ApiRouteDoc>,
     capabilities: Vec<&'static str>,
     capability_status: Vec<ApiCapabilityStatusDoc>,
+    event_filters: Vec<&'static str>,
     commands: Vec<ApiCommandDoc>,
+    schemas: Vec<ApiNamedSchemaDoc>,
+    error_schema: ApiNamedSchemaDoc,
 }
 
 async fn api_manifest(State(root): State<ServeRootState>) -> Json<ApiManifest> {
@@ -1634,7 +1674,11 @@ async fn api_manifest(State(root): State<ServeRootState>) -> Json<ApiManifest> {
                 && diagnostics.browser_backend_healthy
         })
         .unwrap_or(false);
-    Json(ApiManifest {
+    Json(api_manifest_document(runtime_validated))
+}
+
+fn api_manifest_document(runtime_validated: bool) -> ApiManifest {
+    ApiManifest {
         service: "aegis",
         version: env!("CARGO_PKG_VERSION"),
         protocol_version: PROTOCOL_VERSION,
@@ -1645,206 +1689,611 @@ async fn api_manifest(State(root): State<ServeRootState>) -> Json<ApiManifest> {
                 method: "GET",
                 path: "/",
                 summary: "JSON API discovery document",
+                params: vec![],
+                query: vec![],
+                request_body: None,
+                responses: vec![json_response(
+                    200,
+                    "Machine-readable API manifest",
+                    "ApiManifest",
+                )],
             },
             ApiRouteDoc {
                 method: "GET",
                 path: "/manifest",
                 summary: "JSON API discovery document",
+                params: vec![],
+                query: vec![],
+                request_body: None,
+                responses: vec![json_response(
+                    200,
+                    "Machine-readable API manifest",
+                    "ApiManifest",
+                )],
             },
             ApiRouteDoc {
                 method: "GET",
                 path: "/version",
                 summary: "Version and protocol metadata",
+                params: vec![],
+                query: vec![],
+                request_body: None,
+                responses: vec![json_response(200, "Version metadata", "ApiVersion")],
             },
             ApiRouteDoc {
                 method: "GET",
                 path: "/contexts",
                 summary: "List all named browser contexts",
+                params: vec![],
+                query: vec![],
+                request_body: None,
+                responses: vec![json_response(200, "Context list", "ContextSummary[]")],
             },
             ApiRouteDoc {
                 method: "POST",
                 path: "/contexts",
                 summary: "Create a new isolated browser context",
+                params: vec![],
+                query: vec![],
+                request_body: Some(json_request("CreateContextBody")),
+                responses: vec![
+                    json_response(201, "Created context summary", "ContextSummary"),
+                    json_response(400, "Invalid create-context request", "ApiErrorBody"),
+                ],
             },
             ApiRouteDoc {
                 method: "GET",
                 path: "/contexts/{context_id}",
                 summary: "Read one browser context summary",
+                params: vec![path_param(
+                    "context_id",
+                    "string",
+                    "Named browser context id",
+                )],
+                query: vec![],
+                request_body: None,
+                responses: vec![
+                    json_response(200, "Context summary", "ContextSummary"),
+                    json_response(404, "Context not found", "ApiErrorBody"),
+                ],
             },
             ApiRouteDoc {
                 method: "DELETE",
                 path: "/contexts/{context_id}",
                 summary: "Delete one non-default browser context",
+                params: vec![path_param(
+                    "context_id",
+                    "string",
+                    "Named browser context id",
+                )],
+                query: vec![],
+                request_body: None,
+                responses: vec![
+                    empty_response(204, "Context deleted"),
+                    json_response(400, "Default context cannot be deleted", "ApiErrorBody"),
+                    json_response(404, "Context not found", "ApiErrorBody"),
+                ],
             },
             ApiRouteDoc {
                 method: "GET",
                 path: "/contexts/{context_id}/healthz",
                 summary: "Context-scoped health",
+                params: vec![path_param(
+                    "context_id",
+                    "string",
+                    "Named browser context id",
+                )],
+                query: vec![],
+                request_body: None,
+                responses: vec![
+                    json_response(200, "Context health snapshot", "HealthResponse"),
+                    json_response(404, "Context not found", "ApiErrorBody"),
+                ],
             },
             ApiRouteDoc {
                 method: "GET",
                 path: "/contexts/{context_id}/readyz",
                 summary: "Context-scoped readiness",
+                params: vec![path_param(
+                    "context_id",
+                    "string",
+                    "Named browser context id",
+                )],
+                query: vec![],
+                request_body: None,
+                responses: vec![
+                    json_response(
+                        200,
+                        "Context readiness snapshot",
+                        "RuntimeDiagnosticsResponse",
+                    ),
+                    json_response(503, "Context is not ready", "ApiErrorBody"),
+                ],
             },
             ApiRouteDoc {
                 method: "GET",
                 path: "/contexts/{context_id}/doctor",
                 summary: "Context-scoped diagnostics",
+                params: vec![path_param(
+                    "context_id",
+                    "string",
+                    "Named browser context id",
+                )],
+                query: vec![],
+                request_body: None,
+                responses: vec![json_response(
+                    200,
+                    "Context diagnostics",
+                    "RuntimeDiagnosticsResponse",
+                )],
             },
             ApiRouteDoc {
                 method: "GET",
                 path: "/contexts/{context_id}/runtime",
                 summary: "Context runtime config and live state",
+                params: vec![path_param(
+                    "context_id",
+                    "string",
+                    "Named browser context id",
+                )],
+                query: vec![],
+                request_body: None,
+                responses: vec![json_response(
+                    200,
+                    "Context runtime metadata",
+                    "RuntimeInfo",
+                )],
             },
             ApiRouteDoc {
                 method: "POST",
                 path: "/contexts/{context_id}/runtime/cancel",
                 summary: "Cancel the active operation in one context",
+                params: vec![path_param(
+                    "context_id",
+                    "string",
+                    "Named browser context id",
+                )],
+                query: vec![],
+                request_body: None,
+                responses: vec![json_response(
+                    200,
+                    "Context diagnostics after cancellation request",
+                    "RuntimeDiagnosticsResponse",
+                )],
             },
             ApiRouteDoc {
                 method: "POST",
                 path: "/contexts/{context_id}/browsers/{browser_id}/activate",
                 summary: "Activate one attached browser inside a context",
+                params: vec![
+                    path_param("context_id", "string", "Named browser context id"),
+                    path_param("browser_id", "i32", "Attached browser id to activate"),
+                ],
+                query: vec![],
+                request_body: None,
+                responses: vec![
+                    json_response(
+                        200,
+                        "Context diagnostics after activating a browser",
+                        "RuntimeDiagnosticsResponse",
+                    ),
+                    json_response(404, "Context not found", "ApiErrorBody"),
+                    json_response(
+                        502,
+                        "Activation failed in the native bridge",
+                        "ApiErrorBody",
+                    ),
+                ],
             },
             ApiRouteDoc {
                 method: "GET",
                 path: "/contexts/{context_id}/session",
                 summary: "Snapshot one context session",
+                params: vec![path_param(
+                    "context_id",
+                    "string",
+                    "Named browser context id",
+                )],
+                query: vec![],
+                request_body: None,
+                responses: vec![json_response(
+                    200,
+                    "Serialized session state",
+                    "SessionState",
+                )],
             },
             ApiRouteDoc {
                 method: "POST",
                 path: "/contexts/{context_id}/session",
                 summary: "Inject session state into one context",
+                params: vec![path_param(
+                    "context_id",
+                    "string",
+                    "Named browser context id",
+                )],
+                query: vec![],
+                request_body: Some(json_request("SessionState")),
+                responses: vec![
+                    empty_response(204, "Session injected"),
+                    json_response(400, "Session payload is invalid", "ApiErrorBody"),
+                ],
             },
             ApiRouteDoc {
                 method: "POST",
                 path: "/contexts/{context_id}/session/save",
                 summary: "Persist one context profile session",
+                params: vec![path_param(
+                    "context_id",
+                    "string",
+                    "Named browser context id",
+                )],
+                query: vec![],
+                request_body: None,
+                responses: vec![json_response(
+                    200,
+                    "Saved session profile metadata",
+                    "SessionProfileInfo",
+                )],
             },
             ApiRouteDoc {
                 method: "POST",
                 path: "/contexts/{context_id}/session/load",
                 summary: "Load one context profile session",
+                params: vec![path_param(
+                    "context_id",
+                    "string",
+                    "Named browser context id",
+                )],
+                query: vec![],
+                request_body: None,
+                responses: vec![json_response(
+                    200,
+                    "Loaded session profile metadata",
+                    "SessionProfileInfo",
+                )],
             },
             ApiRouteDoc {
                 method: "POST",
                 path: "/contexts/{context_id}/navigate",
                 summary: "Navigate one context",
+                params: vec![path_param(
+                    "context_id",
+                    "string",
+                    "Named browser context id",
+                )],
+                query: vec![],
+                request_body: Some(json_request("NavigateBody")),
+                responses: vec![
+                    json_response(200, "Emitted navigation events", "SequencedEvent[]"),
+                    json_response(400, "Invalid navigation request", "ApiErrorBody"),
+                ],
             },
             ApiRouteDoc {
                 method: "POST",
                 path: "/contexts/{context_id}/execute",
                 summary: "Execute commands in one context",
+                params: vec![path_param(
+                    "context_id",
+                    "string",
+                    "Named browser context id",
+                )],
+                query: vec![],
+                request_body: Some(json_request("ExecuteBody")),
+                responses: vec![
+                    json_response(200, "Execution report", "ExecutionReport"),
+                    json_response(400, "Invalid command batch", "ApiErrorBody"),
+                    json_response(502, "Runtime command execution failed", "ApiErrorBody"),
+                ],
             },
             ApiRouteDoc {
                 method: "GET",
                 path: "/contexts/{context_id}/dom",
                 summary: "Fetch one context DOM snapshot",
+                params: vec![path_param(
+                    "context_id",
+                    "string",
+                    "Named browser context id",
+                )],
+                query: vec![],
+                request_body: None,
+                responses: vec![json_response(200, "DOM snapshot", "DomSnapshot")],
             },
             ApiRouteDoc {
                 method: "GET",
                 path: "/contexts/{context_id}/events",
                 summary: "Read buffered events for one context",
+                params: vec![path_param(
+                    "context_id",
+                    "string",
+                    "Named browser context id",
+                )],
+                query: event_query_schema(),
+                request_body: None,
+                responses: vec![
+                    json_response(200, "Buffered event window", "EventReadWindow"),
+                    json_response(400, "Invalid event filter query", "ApiErrorBody"),
+                ],
             },
             ApiRouteDoc {
                 method: "GET",
                 path: "/contexts/{context_id}/downloads",
                 summary: "List browser-triggered downloads for one context",
+                params: vec![path_param(
+                    "context_id",
+                    "string",
+                    "Named browser context id",
+                )],
+                query: vec![],
+                request_body: None,
+                responses: vec![json_response(
+                    200,
+                    "Download state list",
+                    "DownloadsResponse",
+                )],
             },
             ApiRouteDoc {
                 method: "GET",
                 path: "/contexts/{context_id}/events/live",
                 summary: "Stream events for one context over SSE",
+                params: vec![path_param(
+                    "context_id",
+                    "string",
+                    "Named browser context id",
+                )],
+                query: event_stream_query_schema(),
+                request_body: None,
+                responses: vec![
+                    sse_response(
+                        200,
+                        "Server-sent event stream carrying EventReadWindow payloads",
+                    ),
+                    json_response(400, "Invalid event stream query", "ApiErrorBody"),
+                ],
             },
             ApiRouteDoc {
                 method: "POST",
                 path: "/contexts/{context_id}/trace/enable",
                 summary: "Enable trace recording for one context",
+                params: vec![path_param(
+                    "context_id",
+                    "string",
+                    "Named browser context id",
+                )],
+                query: vec![],
+                request_body: Some(json_request("TraceBody")),
+                responses: vec![
+                    empty_response(204, "Trace recording enabled"),
+                    json_response(400, "Invalid trace path request", "ApiErrorBody"),
+                ],
             },
             ApiRouteDoc {
                 method: "GET",
                 path: "/healthz",
                 summary: "Control-plane and runtime health",
+                params: vec![],
+                query: vec![],
+                request_body: None,
+                responses: vec![json_response(
+                    200,
+                    "Runtime health snapshot",
+                    "HealthResponse",
+                )],
             },
             ApiRouteDoc {
                 method: "GET",
                 path: "/readyz",
                 summary: "Command readiness gate",
+                params: vec![],
+                query: vec![],
+                request_body: None,
+                responses: vec![
+                    json_response(
+                        200,
+                        "Runtime readiness snapshot",
+                        "RuntimeDiagnosticsResponse",
+                    ),
+                    json_response(503, "Runtime is not ready", "ApiErrorBody"),
+                ],
             },
             ApiRouteDoc {
                 method: "GET",
                 path: "/doctor",
                 summary: "Detailed runtime diagnostics",
+                params: vec![],
+                query: vec![],
+                request_body: None,
+                responses: vec![json_response(
+                    200,
+                    "Detailed runtime diagnostics",
+                    "RuntimeDiagnosticsResponse",
+                )],
             },
             ApiRouteDoc {
                 method: "GET",
                 path: "/runtime",
                 summary: "Runtime config and live state",
+                params: vec![],
+                query: vec![],
+                request_body: None,
+                responses: vec![json_response(
+                    200,
+                    "Runtime metadata and diagnostics",
+                    "RuntimeInfo",
+                )],
             },
             ApiRouteDoc {
                 method: "POST",
                 path: "/runtime/cancel",
                 summary: "Cancel the active runtime operation",
+                params: vec![],
+                query: vec![],
+                request_body: None,
+                responses: vec![json_response(
+                    200,
+                    "Runtime diagnostics after cancellation request",
+                    "RuntimeDiagnosticsResponse",
+                )],
             },
             ApiRouteDoc {
                 method: "POST",
                 path: "/browsers/{browser_id}/activate",
                 summary: "Activate one attached browser in the default context",
+                params: vec![path_param(
+                    "browser_id",
+                    "i32",
+                    "Attached browser id to activate",
+                )],
+                query: vec![],
+                request_body: None,
+                responses: vec![
+                    json_response(
+                        200,
+                        "Runtime diagnostics after activating a browser",
+                        "RuntimeDiagnosticsResponse",
+                    ),
+                    json_response(
+                        502,
+                        "Activation failed in the native bridge",
+                        "ApiErrorBody",
+                    ),
+                ],
             },
             ApiRouteDoc {
                 method: "POST",
                 path: "/navigate",
                 summary: "Navigate the active browser page",
+                params: vec![],
+                query: vec![],
+                request_body: Some(json_request("NavigateBody")),
+                responses: vec![
+                    json_response(200, "Emitted navigation events", "SequencedEvent[]"),
+                    json_response(400, "Invalid navigation request", "ApiErrorBody"),
+                ],
             },
             ApiRouteDoc {
                 method: "POST",
                 path: "/execute",
                 summary: "Execute a command batch including file upload and media diagnostics",
+                params: vec![],
+                query: vec![],
+                request_body: Some(json_request("ExecuteBody")),
+                responses: vec![
+                    json_response(200, "Execution report", "ExecutionReport"),
+                    json_response(400, "Invalid command batch", "ApiErrorBody"),
+                    json_response(502, "Runtime command execution failed", "ApiErrorBody"),
+                ],
             },
             ApiRouteDoc {
                 method: "GET",
                 path: "/dom",
                 summary: "Fetch a fresh DOM snapshot",
+                params: vec![],
+                query: vec![],
+                request_body: None,
+                responses: vec![json_response(200, "DOM snapshot", "DomSnapshot")],
             },
             ApiRouteDoc {
                 method: "GET",
                 path: "/events",
                 summary: "Read buffered runtime events",
+                params: vec![],
+                query: event_query_schema(),
+                request_body: None,
+                responses: vec![
+                    json_response(200, "Buffered event window", "EventReadWindow"),
+                    json_response(400, "Invalid event filter query", "ApiErrorBody"),
+                ],
             },
             ApiRouteDoc {
                 method: "GET",
                 path: "/downloads",
                 summary: "List browser-triggered downloads for the active context",
+                params: vec![],
+                query: vec![],
+                request_body: None,
+                responses: vec![json_response(
+                    200,
+                    "Download state list",
+                    "DownloadsResponse",
+                )],
             },
             ApiRouteDoc {
                 method: "GET",
                 path: "/events/live",
                 summary: "Stream runtime events over SSE",
+                params: vec![],
+                query: event_stream_query_schema(),
+                request_body: None,
+                responses: vec![
+                    sse_response(
+                        200,
+                        "Server-sent event stream carrying EventReadWindow payloads",
+                    ),
+                    json_response(400, "Invalid event stream query", "ApiErrorBody"),
+                ],
             },
             ApiRouteDoc {
                 method: "GET",
                 path: "/session",
                 summary: "Snapshot the active session",
+                params: vec![],
+                query: vec![],
+                request_body: None,
+                responses: vec![json_response(
+                    200,
+                    "Serialized session state",
+                    "SessionState",
+                )],
             },
             ApiRouteDoc {
                 method: "POST",
                 path: "/session",
                 summary: "Inject session state",
+                params: vec![],
+                query: vec![],
+                request_body: Some(json_request("SessionState")),
+                responses: vec![
+                    empty_response(204, "Session injected"),
+                    json_response(400, "Session payload is invalid", "ApiErrorBody"),
+                ],
             },
             ApiRouteDoc {
                 method: "POST",
                 path: "/session/save",
                 summary: "Persist the active profile session",
+                params: vec![],
+                query: vec![],
+                request_body: None,
+                responses: vec![json_response(
+                    200,
+                    "Saved session profile metadata",
+                    "SessionProfileInfo",
+                )],
             },
             ApiRouteDoc {
                 method: "POST",
                 path: "/session/load",
                 summary: "Load the active profile session",
+                params: vec![],
+                query: vec![],
+                request_body: None,
+                responses: vec![json_response(
+                    200,
+                    "Loaded session profile metadata",
+                    "SessionProfileInfo",
+                )],
             },
             ApiRouteDoc {
                 method: "POST",
                 path: "/trace/enable",
                 summary: "Enable trace recording",
+                params: vec![],
+                query: vec![],
+                request_body: Some(json_request("TraceBody")),
+                responses: vec![
+                    empty_response(204, "Trace recording enabled"),
+                    json_response(400, "Invalid trace path request", "ApiErrorBody"),
+                ],
             },
         ],
         capabilities: vec![
@@ -1858,6 +2307,19 @@ async fn api_manifest(State(root): State<ServeRootState>) -> Json<ApiManifest> {
             "named_multi_context_control_plane",
             "session_snapshotting",
             "trace_recording",
+        ],
+        event_filters: vec![
+            "dom_mutation",
+            "navigation",
+            "network",
+            "download",
+            "websocket",
+            "websocket_open",
+            "websocket_handshake",
+            "websocket_frame",
+            "websocket_close",
+            "log",
+            "unknown",
         ],
         capability_status: vec![
             ApiCapabilityStatusDoc {
@@ -2073,7 +2535,213 @@ async fn api_manifest(State(root): State<ServeRootState>) -> Json<ApiManifest> {
                 fields: vec![],
             },
         ],
-    })
+        schemas: vec![
+            ApiNamedSchemaDoc {
+                name: "NavigateBody",
+                kind: "object",
+                fields: vec![ApiSchemaFieldDoc {
+                    name: "url",
+                    kind: "string",
+                    required: true,
+                    description: "Absolute URL to load in the active browser",
+                }],
+            },
+            ApiNamedSchemaDoc {
+                name: "ExecuteBody",
+                kind: "object",
+                fields: vec![ApiSchemaFieldDoc {
+                    name: "commands",
+                    kind: "Command[]",
+                    required: true,
+                    description: "Command batch executed in-order against the active runtime",
+                }],
+            },
+            ApiNamedSchemaDoc {
+                name: "CreateContextBody",
+                kind: "object",
+                fields: vec![
+                    ApiSchemaFieldDoc {
+                        name: "id",
+                        kind: "string",
+                        required: false,
+                        description: "Explicit context id; defaults to a generated context-N name",
+                    },
+                    ApiSchemaFieldDoc {
+                        name: "profile",
+                        kind: "string",
+                        required: false,
+                        description: "Persistent session profile backing this context",
+                    },
+                    ApiSchemaFieldDoc {
+                        name: "seed_from_context",
+                        kind: "string",
+                        required: false,
+                        description: "Optional existing context id to clone session state from",
+                    },
+                    ApiSchemaFieldDoc {
+                        name: "mode",
+                        kind: "BrowserMode",
+                        required: false,
+                        description: "headless or headful browser mode override",
+                    },
+                    ApiSchemaFieldDoc {
+                        name: "start_url",
+                        kind: "string",
+                        required: false,
+                        description: "Initial page URL for the new context",
+                    },
+                    ApiSchemaFieldDoc {
+                        name: "download_dir",
+                        kind: "path",
+                        required: false,
+                        description: "Optional browser download directory override",
+                    },
+                    ApiSchemaFieldDoc {
+                        name: "upload_dir",
+                        kind: "path",
+                        required: false,
+                        description: "Optional browser upload staging directory override",
+                    },
+                ],
+            },
+            ApiNamedSchemaDoc {
+                name: "TraceBody",
+                kind: "object",
+                fields: vec![ApiSchemaFieldDoc {
+                    name: "path",
+                    kind: "path",
+                    required: true,
+                    description: "Destination trace file path on the local machine",
+                }],
+            },
+            ApiNamedSchemaDoc {
+                name: "EventReadWindow",
+                kind: "object",
+                fields: vec![
+                    ApiSchemaFieldDoc {
+                        name: "requested_since",
+                        kind: "u64",
+                        required: true,
+                        description: "Original caller-provided cursor sequence",
+                    },
+                    ApiSchemaFieldDoc {
+                        name: "oldest_available_sequence",
+                        kind: "u64|null",
+                        required: true,
+                        description: "Oldest retained event sequence still available in the runtime buffer",
+                    },
+                    ApiSchemaFieldDoc {
+                        name: "latest_sequence",
+                        kind: "u64",
+                        required: true,
+                        description: "Latest retained event sequence at read time",
+                    },
+                    ApiSchemaFieldDoc {
+                        name: "gap_detected",
+                        kind: "bool",
+                        required: true,
+                        description: "True when the requested sequence is older than the retained event window",
+                    },
+                    ApiSchemaFieldDoc {
+                        name: "events",
+                        kind: "SequencedEvent[]",
+                        required: true,
+                        description: "Buffered events newer than the requested cursor and matching any route filter",
+                    },
+                ],
+            },
+            ApiNamedSchemaDoc {
+                name: "SequencedEvent",
+                kind: "object",
+                fields: vec![
+                    ApiSchemaFieldDoc {
+                        name: "sequence",
+                        kind: "u64",
+                        required: true,
+                        description: "Monotonic runtime event cursor",
+                    },
+                    ApiSchemaFieldDoc {
+                        name: "timestamp_ms",
+                        kind: "u64",
+                        required: true,
+                        description: "Runtime-side event timestamp in milliseconds since the Unix epoch",
+                    },
+                    ApiSchemaFieldDoc {
+                        name: "event",
+                        kind: "RuntimeEvent",
+                        required: true,
+                        description: "Tagged event payload including navigation, network, websocket, download, log, or unknown events",
+                    },
+                ],
+            },
+        ],
+        error_schema: ApiNamedSchemaDoc {
+            name: "ApiErrorBody",
+            kind: "object",
+            fields: vec![
+                ApiSchemaFieldDoc {
+                    name: "request_id",
+                    kind: "string",
+                    required: true,
+                    description: "Server-generated correlation id for this failed request",
+                },
+                ApiSchemaFieldDoc {
+                    name: "error",
+                    kind: "string",
+                    required: true,
+                    description: "Operator-facing failure summary",
+                },
+                ApiSchemaFieldDoc {
+                    name: "code",
+                    kind: "string",
+                    required: true,
+                    description: "Stable machine-readable error code",
+                },
+                ApiSchemaFieldDoc {
+                    name: "operation",
+                    kind: "string|null",
+                    required: true,
+                    description: "Optional high-level runtime operation name associated with the failure",
+                },
+                ApiSchemaFieldDoc {
+                    name: "stage",
+                    kind: "string|null",
+                    required: true,
+                    description: "Optional internal stage where the failure occurred",
+                },
+                ApiSchemaFieldDoc {
+                    name: "elapsed_ms",
+                    kind: "u64|null",
+                    required: true,
+                    description: "Optional elapsed time for the failed operation",
+                },
+                ApiSchemaFieldDoc {
+                    name: "timed_out",
+                    kind: "bool",
+                    required: true,
+                    description: "True when the failure represents a timeout",
+                },
+                ApiSchemaFieldDoc {
+                    name: "restart_recommended",
+                    kind: "bool",
+                    required: true,
+                    description: "True when the runtime should be restarted before retrying",
+                },
+                ApiSchemaFieldDoc {
+                    name: "retriable",
+                    kind: "bool",
+                    required: true,
+                    description: "True when retrying the same request may succeed after recovery",
+                },
+                ApiSchemaFieldDoc {
+                    name: "suggested_action",
+                    kind: "string|null",
+                    required: true,
+                    description: "Operator guidance for the next recovery step",
+                },
+            ],
+        },
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -3275,6 +3943,94 @@ fn downloads_response(state: &ApiState) -> DownloadsResponse {
     }
 }
 
+fn path_param(
+    name: &'static str,
+    kind: &'static str,
+    description: &'static str,
+) -> ApiParameterDoc {
+    ApiParameterDoc {
+        name,
+        location: "path",
+        kind,
+        required: true,
+        description,
+    }
+}
+
+fn query_param(
+    name: &'static str,
+    kind: &'static str,
+    required: bool,
+    description: &'static str,
+) -> ApiParameterDoc {
+    ApiParameterDoc {
+        name,
+        location: "query",
+        kind,
+        required,
+        description,
+    }
+}
+
+fn json_request(schema: &'static str) -> ApiRequestBodyDoc {
+    ApiRequestBodyDoc {
+        content_type: "application/json",
+        schema,
+    }
+}
+
+fn json_response(status: u16, description: &'static str, schema: &'static str) -> ApiResponseDoc {
+    ApiResponseDoc {
+        status,
+        description,
+        schema,
+    }
+}
+
+fn empty_response(status: u16, description: &'static str) -> ApiResponseDoc {
+    ApiResponseDoc {
+        status,
+        description,
+        schema: "empty",
+    }
+}
+
+fn sse_response(status: u16, description: &'static str) -> ApiResponseDoc {
+    ApiResponseDoc {
+        status,
+        description,
+        schema: "text/event-stream<EventReadWindow>",
+    }
+}
+
+fn event_query_schema() -> Vec<ApiParameterDoc> {
+    vec![
+        query_param(
+            "since",
+            "u64",
+            false,
+            "Return only events with sequence greater than this cursor",
+        ),
+        query_param(
+            "type",
+            "string[]",
+            false,
+            "Repeated or comma-separated event filters such as network, websocket_frame, download, log, or unknown",
+        ),
+    ]
+}
+
+fn event_stream_query_schema() -> Vec<ApiParameterDoc> {
+    let mut params = event_query_schema();
+    params.push(query_param(
+        "poll_ms",
+        "u64",
+        false,
+        "Polling interval for the SSE bridge loop, clamped to the documented runtime bounds",
+    ));
+    params
+}
+
 fn default_runtime_status() -> RuntimeStatus {
     RuntimeStatus {
         bootstrapped: false,
@@ -3670,6 +4426,42 @@ mod tests {
         assert_eq!(
             error.body.suggested_action.as_deref(),
             Some("use a documented type query")
+        );
+    }
+
+    #[test]
+    fn manifest_exposes_machine_readable_route_and_error_schema_metadata() {
+        let manifest = api_manifest_document(true);
+        let events_route = manifest
+            .routes
+            .iter()
+            .find(|route| route.path == "/events/live")
+            .expect("events/live route should exist");
+
+        assert_eq!(events_route.method, "GET");
+        assert_eq!(
+            events_route
+                .query
+                .iter()
+                .find(|param| param.name == "type")
+                .map(|param| param.kind),
+            Some("string[]")
+        );
+        assert_eq!(
+            events_route
+                .responses
+                .first()
+                .map(|response| response.schema),
+            Some("text/event-stream<EventReadWindow>")
+        );
+        assert!(manifest.event_filters.contains(&"websocket_frame"));
+        assert_eq!(manifest.error_schema.name, "ApiErrorBody");
+        assert!(
+            manifest
+                .error_schema
+                .fields
+                .iter()
+                .any(|field| field.name == "request_id")
         );
     }
 
