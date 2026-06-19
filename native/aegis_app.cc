@@ -3,8 +3,10 @@
 #include <cctype>
 #include <cstdlib>
 #include <fstream>
+#include <sstream>
 #include <string>
 
+#include "aegis_bootstrap.h"
 #include "aegis_client.h"
 #include "aegis_messages.h"
 #include "aegis_state_paths.h"
@@ -17,12 +19,12 @@
 #include "include/cef_parser.h"
 #include "include/cef_preference.h"
 #include "include/cef_process_message.h"
+#include "include/cef_resource_handler.h"
 #include "include/cef_v8.h"
+#include "include/wrapper/cef_stream_resource_handler.h"
 #include "include/wrapper/cef_helpers.h"
 
 namespace {
-
-constexpr char kBootstrapUrl[] = "data:text/html,";
 
 void AppendDebugLog(const std::string& message) {
   std::string path;
@@ -149,6 +151,60 @@ std::string QuoteForJson(const std::string& input) {
   }
   out.push_back('"');
   return out;
+}
+
+const std::string& BootstrapPageHtml() {
+  static const std::string html = [] {
+    std::ostringstream builder;
+    builder << "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+            << "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+            << "<title>Aegis Bootstrap</title>"
+            << "<style>"
+            << ":root{color-scheme:light;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;}"
+            << "body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;"
+            << "background:linear-gradient(180deg,#f6f8fb 0%,#e8eef8 100%);color:#162033;}"
+            << ".card{max-width:640px;margin:32px;padding:28px 32px;border-radius:20px;"
+            << "background:rgba(255,255,255,0.9);box-shadow:0 24px 80px rgba(22,32,51,0.16);}"
+            << "h1{margin:0 0 12px;font-size:28px;line-height:1.15;}"
+            << "p{margin:0 0 12px;font-size:15px;line-height:1.6;}"
+            << "code{padding:2px 6px;border-radius:999px;background:#eef3fb;font-size:13px;}"
+            << "</style></head><body><main class=\"card\"><h1>Aegis is ready</h1>"
+            << "<p>This browser is attached and waiting for a real navigation target.</p>"
+            << "<p>The synthetic bootstrap page lives at <code>"
+            << aegis::kBootstrapUrl
+            << "</code> so startup stays stable without exposing a raw <code>data:</code> URL.</p>"
+            << "<p>Navigate to your app or call <code>/navigate</code> to begin automation.</p>"
+            << "</main></body></html>";
+    return builder.str();
+  }();
+  return html;
+}
+
+class BootstrapSchemeHandlerFactory : public CefSchemeHandlerFactory {
+ public:
+  CefRefPtr<CefResourceHandler> Create(CefRefPtr<CefBrowser>,
+                                       CefRefPtr<CefFrame>,
+                                       const CefString&,
+                                       CefRefPtr<CefRequest>) override {
+    const auto& html = BootstrapPageHtml();
+    return new CefStreamResourceHandler(
+        "text/html",
+        CefStreamReader::CreateForData(
+            const_cast<char*>(html.data()), html.size()));
+  }
+
+  IMPLEMENT_REFCOUNTING(BootstrapSchemeHandlerFactory);
+};
+
+bool RegisterBootstrapHandlerForRequestContext(
+    CefRefPtr<CefRequestContext> request_context) {
+  if (!request_context.get()) {
+    return false;
+  }
+  return request_context->RegisterSchemeHandlerFactory(
+      std::string(aegis::kBootstrapScheme),
+      std::string(aegis::kBootstrapDomain),
+      new BootstrapSchemeHandlerFactory());
 }
 
 bool CommandTargetArgument(CefRefPtr<CefDictionaryValue> command,
@@ -680,7 +736,8 @@ bool DispatchRendererOperation(const std::string& op,
 AegisApp::AegisApp(bool launch_browser_on_context_initialized,
                    std::string startup_url)
     : launch_browser_on_context_initialized_(launch_browser_on_context_initialized),
-      startup_url_(startup_url.empty() ? kBootstrapUrl : std::move(startup_url)),
+      startup_url_(startup_url.empty() ? std::string(aegis::kBootstrapUrl)
+                                       : std::move(startup_url)),
       pending_startup_url_(startup_url_) {
 #if defined(AEGIS_STANDALONE_APP)
   runtime_session_paths_ = AegisCreateRuntimeSessionPaths("app");
@@ -779,6 +836,10 @@ void AegisApp::CreateHeadfulBrowser(const std::string& url) {
     AppendDebugLog("app: failed to create request context");
     return;
   }
+  const bool bootstrap_registered =
+      RegisterBootstrapHandlerForRequestContext(request_context_);
+  AppendDebugLog(std::string("app: request_context bootstrap_handler_registered=") +
+                 (bootstrap_registered ? "true" : "false"));
   ApplyAegisProductionPreferences(request_context_);
 
   CefBrowserSettings settings;
@@ -814,6 +875,12 @@ void AegisApp::CreateHeadfulBrowser(const std::string& url) {
 void AegisApp::OnContextInitialized() {
   CEF_REQUIRE_UI_THREAD();
   AppendDebugLog("app: on_context_initialized");
+  const bool registered = CefRegisterSchemeHandlerFactory(
+      std::string(aegis::kBootstrapScheme),
+      std::string(aegis::kBootstrapDomain),
+      new BootstrapSchemeHandlerFactory());
+  AppendDebugLog(std::string("app: bootstrap_scheme_factory_registered=") +
+                 (registered ? "true" : "false"));
   ApplyAegisProductionPreferences(CefPreferenceManager::GetGlobalPreferenceManager());
   if (!launch_browser_on_context_initialized_) {
     return;
@@ -839,6 +906,10 @@ void AegisApp::OnContextInitialized() {
       AppendDebugLog("app: failed to create headless request context");
       return;
     }
+    const bool bootstrap_registered =
+        RegisterBootstrapHandlerForRequestContext(request_context_);
+    AppendDebugLog(std::string("app: headless request_context bootstrap_handler_registered=") +
+                   (bootstrap_registered ? "true" : "false"));
     ApplyAegisProductionPreferences(request_context_);
     CefWindowInfo window_info;
     window_info.SetAsWindowless(kNullWindowHandle);

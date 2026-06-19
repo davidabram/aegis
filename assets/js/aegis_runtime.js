@@ -138,7 +138,9 @@
     const root = rootCandidate();
     const body = document.body || null;
     const pageUrl = window.location ? window.location.href : "";
-    const syntheticShellActive = pageUrl === "data:text/html," || pageUrl.startsWith("data:text/html,");
+    const syntheticShellActive = pageUrl === "https://bootstrap.aegis/"
+      || pageUrl === "aegis://bootstrap/"
+      || pageUrl === "data:text/html,";
     const bodyText = normalizeText(body && (body.innerText || body.textContent || ""));
     const rootText = normalizeText(root && (root.innerText || root.textContent || ""));
     const rootHtml = root && typeof root.innerHTML === "string" ? root.innerHTML.trim() : "";
@@ -152,6 +154,7 @@
     const document_loaded = documentLoaded();
     const app_dom_mutated_after_load = pageBootstrapState.dom_mutation_after_load_count > 0;
     const inspectable_dom_ready = !!(
+      !syntheticShellActive &&
       document_loaded && (
         bodyText.length > 0
         || bodyDescendantCount > 3

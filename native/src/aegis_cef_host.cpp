@@ -29,6 +29,7 @@
 #include <vector>
 
 #include "../aegis_app.h"
+#include "../aegis_bootstrap.h"
 #include "../aegis_client.h"
 #include "../aegis_messages.h"
 #include "../aegis_state_paths.h"
@@ -40,12 +41,14 @@
 #include "include/cef_parser.h"
 #include "include/cef_preference.h"
 #include "include/cef_request_context.h"
+#include "include/cef_resource_handler.h"
 #include "include/cef_waitable_event.h"
 #include "include/views/cef_browser_view.h"
 #include "include/views/cef_window.h"
 #include "include/wrapper/cef_closure_task.h"
 #include "include/wrapper/cef_helpers.h"
 #include "include/wrapper/cef_library_loader.h"
+#include "include/wrapper/cef_stream_resource_handler.h"
 
 namespace aegis {
 namespace {
@@ -58,9 +61,50 @@ constexpr auto kStartupTimeout = std::chrono::seconds(30);
 constexpr auto kRendererTimeout = std::chrono::seconds(30);
 constexpr auto kShutdownTimeout = std::chrono::seconds(2);
 constexpr auto kPumpInterval = std::chrono::milliseconds(10);
-constexpr char kBootstrapUrl[] = "data:text/html,";
-
 void AppendDebugLog(const std::string& message);
+
+const std::string& BootstrapPageHtml() {
+  static const std::string html = [] {
+    std::ostringstream builder;
+    builder << "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+            << "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+            << "<title>Aegis Bootstrap</title>"
+            << "<style>"
+            << ":root{color-scheme:light;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;}"
+            << "body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;"
+            << "background:linear-gradient(180deg,#f6f8fb 0%,#e8eef8 100%);color:#162033;}"
+            << ".card{max-width:640px;margin:32px;padding:28px 32px;border-radius:20px;"
+            << "background:rgba(255,255,255,0.9);box-shadow:0 24px 80px rgba(22,32,51,0.16);}"
+            << "h1{margin:0 0 12px;font-size:28px;line-height:1.15;}"
+            << "p{margin:0 0 12px;font-size:15px;line-height:1.6;}"
+            << "code{padding:2px 6px;border-radius:999px;background:#eef3fb;font-size:13px;}"
+            << "</style></head><body><main class=\"card\"><h1>Aegis is ready</h1>"
+            << "<p>This browser is attached and waiting for a real navigation target.</p>"
+            << "<p>The synthetic bootstrap page lives at <code>"
+            << aegis::kBootstrapUrl
+            << "</code> so startup stays stable without exposing a raw <code>data:</code> URL.</p>"
+            << "<p>Navigate to your app or call <code>/navigate</code> to begin automation.</p>"
+            << "</main></body></html>";
+    return builder.str();
+  }();
+  return html;
+}
+
+class BootstrapSchemeHandlerFactory : public CefSchemeHandlerFactory {
+ public:
+  CefRefPtr<CefResourceHandler> Create(CefRefPtr<CefBrowser>,
+                                       CefRefPtr<CefFrame>,
+                                       const CefString&,
+                                       CefRefPtr<CefRequest>) override {
+    const auto& html = BootstrapPageHtml();
+    return new CefStreamResourceHandler(
+        "text/html",
+        CefStreamReader::CreateForData(
+            const_cast<char*>(html.data()), html.size()));
+  }
+
+  IMPLEMENT_REFCOUNTING(BootstrapSchemeHandlerFactory);
+};
 
 std::string ThreadLabel() {
   std::ostringstream output;
@@ -574,7 +618,7 @@ HostPaths ResolveHostPaths() {
 
 struct BrowserOptions {
   bool headless = true;
-  std::string start_url = kBootstrapUrl;
+  std::string start_url = std::string(aegis::kBootstrapUrl);
   std::string download_dir;
 };
 
@@ -2440,7 +2484,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
 
       client_ = new AegisHostClient(options_.headless,
                                     static_cast<::AegisClientDelegate*>(this), this);
-      const auto initial_url = options_.start_url.empty() ? std::string(kBootstrapUrl)
+      const auto initial_url = options_.start_url.empty() ? std::string(aegis::kBootstrapUrl)
                                                           : options_.start_url;
 
       if (options_.headless) {
@@ -2449,6 +2493,12 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
         if (!request_context_.get()) {
           throw std::runtime_error("failed to create request context");
         }
+        const bool bootstrap_registered = request_context_->RegisterSchemeHandlerFactory(
+            std::string(aegis::kBootstrapScheme),
+            std::string(aegis::kBootstrapDomain),
+            new BootstrapSchemeHandlerFactory());
+        AppendDebugLog(std::string("host: headless request_context bootstrap_handler_registered=") +
+                       (bootstrap_registered ? "true" : "false"));
         ApplyAegisProductionPreferences(request_context_, download_dir_.string());
         CefWindowInfo window_info;
         window_info.SetAsWindowless(kNullWindowHandle);
@@ -2482,6 +2532,12 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       if (!request_context_.get()) {
         throw std::runtime_error("failed to create request context");
       }
+      const bool bootstrap_registered = request_context_->RegisterSchemeHandlerFactory(
+          std::string(aegis::kBootstrapScheme),
+          std::string(aegis::kBootstrapDomain),
+          new BootstrapSchemeHandlerFactory());
+      AppendDebugLog(std::string("host: headful request_context bootstrap_handler_registered=") +
+                     (bootstrap_registered ? "true" : "false"));
       ApplyAegisProductionPreferences(request_context_, download_dir_.string());
       CefWindowInfo window_info;
       if (AegisUseExternalBrowserHostWindow()) {
@@ -2688,7 +2744,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       const auto scheme = UrlScheme(primary_context_.current_url);
       if (!primary_context_.pending_storage_injection_payload.has_value() || !browser_.get() ||
           !primary_context_.renderer_ready || !primary_context_.runtime_ready ||
-          !scheme.has_value() || *scheme == "data" ||
+          !scheme.has_value() || aegis::IsBootstrapUrl(primary_context_.current_url) ||
           primary_context_.current_url == "about:blank") {
         return false;
       }
