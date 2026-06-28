@@ -933,13 +933,9 @@ pub async fn serve(
     browser_config: BrowserConfig,
     profile_name: String,
 ) -> Result<(), AegisError> {
-    let _ = (addr, host_library, browser_config, profile_name);
-    Err(AegisError::Bridge(
-        "non-macOS serve bootstrap must be reworked to the new coordinator model".into(),
-    ))
+    serve_main_thread(addr, host_library, browser_config, profile_name)
 }
 
-#[cfg(target_os = "macos")]
 pub fn serve_main_thread(
     addr: SocketAddr,
     host_library: PathBuf,

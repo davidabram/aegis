@@ -31,6 +31,12 @@ set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CEF_ROOT}/cmake")
 find_package(CEF REQUIRED)
 add_subdirectory(${CEF_LIBCEF_DLL_WRAPPER_PATH} libcef_dll_wrapper)
 
+if(AEGIS_TARGET_PLATFORM STREQUAL "linux")
+  set(AEGIS_CEF_RUNTIME_LIBRARY "${CEF_LIB_RELEASE}")
+else()
+  set(AEGIS_CEF_RUNTIME_LIBRARY "")
+endif()
+
 set(AEGIS_NATIVE_TARGET "aegis_native")
 set(AEGIS_HOST_LIBRARY_TARGET "aegis_host")
 set(AEGIS_SHARED_SUPPORT_TARGET "aegis_shared_support")
@@ -169,11 +175,13 @@ add_dependencies(${AEGIS_NATIVE_TARGET} aegis_runtime_header)
 aegis_target_includes(${AEGIS_NATIVE_TARGET})
 target_compile_options(${AEGIS_NATIVE_TARGET} PRIVATE -fexceptions)
 target_compile_definitions(${AEGIS_NATIVE_TARGET} PRIVATE AEGIS_STANDALONE_APP=1)
-target_link_libraries(${AEGIS_NATIVE_TARGET} PRIVATE libcef_dll_wrapper ${CEF_STANDARD_LIBS})
+target_link_libraries(${AEGIS_NATIVE_TARGET} PRIVATE libcef_dll_wrapper ${AEGIS_CEF_RUNTIME_LIBRARY} ${CEF_STANDARD_LIBS})
 aegis_target_output_dirs(${AEGIS_NATIVE_TARGET})
 aegis_set_linux_rpath(${AEGIS_NATIVE_TARGET} "$ORIGIN;$ORIGIN/../lib")
 if(AEGIS_TARGET_PLATFORM STREQUAL "macos")
   target_link_libraries(${AEGIS_NATIVE_TARGET} PRIVATE "-framework QuartzCore")
+elseif(AEGIS_TARGET_PLATFORM STREQUAL "linux")
+  target_link_options(${AEGIS_NATIVE_TARGET} PRIVATE "LINKER:--allow-shlib-undefined")
 endif()
 
 add_library(${AEGIS_SHARED_SUPPORT_TARGET} STATIC
@@ -188,6 +196,7 @@ aegis_target_includes(${AEGIS_SHARED_SUPPORT_TARGET})
 target_compile_features(${AEGIS_SHARED_SUPPORT_TARGET} PRIVATE cxx_std_20)
 target_link_libraries(${AEGIS_SHARED_SUPPORT_TARGET} PRIVATE
   libcef_dll_wrapper
+  ${AEGIS_CEF_RUNTIME_LIBRARY}
   ${CEF_STANDARD_LIBS}
 )
 if(AEGIS_TARGET_PLATFORM STREQUAL "macos")
@@ -200,6 +209,7 @@ target_compile_features(${AEGIS_HOST_LIBRARY_TARGET} PRIVATE cxx_std_20)
 target_link_libraries(${AEGIS_HOST_LIBRARY_TARGET} PRIVATE
   ${AEGIS_SHARED_SUPPORT_TARGET}
   libcef_dll_wrapper
+  ${AEGIS_CEF_RUNTIME_LIBRARY}
   ${CEF_STANDARD_LIBS}
 )
 set_target_properties(${AEGIS_HOST_LIBRARY_TARGET} PROPERTIES OUTPUT_NAME "aegis_host")
@@ -248,7 +258,8 @@ else()
   add_executable(${AEGIS_HELPER_TARGET} ${AEGIS_HELPER_SOURCES})
   add_dependencies(${AEGIS_HELPER_TARGET} aegis_runtime_header)
   aegis_target_includes(${AEGIS_HELPER_TARGET})
-  target_link_libraries(${AEGIS_HELPER_TARGET} PRIVATE libcef_dll_wrapper ${CEF_STANDARD_LIBS})
+  target_link_libraries(${AEGIS_HELPER_TARGET} PRIVATE libcef_dll_wrapper ${AEGIS_CEF_RUNTIME_LIBRARY} ${CEF_STANDARD_LIBS})
+  target_link_options(${AEGIS_HELPER_TARGET} PRIVATE "LINKER:--allow-shlib-undefined")
   aegis_target_output_dirs(${AEGIS_HELPER_TARGET})
   aegis_set_linux_rpath(${AEGIS_HELPER_TARGET} "$ORIGIN;$ORIGIN/../lib")
 endif()
@@ -288,32 +299,47 @@ elseif(AEGIS_TARGET_PLATFORM STREQUAL "linux")
   foreach(_runtime_file
       libcef.so
       chrome-sandbox
-      icudtl.dat
-      snapshot_blob.bin
+      libEGL.so
+      libGLESv2.so
+      libvk_swiftshader.so
+      libvulkan.so.1
       v8_context_snapshot.bin
-      vk_swiftshader_icd.json
-      chrome_100_percent.pak
-      chrome_200_percent.pak
-      resources.pak)
-    if(EXISTS "${CEF_ROOT}/Release/${_runtime_file}")
+      vk_swiftshader_icd.json)
+    if(EXISTS "${CEF_BINARY_DIR_RELEASE}/${_runtime_file}")
       add_custom_command(
         TARGET ${AEGIS_NATIVE_TARGET}
         POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${CEF_ROOT}/Release/${_runtime_file}"
+                "${CEF_BINARY_DIR_RELEASE}/${_runtime_file}"
                 "${CMAKE_BINARY_DIR}/release/${_runtime_file}"
         VERBATIM
       )
     endif()
   endforeach()
-  foreach(_runtime_dir locales swiftshader)
-    if(EXISTS "${CEF_ROOT}/Release/${_runtime_dir}")
+  foreach(_resource_file
+      icudtl.dat
+      chrome_100_percent.pak
+      chrome_200_percent.pak
+      resources.pak)
+    if(EXISTS "${CEF_RESOURCE_DIR}/${_resource_file}")
+      add_custom_command(
+        TARGET ${AEGIS_NATIVE_TARGET}
+        POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${CEF_RESOURCE_DIR}/${_resource_file}"
+                "${CMAKE_BINARY_DIR}/release/${_resource_file}"
+        VERBATIM
+      )
+    endif()
+  endforeach()
+  foreach(_resource_dir locales)
+    if(EXISTS "${CEF_RESOURCE_DIR}/${_resource_dir}")
       add_custom_command(
         TARGET ${AEGIS_NATIVE_TARGET}
         POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_directory
-                "${CEF_ROOT}/Release/${_runtime_dir}"
-                "${CMAKE_BINARY_DIR}/release/${_runtime_dir}"
+                "${CEF_RESOURCE_DIR}/${_resource_dir}"
+                "${CMAKE_BINARY_DIR}/release/${_resource_dir}"
         VERBATIM
       )
     endif()

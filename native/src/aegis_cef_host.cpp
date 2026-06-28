@@ -23,6 +23,9 @@
 #include <signal.h>
 #include <stdexcept>
 #include <string>
+#if !defined(__APPLE__)
+#include <sys/syscall.h>
+#endif
 #include <thread>
 #include <unistd.h>
 #include <utility>
@@ -47,7 +50,10 @@
 #include "include/views/cef_window.h"
 #include "include/wrapper/cef_closure_task.h"
 #include "include/wrapper/cef_helpers.h"
+#if __has_include("include/wrapper/cef_library_loader.h")
 #include "include/wrapper/cef_library_loader.h"
+#define AEGIS_HAS_CEF_LIBRARY_LOADER 1
+#endif
 #include "include/wrapper/cef_stream_resource_handler.h"
 
 namespace aegis {
@@ -106,10 +112,18 @@ class BootstrapSchemeHandlerFactory : public CefSchemeHandlerFactory {
   IMPLEMENT_REFCOUNTING(BootstrapSchemeHandlerFactory);
 };
 
+bool IsProcessMainThread() {
+#if defined(__APPLE__)
+  return pthread_main_np() != 0;
+#else
+  return getpid() == static_cast<pid_t>(syscall(SYS_gettid));
+#endif
+}
+
 std::string ThreadLabel() {
   std::ostringstream output;
   output << "thread=" << std::this_thread::get_id()
-         << " main=" << (pthread_main_np() != 0 ? "true" : "false");
+         << " main=" << (IsProcessMainThread() ? "true" : "false");
   if (CefCurrentlyOn(TID_UI)) {
     output << " cef_ui=true";
   }
@@ -1111,7 +1125,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
         owner_thread_id_(std::this_thread::get_id()),
         manage_cef_lifecycle_(manage_cef_lifecycle),
         counted_shared_lifecycle_(counted_shared_lifecycle) {
-    if (pthread_main_np() == 0) {
+    if (!IsProcessMainThread()) {
       throw std::runtime_error("aegis CEF host must be created on the process main thread");
     }
     std::error_code error;
@@ -2342,11 +2356,13 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       AegisPlatformInitializeMainApplication(true);
       AegisPlatformConfigureActivation(true, !options_.headless);
 
+#if defined(AEGIS_HAS_CEF_LIBRARY_LOADER)
       AppendDebugLog("host: cef_load_library begin");
       if (!cef_load_library(paths_.cef_library.string().c_str())) {
         throw std::runtime_error("failed to load Chromium Embedded Framework runtime");
       }
       AppendDebugLog("host: cef_load_library complete");
+#endif
 
       CefMainArgs main_args;
       AegisCefBootstrapOptions bootstrap_options;
@@ -2398,7 +2414,9 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
       AppendDebugLog(std::string("host: startup_error ") + error.what());
       if (cef_initialized_) {
         CefShutdown();
+#if defined(AEGIS_HAS_CEF_LIBRARY_LOADER)
         cef_unload_library();
+#endif
         cef_initialized_ = false;
       }
       AegisRemoveRuntimeSession(runtime_session_paths_);
@@ -2428,10 +2446,12 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
         PumpUntil([this]() { return primary_context_.browser_closed || browser_.get() == nullptr; }, deadline,
                   "timed out waiting for browser shutdown");
       }
-      if (shutdown_cef_runtime) {
-        CefShutdown();
-        cef_unload_library();
-      }
+        if (shutdown_cef_runtime) {
+          CefShutdown();
+#if defined(AEGIS_HAS_CEF_LIBRARY_LOADER)
+          cef_unload_library();
+#endif
+        }
       cef_initialized_ = false;
     } catch (...) {
       cef_initialized_ = false;
@@ -2550,7 +2570,7 @@ class AegisCefHost final : public CefHost, public ::AegisClientDelegate {
         window_info.hidden = false;
         CefString(&window_info.window_name) = "Aegis";
 #else
-        window_info.SetAsPopup(kNullWindowHandle, "Aegis");
+        window_info.SetAsChild(kNullWindowHandle, CefRect(0, 0, 1280, 800));
 #endif
       }
       window_info.runtime_style = CEF_RUNTIME_STYLE_ALLOY;

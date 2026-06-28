@@ -1,3 +1,6 @@
 .fozzy/
 target/
+native/build/
+result
+result-*
 fozzy-host-memory-fuzz.txt

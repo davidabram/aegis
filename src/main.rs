@@ -994,12 +994,22 @@ mod tests {
             .expect("home env lock should not poison");
         let temp = tempfile::tempdir().expect("temporary dir should be created");
         let home_dir = temp.path().join("home");
-        let installed_host = home_dir
-            .join("Applications")
-            .join("Aegis.app")
-            .join("Contents")
-            .join("Frameworks")
-            .join("libaegis_host.dylib");
+        let installed_host = if cfg!(target_os = "macos") {
+            home_dir
+                .join("Applications")
+                .join("Aegis.app")
+                .join("Contents")
+                .join("Frameworks")
+                .join("libaegis_host.dylib")
+        } else {
+            home_dir
+                .join(".local")
+                .join("share")
+                .join("aegis")
+                .join("Aegis")
+                .join("lib")
+                .join("libaegis_host.so")
+        };
         fs::create_dir_all(
             installed_host
                 .parent()

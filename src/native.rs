@@ -96,7 +96,7 @@ pub fn current_platform() -> NativePlatform {
 pub fn status(root: impl AsRef<Path>) -> NativeStatus {
     let root = root.as_ref();
     let platform = current_platform();
-    let cef_sdk_root = root.join(cef_sdk_dir(platform));
+    let cef_sdk_root = cef_sdk_root(root, platform);
     let build_dir = build_dir(root, platform);
     let configure_artifact = configure_artifact(root, platform);
     let default_app_dir = preferred_app_dir(root, platform);
@@ -457,10 +457,7 @@ fn configure_args(
         "-B".to_string(),
         path_str(build_dir)?.to_string(),
         format!("-DAEGIS_TARGET_PLATFORM={}", platform.as_str()),
-        format!(
-            "-DCEF_ROOT={}",
-            path_str(&root.join(cef_sdk_dir(platform)))?
-        ),
+        format!("-DCEF_ROOT={}", path_str(&cef_sdk_root(root, platform))?),
     ];
     if let Some(generator) = configure_generator(platform) {
         args.push("-G".to_string());
@@ -556,6 +553,13 @@ fn cef_sdk_dir(platform: NativePlatform) -> &'static str {
             "third_party/cef/cef_binary_146.0.6+g68649e2+chromium-146.0.7680.154_linux64"
         }
     }
+}
+
+fn cef_sdk_root(root: &Path, platform: NativePlatform) -> PathBuf {
+    std::env::var_os("AEGIS_CEF_ROOT")
+        .or_else(|| std::env::var_os("CEF_ROOT"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join(cef_sdk_dir(platform)))
 }
 
 fn preferred_app_dir(root: &Path, platform: NativePlatform) -> PathBuf {

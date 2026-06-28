@@ -3,7 +3,10 @@
 #include "include/aegis_platform.h"
 #include "include/base/cef_logging.h"
 #include "include/cef_browser.h"
+#if __has_include("include/wrapper/cef_library_loader.h")
 #include "include/wrapper/cef_library_loader.h"
+#define AEGIS_HAS_CEF_LIBRARY_LOADER 1
+#endif
 
 #include <cstdlib>
 #include <cstdio>
@@ -15,10 +18,12 @@
 namespace {
 
 int RunAegisMain(int argc, char* argv[]) {
+#if defined(AEGIS_HAS_CEF_LIBRARY_LOADER)
   CefScopedLibraryLoader loader;
   if (!loader.LoadInMain()) {
     return 1;
   }
+#endif
 
   CefMainArgs main_args(argc, argv);
 
